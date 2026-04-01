@@ -1,0 +1,26 @@
+[package]
+name = "praxis-tests-configuration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme = "../../README.md"
+publish = false
+
+[features]
+default = ["ai-inference"]
+ai-inference = ["praxis-filter/ai-inference"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-test-utils = { workspace = true }
+praxis-tls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }

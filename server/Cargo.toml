@@ -35,8 +35,7 @@ nix = { workspace = true }
 tikv-jemallocator = { workspace = true }
 
 [features]
-default = ["ai-agentic", "ai-inference"]
-ai-agentic = ["praxis-filter/ai-agentic"]
+default = ["ai-inference"]
 ai-inference = ["praxis-filter/ai-inference"]
 
 [dev-dependencies]
