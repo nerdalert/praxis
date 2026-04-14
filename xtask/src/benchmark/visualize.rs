@@ -166,6 +166,18 @@ const CHARTS: &[ChartDef] = &[
         y_label: "MB/s",
         extract: |m| m.throughput.bytes_per_sec / 1_000_000.0,
     },
+    ChartDef {
+        suffix: "cpu-avg",
+        title: "Average CPU Utilization (%)  \u{2193} lower is better",
+        y_label: "%",
+        extract: |m| m.resource.as_ref().map_or(0.0, |r| r.cpu_percent_avg),
+    },
+    ChartDef {
+        suffix: "memory-peak",
+        title: "Peak Memory RSS (MiB)  \u{2193} lower is better",
+        y_label: "MiB",
+        extract: |m| m.resource.as_ref().map_or(0.0, |r| r.memory_rss_bytes_peak as f64 / 1_048_576.0),
+    },
 ];
 
 /// Map a proxy name to its chart bar color.

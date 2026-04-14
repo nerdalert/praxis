@@ -25,5 +25,7 @@ pub mod result;
 pub mod runner;
 /// Scenario definition and configuration.
 pub mod scenario;
+/// Docker container resource metrics collection.
+pub mod stats;
 /// External load generator tool wrappers.
 pub mod tools;

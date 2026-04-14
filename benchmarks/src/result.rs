@@ -190,8 +190,7 @@ pub struct BenchmarkResult {
     /// Throughput metrics.
     pub throughput: ThroughputMetrics,
 
-    /// Resource utilization metrics
-    // TODO: populate via /proc or cgroup sampling
+    /// Resource utilization metrics (populated via `docker stats`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource: Option<ResourceMetrics>,
 

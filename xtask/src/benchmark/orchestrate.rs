@@ -17,7 +17,7 @@ pub(crate) async fn run_benchmarks(args: Args) {
     let proxy_names = resolve::resolve_proxy_names(&args.proxies);
     let workloads = resolve::resolve_workloads(&args);
     let scenarios = resolve::build_scenarios(&args, &workloads);
-    let praxis_image = resolve_praxis_image(&proxy_names, &args);
+    let praxis_image = resolve_praxis_image(&args);
 
     let all_results = run_all_scenarios(&proxy_names, &scenarios, &args, &praxis_image).await;
 
@@ -27,13 +27,15 @@ pub(crate) async fn run_benchmarks(args: Args) {
     println!("Report written to {output_path}");
 }
 
-/// Build a praxis image if running a multi-proxy comparison.
-fn resolve_praxis_image(proxy_names: &[String], args: &Args) -> Option<String> {
-    if proxy_names.len() > 1 && args.image.is_none() {
-        tracing::info!("comparison mode: building praxis docker image");
-        Some(proxy::build_praxis_image())
+/// Resolve the Praxis Docker image: use the override if provided,
+/// otherwise build from local source.
+fn resolve_praxis_image(args: &Args) -> String {
+    if let Some(image) = &args.image {
+        tracing::info!(image, "using provided praxis image");
+        image.clone()
     } else {
-        args.image.clone()
+        tracing::info!("building praxis docker image from source");
+        proxy::build_praxis_image()
     }
 }
 
@@ -42,11 +44,11 @@ async fn run_all_scenarios(
     proxy_names: &[String],
     scenarios: &[benchmarks::scenario::Scenario],
     args: &Args,
-    praxis_image: &Option<String>,
+    praxis_image: &str,
 ) -> Vec<ScenarioResults> {
     let mut all_results = Vec::new();
     for proxy_name in proxy_names {
-        let (proxy_cfg, _tmpdir) = proxy::build_proxy_config(proxy_name, args, praxis_image);
+        let proxy_cfg = proxy::build_proxy_config(proxy_name, args, praxis_image);
         for scenario in scenarios {
             let runner = Runner::new(scenario.clone()).with_raw_report(args.include_raw_report);
             tracing::info!(

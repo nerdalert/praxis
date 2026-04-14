@@ -18,6 +18,7 @@ use crate::{
     proxy::ProxyConfig,
     result::ScenarioResults,
     scenario::{Scenario, Workload},
+    stats::DockerStatsCollector,
     tools::{
         fortio::{self, FortioConfig, FortioProtocol},
         vegeta::{self, VegetaConfig},
@@ -107,7 +108,25 @@ impl Runner {
             self.run_load(proxy, self.scenario.warmup).await?;
         }
 
+        let mut collector = proxy.container_name().map(DockerStatsCollector::new);
+        if let Some(ref mut c) = collector {
+            info!(container = c.container_name(), "starting resource metrics collection");
+            c.start();
+        }
+
         let mut results = self.run_measurement_rounds(proxy).await?;
+
+        let resource = match collector {
+            Some(c) => c.stop().await,
+            None => None,
+        };
+        if resource.is_some() {
+            info!(scenario = %self.scenario.name, "attaching resource metrics to results");
+        }
+        for run in &mut results.runs {
+            run.resource = resource.clone();
+        }
+
         results.compute_median();
         info!(scenario = %self.scenario.name, "benchmark complete");
 
