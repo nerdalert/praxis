@@ -9,6 +9,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Enable verbose test output (V=1)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -18,6 +25,7 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  V: ${{ (inputs.debug || runner.debug) && '1' || '' }}
 
 jobs:
   # -----------------------------------------------------------------
