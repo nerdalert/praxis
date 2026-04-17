@@ -10,6 +10,7 @@ mod client_auth;
 mod config;
 mod error;
 pub mod setup;
+pub mod sni;
 
 pub use config::{CaConfig, CertKeyPair, ClientCertMode, ClusterTls, ListenerTls, TlsVersion};
 pub use error::TlsError;

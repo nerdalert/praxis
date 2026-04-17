@@ -150,10 +150,22 @@ fn register_http(
 
 /// Register all built-in TCP filter factories.
 fn register_tcp_builtins(factories: &mut HashMap<String, FilterFactory>) {
-    factories.insert(
-        "tcp_access_log".to_owned(),
-        tcp_builtin(crate::builtins::TcpAccessLogFilter::from_config),
+    register_tcp(factories, "sni_router", crate::builtins::SniRouterFilter::from_config);
+    register_tcp(
+        factories,
+        "tcp_access_log",
+        crate::builtins::TcpAccessLogFilter::from_config,
     );
+}
+
+/// Register a single TCP filter factory by name.
+#[allow(clippy::type_complexity, reason = "complex function pointer")]
+fn register_tcp(
+    factories: &mut HashMap<String, FilterFactory>,
+    name: &str,
+    factory_fn: fn(&serde_yaml::Value) -> Result<Box<dyn crate::tcp_filter::TcpFilter>, FilterError>,
+) {
+    factories.insert(name.to_owned(), tcp_builtin(factory_fn));
 }
 
 // -----------------------------------------------------------------------------
@@ -186,6 +198,7 @@ mod tests {
         assert!(names.contains(&"redirect"), "redirect should be registered");
         assert!(names.contains(&"request_id"), "request_id should be registered");
         assert!(names.contains(&"router"), "router should be registered");
+        assert!(names.contains(&"sni_router"), "sni_router should be registered");
         assert!(
             names.contains(&"static_response"),
             "static_response should be registered"

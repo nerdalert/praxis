@@ -43,8 +43,9 @@ calls each filter in order on requests and in reverse on responses.
 - Request and response body chunks (only if the filter declares `BodyAccess::ReadOnly` or `BodyAccess::ReadWrite`)
 
 **TCP filters** receive a `TcpFilterContext` with
-connection metadata: `remote_addr`, `local_addr`,
-`upstream_addr`, timing, and byte counters.
+connection metadata: `remote_addr`, `local_addr`, `sni`
+(SNI hostname from TLS ClientHello), `upstream_addr`
+(mutable via `Cow`), timing, and byte counters.
 
 ### What Filters Can Do
 
@@ -152,6 +153,7 @@ builtins/
     transformation/           Header, path rewrite, URL rewrite
   tcp/                        TCP protocol filters
     observability/            Connection logging
+    traffic_management/       SNI-based routing
 ```
 
 At runtime, pipeline execution dispatches to the correct
@@ -283,12 +285,20 @@ Per-connection state for TCP filters:
 pub struct TcpFilterContext<'a> {
     pub remote_addr: &'a str,
     pub local_addr: &'a str,
-    pub upstream_addr: &'a str,
+    pub sni: Option<&'a str>,
+    pub upstream_addr: Cow<'a, str>,
     pub connect_time: Instant,
     pub bytes_in: u64,
     pub bytes_out: u64,
 }
 ```
+
+The `sni` field is populated by the TCP proxy when it peeks
+at the first bytes of a TLS connection and extracts the SNI
+hostname from the ClientHello. Filters like `sni_router` use
+this to select an upstream. The `upstream_addr` field is a
+`Cow` so filters can replace it with an owned value without
+requiring the listener config to provide a static upstream.
 
 ## AnyFilter
 
@@ -463,6 +473,7 @@ A filter can have both `conditions` (request phase) and
 | `headers` | Transformation | HTTP | `request_add`, `response_add/set/remove` |
 | `request_id` | Observability | HTTP | Propagates/generates `X-Request-ID` |
 | `access_log` | Observability | HTTP | Structured JSON logging; optional `sample_rate` |
+| `sni_router` | Traffic Management | TCP | `routes[].server_names`, `.upstream`, `default_upstream` |
 | `tcp_access_log` | Observability | TCP | Structured JSON connection logging |
 | `forwarded_headers` | Security | HTTP | `trusted_proxies` (CIDR list) |
 | `guardrails` | Security | HTTP | Reject requests matching header/body string or regex rules |

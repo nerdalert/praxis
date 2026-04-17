@@ -19,7 +19,7 @@ use super::proxy::PingoraTcpProxy;
 // -----------------------------------------------------------------------------
 
 /// Grouping key: `(upstream, idle_timeout_ms, max_duration_secs)`.
-pub(super) type TcpGroupKey = (String, Option<u64>, Option<u64>);
+pub(super) type TcpGroupKey = (Option<String>, Option<u64>, Option<u64>);
 
 // -----------------------------------------------------------------------------
 // Grouping
@@ -32,14 +32,12 @@ pub(super) fn group_tcp_listeners(config: &Config) -> HashMap<TcpGroupKey, Vec<&
         if listener.protocol != ProtocolKind::Tcp {
             continue;
         }
-        if let Some(ref upstream) = listener.upstream {
-            let key = (
-                upstream.clone(),
-                listener.tcp_idle_timeout_ms,
-                listener.tcp_max_duration_secs,
-            );
-            groups.entry(key).or_default().push(listener);
-        }
+        let key = (
+            listener.upstream.clone(),
+            listener.tcp_idle_timeout_ms,
+            listener.tcp_max_duration_secs,
+        );
+        groups.entry(key).or_default().push(listener);
     }
     groups
 }
@@ -52,8 +50,9 @@ pub(super) fn group_tcp_listeners(config: &Config) -> HashMap<TcpGroupKey, Vec<&
 pub(super) fn register_tcp_listeners(
     service: &mut Service<PingoraTcpProxy>,
     listeners: &[&praxis_core::config::Listener],
-    upstream_addr: &str,
+    upstream: Option<&str>,
 ) -> Result<(), ProxyError> {
+    let display_upstream = upstream.unwrap_or("filter-routed");
     for listener in listeners {
         if let Some(ref tls) = listener.tls {
             let tls_settings = build_tcp_tls_settings(tls, &listener.address)?;
@@ -64,7 +63,7 @@ pub(super) fn register_tcp_listeners(
         info!(
             name = %listener.name,
             address = %listener.address,
-            upstream = %upstream_addr,
+            upstream = %display_upstream,
             "TCP listener registered"
         );
     }
@@ -123,7 +122,7 @@ listeners:
         .unwrap();
         let groups = group_tcp_listeners(&config);
         assert_eq!(groups.len(), 1, "same upstream + timeout should produce one group");
-        let key = ("10.0.0.1:5432".to_owned(), Some(300_000), None);
+        let key = (Some("10.0.0.1:5432".to_owned()), Some(300_000), None);
         assert_eq!(groups[&key].len(), 2, "both listeners should be in the same group");
     }
 
@@ -200,15 +199,21 @@ filter_chains:
         .unwrap();
         let groups = group_tcp_listeners(&config);
         assert_eq!(groups.len(), 1, "HTTP listeners should be excluded");
-        let key = ("10.0.0.1:5432".to_owned(), Some(300_000), None);
+        let key = (Some("10.0.0.1:5432".to_owned()), Some(300_000), None);
         assert!(groups.contains_key(&key), "only TCP listener should be grouped");
     }
 
     #[test]
-    fn group_tcp_listeners_skips_tcp_without_upstream() {
+    fn group_tcp_listeners_includes_tcp_without_upstream() {
         let config = config_with_tcp_no_upstream();
         let groups = group_tcp_listeners(&config);
-        assert!(groups.is_empty(), "TCP listener without upstream should be skipped");
+        assert_eq!(
+            groups.len(),
+            1,
+            "TCP listener without upstream should be grouped with None key"
+        );
+        let key = (None, None, None);
+        assert!(groups.contains_key(&key), "group key should have None upstream");
     }
 
     #[test]

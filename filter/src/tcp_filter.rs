@@ -3,7 +3,7 @@
 
 //! The [`TcpFilter`] trait and per-connection [`TcpFilterContext`].
 
-use std::time::Instant;
+use std::{borrow::Cow, time::Instant};
 
 use async_trait::async_trait;
 
@@ -16,7 +16,7 @@ use crate::{actions::FilterAction, filter::FilterError};
 /// A filter that participates in TCP connection processing.
 ///
 /// ```
-/// use std::time::Instant;
+/// use std::{borrow::Cow, time::Instant};
 ///
 /// use async_trait::async_trait;
 /// use praxis_filter::{FilterAction, FilterError, TcpFilter, TcpFilterContext};
@@ -42,7 +42,8 @@ use crate::{actions::FilterAction, filter::FilterError};
 /// let mut ctx = TcpFilterContext {
 ///     remote_addr: "127.0.0.1:1234",
 ///     local_addr: "0.0.0.0:8080",
-///     upstream_addr: "10.0.0.1:80",
+///     sni: None,
+///     upstream_addr: Some(Cow::Borrowed("10.0.0.1:80")),
 ///     connect_time: Instant::now(),
 ///     bytes_in: 0,
 ///     bytes_out: 0,
@@ -79,8 +80,14 @@ pub struct TcpFilterContext<'a> {
     /// Local listener address.
     pub local_addr: &'a str,
 
+    /// SNI hostname extracted from the TLS `ClientHello`, if present.
+    pub sni: Option<&'a str>,
+
     /// Upstream address being proxied to.
-    pub upstream_addr: &'a str,
+    ///
+    /// `None` until a static upstream or a filter (e.g. `sni_router`)
+    /// provides one.
+    pub upstream_addr: Option<Cow<'a, str>>,
 
     /// When the connection was accepted.
     pub connect_time: Instant,
@@ -106,7 +113,8 @@ mod tests {
         let mut ctx = TcpFilterContext {
             remote_addr: "127.0.0.1:12345",
             local_addr: "0.0.0.0:5432",
-            upstream_addr: "10.0.0.1:5432",
+            sni: None,
+            upstream_addr: Some(Cow::Borrowed("10.0.0.1:5432")),
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
@@ -121,7 +129,8 @@ mod tests {
         let mut ctx = TcpFilterContext {
             remote_addr: "127.0.0.1:12345",
             local_addr: "0.0.0.0:5432",
-            upstream_addr: "10.0.0.1:5432",
+            sni: None,
+            upstream_addr: Some(Cow::Borrowed("10.0.0.1:5432")),
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,

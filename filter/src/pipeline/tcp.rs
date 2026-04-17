@@ -314,7 +314,8 @@ mod tests {
         TcpFilterContext {
             remote_addr: "127.0.0.1:12345",
             local_addr: "0.0.0.0:8080",
-            upstream_addr: "10.0.0.1:80",
+            sni: None,
+            upstream_addr: Some(std::borrow::Cow::Borrowed("10.0.0.1:80")),
             connect_time: std::time::Instant::now(),
             bytes_in: 0,
             bytes_out: 0,

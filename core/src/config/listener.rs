@@ -70,7 +70,8 @@ pub struct Listener {
 
     /// Upstream address for TCP listeners (e.g. "10.0.0.1:5432").
     ///
-    /// Required when `protocol: tcp`. Ignored for HTTP listeners.
+    /// Required for `protocol: tcp` unless filter chains provide
+    /// routing (e.g. via `sni_router`). Ignored for HTTP listeners.
     #[serde(default)]
     pub upstream: Option<String>,
 }
@@ -94,7 +95,8 @@ pub enum ProtocolKind {
     #[default]
     Http,
 
-    /// Raw TCP / L4 forwarding. Requires an `upstream` address.
+    /// Raw TCP / L4 forwarding. Requires an `upstream` address
+    /// unless filter chains provide routing (e.g. via `sni_router`).
     Tcp,
 }
 

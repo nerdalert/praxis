@@ -44,9 +44,9 @@ pub(in crate::config::validate) fn validate_listeners(listeners: &mut [Listener]
 fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     super::address::validate_address(&listener.address, &listener.name)?;
 
-    if listener.protocol == ProtocolKind::Tcp && listener.upstream.is_none() {
+    if listener.protocol == ProtocolKind::Tcp && listener.upstream.is_none() && listener.filter_chains.is_empty() {
         return Err(ProxyError::Config(format!(
-            "TCP listener '{}' requires an upstream address",
+            "TCP listener '{}' requires an upstream address or filter chains",
             listener.name
         )));
     }
@@ -113,7 +113,7 @@ listeners: []
     }
 
     #[test]
-    fn tcp_listener_without_upstream_is_rejected() {
+    fn tcp_listener_without_upstream_or_chains_is_rejected() {
         let yaml = r#"
 listeners:
   - name: db
@@ -121,7 +121,11 @@ listeners:
     protocol: tcp
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(err.to_string().contains("requires an upstream address"));
+        assert!(
+            err.to_string()
+                .contains("requires an upstream address or filter chains"),
+            "error should mention upstream or filter chains: {err}"
+        );
     }
 
     #[test]

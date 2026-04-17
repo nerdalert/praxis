@@ -41,7 +41,7 @@ impl Protocol for PingoraTcp {
             FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).expect("empty pipeline is valid"),
         );
 
-        for ((upstream_addr, timeout_ms, max_dur_secs), listeners) in groups {
+        for ((upstream_opt, timeout_ms, max_dur_secs), listeners) in groups {
             let pipeline = listeners
                 .first()
                 .and_then(|l| pipelines.get(&l.name))
@@ -50,10 +50,14 @@ impl Protocol for PingoraTcp {
 
             let idle_timeout = timeout_ms.map(Duration::from_millis);
             let max_duration = max_dur_secs.map(Duration::from_secs);
-            let app = proxy::PingoraTcpProxy::new(upstream_addr.clone(), pipeline, idle_timeout, max_duration);
-            let mut service = Service::new(format!("tcp-proxy:{upstream_addr}"), app);
+            let service_name = match upstream_opt.as_deref() {
+                Some(addr) => format!("tcp-proxy:{addr}"),
+                None => "tcp-proxy:filter-routed".to_owned(),
+            };
+            let app = proxy::PingoraTcpProxy::new(upstream_opt.clone(), pipeline, idle_timeout, max_duration);
+            let mut service = Service::new(service_name, app);
 
-            tls_setup::register_tcp_listeners(&mut service, &listeners, &upstream_addr)?;
+            tls_setup::register_tcp_listeners(&mut service, &listeners, upstream_opt.as_deref())?;
             server.server_mut().add_service(service);
         }
 

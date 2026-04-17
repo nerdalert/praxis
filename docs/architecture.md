@@ -460,8 +460,10 @@ praxis-filter                   Filter pipeline engine
     │       ├── path_rewrite    Strip/add prefix or regex replace on paths
     │       └── url_rewrite     Regex path transform + query manipulation
     └── tcp/                    TCP protocol filters
-        └── observability/
-            └── tcp_access_log  Structured JSON connection logging
+        ├── observability/
+        │   └── tcp_access_log  Structured JSON connection logging
+        └── traffic_management/
+            └── sni_router      SNI-based upstream routing
 
 praxis-protocol                 Protocol adapters
 ├── pipelines                   Maps listener names to resolved pipelines
@@ -500,9 +502,10 @@ praxis-tls                      TLS configuration types and setup
 │   ├── cluster                 ClusterTls upstream TLS settings
 │   └── listener                ListenerTls: cert list, client CA, cert mode
 ├── error                       TlsError type
-└── setup/                      TLS runtime setup
-    ├── loader                  Certificate and key loading from disk
-    └── sni                     SNI-based certificate selection
+├── setup/                      TLS runtime setup
+│   ├── loader                  Certificate and key loading from disk
+│   └── sni                     SNI-based certificate selection
+└── sni                         ClientHello SNI parser for TCP routing
 
 xtask                           Developer task runner (cargo xtask)
 ├── benchmark/                  Benchmark orchestration

@@ -60,7 +60,8 @@ impl TcpFilter for TcpAccessLogFilter {
         info!(
             remote = ctx.remote_addr,
             local = ctx.local_addr,
-            upstream = ctx.upstream_addr,
+            upstream = ctx.upstream_addr.as_deref().unwrap_or("-"),
+            sni = ctx.sni.unwrap_or("-"),
             "TCP connection accepted"
         );
         Ok(FilterAction::Continue)
@@ -71,7 +72,8 @@ impl TcpFilter for TcpAccessLogFilter {
         let duration_ms = ctx.connect_time.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         info!(
             remote = ctx.remote_addr,
-            upstream = ctx.upstream_addr,
+            upstream = ctx.upstream_addr.as_deref().unwrap_or("-"),
+            sni = ctx.sni.unwrap_or("-"),
             duration_ms,
             bytes_in = ctx.bytes_in,
             bytes_out = ctx.bytes_out,
@@ -104,7 +106,8 @@ mod tests {
         let mut ctx = TcpFilterContext {
             remote_addr: "127.0.0.1:12345",
             local_addr: "0.0.0.0:9000",
-            upstream_addr: "10.0.0.1:80",
+            sni: None,
+            upstream_addr: Some(std::borrow::Cow::Borrowed("10.0.0.1:80")),
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
@@ -119,7 +122,8 @@ mod tests {
         let mut ctx = TcpFilterContext {
             remote_addr: "127.0.0.1:12345",
             local_addr: "0.0.0.0:9000",
-            upstream_addr: "10.0.0.1:80",
+            sni: None,
+            upstream_addr: Some(std::borrow::Cow::Borrowed("10.0.0.1:80")),
             connect_time: Instant::now(),
             bytes_in: 1024,
             bytes_out: 2048,

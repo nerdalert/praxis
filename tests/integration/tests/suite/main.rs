@@ -23,6 +23,7 @@ mod rate_limit;
 mod retry;
 mod routing;
 mod security;
+mod sni_router;
 mod tcp_access_log;
 mod tls;
 mod url_rewrite;
