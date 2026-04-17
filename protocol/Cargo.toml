@@ -26,10 +26,9 @@ pingora-http = { workspace = true }
 pingora-proxy = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
-praxis-tls = { workspace = true }
+praxis-tls = { workspace = true, features = ["hot-reload"] }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 

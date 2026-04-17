@@ -36,7 +36,7 @@ pub(crate) fn default_crypto_provider() -> Arc<CryptoProvider> {
 ///
 /// [`CertifiedKey`]: rustls::sign::CertifiedKey
 /// [`CertKeyPair`]: crate::CertKeyPair
-pub(super) fn load_certified_key(pair: &CertKeyPair) -> Result<CertifiedKey, TlsError> {
+pub(crate) fn load_certified_key(pair: &CertKeyPair) -> Result<CertifiedKey, TlsError> {
     let (certs, key) = load_cert_and_key(pair)?;
     let provider = default_crypto_provider();
     let signing_key = provider

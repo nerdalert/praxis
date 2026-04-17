@@ -32,7 +32,7 @@ pub use filters::{FilterChainConfig, FilterEntry};
 pub use insecure_options::InsecureOptions;
 pub use listener::{Listener, ListenerTls, ProtocolKind};
 use parse::check_yaml_safety;
-pub use praxis_tls::ClusterTls;
+pub use praxis_tls::{CachedClusterTls, ClusterTls};
 pub use route::Route;
 pub use runtime::RuntimeConfig;
 

@@ -49,6 +49,14 @@ pub struct ListenerTls {
     #[serde(skip_serializing_if = "is_default_cert_mode")]
     pub client_cert_mode: ClientCertMode,
 
+    /// Certificate hot-reload via filesystem watching.
+    ///
+    /// Enabled by default. Set to `false` to disable. Certificate
+    /// and key files are monitored for changes and reloaded without
+    /// restarting the proxy. Requires exactly one certificate entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_reload: Option<bool>,
+
     /// Minimum TLS version accepted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_version: Option<TlsVersion>,
@@ -68,6 +76,10 @@ struct ListenerTlsRaw {
     #[serde(default)]
     client_cert_mode: ClientCertMode,
 
+    /// Enable certificate hot-reload.
+    #[serde(default)]
+    hot_reload: Option<bool>,
+
     /// Minimum TLS version.
     #[serde(default)]
     min_version: Option<TlsVersion>,
@@ -81,6 +93,7 @@ impl<'de> Deserialize<'de> for ListenerTls {
             certificates: raw.certificates,
             client_ca: raw.client_ca,
             client_cert_mode: raw.client_cert_mode,
+            hot_reload: raw.hot_reload,
             min_version: raw.min_version,
         };
         config.validate().map_err(de::Error::custom)?;
@@ -118,11 +131,13 @@ impl ListenerTls {
         let config = Self {
             certificates: vec![CertKeyPair {
                 cert_path: cert_path.into(),
+                default: false,
                 key_path: key_path.into(),
                 server_names: Vec::new(),
             }],
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
             min_version: None,
         };
         config.validate()?;
@@ -169,6 +184,10 @@ impl ListenerTls {
             cert.validate()?;
         }
 
+        if self.certificates.len() > 1 {
+            validate_multi_cert_defaults(&self.certificates)?;
+        }
+
         if let Some(ref ca) = self.client_ca {
             ca.validate()?;
         }
@@ -179,7 +198,29 @@ impl ListenerTls {
             });
         }
 
+        if self.hot_reload == Some(true) && self.certificates.len() > 1 {
+            return Err(TlsError::HotReloadMultipleCerts);
+        }
+
         Ok(())
+    }
+
+    /// Whether hot-reload is enabled for this listener.
+    ///
+    /// ```
+    /// use praxis_tls::ListenerTls;
+    ///
+    /// let dir = tempfile::TempDir::new().unwrap();
+    /// let cert = dir.path().join("cert.pem");
+    /// let key = dir.path().join("key.pem");
+    /// std::fs::write(&cert, b"").unwrap();
+    /// std::fs::write(&key, b"").unwrap();
+    ///
+    /// let tls = ListenerTls::new_validated(cert.to_str().unwrap(), key.to_str().unwrap()).unwrap();
+    /// assert!(tls.is_hot_reload());
+    /// ```
+    pub fn is_hot_reload(&self) -> bool {
+        self.hot_reload != Some(false) && self.certificates.len() == 1
     }
 
     /// Return the first (or only) certificate's paths.
@@ -260,6 +301,31 @@ pub enum TlsVersion {
 
     /// TLS 1.3 only.
     Tls13,
+}
+
+// -----------------------------------------------------------------------------
+// Multi-Cert Validation
+// -----------------------------------------------------------------------------
+
+/// Validate `default` field rules across a multi-cert list.
+///
+/// Rejects configs with more than one `default: true` entry, or
+/// entries that have no `server_names` and are not marked as default.
+fn validate_multi_cert_defaults(certificates: &[CertKeyPair]) -> Result<(), TlsError> {
+    let mut seen_default = false;
+    for cert in certificates {
+        if cert.default {
+            if seen_default {
+                return Err(TlsError::MultipleDefaults);
+            }
+            seen_default = true;
+        } else if cert.server_names.is_empty() {
+            return Err(TlsError::AmbiguousCert {
+                path: cert.cert_path.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -426,6 +492,7 @@ certificates:
     server_names: ["web.example.com"]
   - cert_path: {c3}
     key_path: {k3}
+    default: true
 "#,
             c1 = t1.cert,
             k1 = t1.key,
@@ -445,6 +512,7 @@ certificates:
             tls.certificates[2].server_names.is_empty(),
             "third cert should have no server_names"
         );
+        assert!(tls.certificates[2].default, "third cert should be marked as default");
     }
 
     #[test]
@@ -454,6 +522,157 @@ certificates:
         let (cert, key) = tls.primary_cert_paths();
         assert_eq!(cert, tmp.cert, "primary cert path mismatch");
         assert_eq!(key, tmp.key, "primary key path mismatch");
+    }
+
+    #[test]
+    fn hot_reload_defaults_to_none() {
+        let tmp = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {cert}\n    key_path: {key}\n",
+            cert = tmp.cert,
+            key = tmp.key,
+        );
+        let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
+        assert!(tls.hot_reload.is_none(), "hot_reload should default to None");
+        assert!(
+            tls.is_hot_reload(),
+            "is_hot_reload should be true when None (default enabled)"
+        );
+    }
+
+    #[test]
+    fn hot_reload_true_single_cert_accepted() {
+        let tmp = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {cert}\n    key_path: {key}\nhot_reload: true\n",
+            cert = tmp.cert,
+            key = tmp.key,
+        );
+        let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(tls.hot_reload, Some(true), "hot_reload should be Some(true)");
+        assert!(tls.is_hot_reload(), "is_hot_reload should be true");
+    }
+
+    #[test]
+    fn multi_cert_auto_disables_hot_reload() {
+        let t1 = temp_cert_key();
+        let t2 = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {c1}\n    key_path: {k1}\n    server_names: [\"a.example.com\"]\n  - cert_path: {c2}\n    key_path: {k2}\n    default: true\n",
+            c1 = t1.cert,
+            k1 = t1.key,
+            c2 = t2.cert,
+            k2 = t2.key,
+        );
+        let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
+        assert!(!tls.is_hot_reload(), "multi-cert should auto-disable hot-reload");
+    }
+
+    #[test]
+    fn multi_cert_explicit_hot_reload_true_rejected() {
+        let t1 = temp_cert_key();
+        let t2 = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {c1}\n    key_path: {k1}\n    server_names: [\"a.example.com\"]\n  - cert_path: {c2}\n    key_path: {k2}\n    default: true\nhot_reload: true\n",
+            c1 = t1.cert,
+            k1 = t1.key,
+            c2 = t2.cert,
+            k2 = t2.key,
+        );
+        let result = serde_yaml::from_str::<ListenerTls>(&yaml);
+        assert!(
+            result.is_err(),
+            "multi-cert with explicit hot_reload: true should be rejected"
+        );
+    }
+
+    #[test]
+    fn multi_cert_multiple_defaults_rejected() {
+        let t1 = temp_cert_key();
+        let t2 = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {c1}\n    key_path: {k1}\n    default: true\n  - cert_path: {c2}\n    key_path: {k2}\n    default: true\n",
+            c1 = t1.cert,
+            k1 = t1.key,
+            c2 = t2.cert,
+            k2 = t2.key,
+        );
+        let result = serde_yaml::from_str::<ListenerTls>(&yaml);
+        assert!(result.is_err(), "multiple default: true entries should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("multiple") && msg.contains("default"),
+            "error should mention multiple defaults: {msg}"
+        );
+    }
+
+    #[test]
+    fn multi_cert_ambiguous_entry_rejected() {
+        let t1 = temp_cert_key();
+        let t2 = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {c1}\n    key_path: {k1}\n    server_names: [\"a.example.com\"]\n  - cert_path: {c2}\n    key_path: {k2}\n",
+            c1 = t1.cert,
+            k1 = t1.key,
+            c2 = t2.cert,
+            k2 = t2.key,
+        );
+        let result = serde_yaml::from_str::<ListenerTls>(&yaml);
+        assert!(
+            result.is_err(),
+            "entry without server_names and without default: true should be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("ambiguous"), "error should mention ambiguous: {msg}");
+    }
+
+    #[test]
+    fn multi_cert_all_with_server_names_no_default_valid() {
+        let t1 = temp_cert_key();
+        let t2 = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {c1}\n    key_path: {k1}\n    server_names: [\"a.example.com\"]\n  - cert_path: {c2}\n    key_path: {k2}\n    server_names: [\"b.example.com\"]\n",
+            c1 = t1.cert,
+            k1 = t1.key,
+            c2 = t2.cert,
+            k2 = t2.key,
+        );
+        let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            tls.certificates.len(),
+            2,
+            "all-server_names config should parse successfully"
+        );
+    }
+
+    #[test]
+    fn multi_cert_default_with_server_names_valid() {
+        let t1 = temp_cert_key();
+        let t2 = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {c1}\n    key_path: {k1}\n    server_names: [\"a.example.com\"]\n    default: true\n  - cert_path: {c2}\n    key_path: {k2}\n    server_names: [\"b.example.com\"]\n",
+            c1 = t1.cert,
+            k1 = t1.key,
+            c2 = t2.cert,
+            k2 = t2.key,
+        );
+        let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
+        assert!(tls.certificates[0].default, "first cert should be marked as default");
+    }
+
+    #[test]
+    fn hot_reload_false_does_not_trigger() {
+        let tmp = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {cert}\n    key_path: {key}\nhot_reload: false\n",
+            cert = tmp.cert,
+            key = tmp.key,
+        );
+        let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
+        assert!(
+            !tls.is_hot_reload(),
+            "is_hot_reload should be false when explicitly false"
+        );
     }
 
     // ---------------------------------------------------------------------------

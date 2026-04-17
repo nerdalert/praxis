@@ -51,8 +51,46 @@ tls:
 
 Multiple certificates on a single listener enable
 SNI-based selection. Entries with `server_names` match
-those hostnames; entries without are the fallback.
-See [tls-multi-cert].
+those hostnames. Mark exactly one entry with
+`default: true` to serve as the fallback for unmatched
+SNI. An entry without `server_names` that is not marked
+`default: true` is rejected as ambiguous. If no entry
+has `default: true`, unmatched SNI is rejected (no
+fallback). See [tls-multi-cert].
+
+### Certificate Hot-Reload
+
+Certificate hot-reload is enabled by default. Cert and
+key files are watched for changes. When modified (e.g. by
+certbot, cert-manager, or Vault PKI), the proxy atomically
+picks up the new certificate within 500ms. Existing
+connections are unaffected; only new TLS handshakes use the
+rotated certificate.
+
+To explicitly disable hot-reload, set `hot_reload: false`.
+Multi-cert SNI configs auto-disable hot-reload.
+
+**Constraints:**
+
+- Hot-reload applies only to single-cert listeners.
+  Multi-cert SNI configs are automatically excluded.
+- If the new certificate fails to parse, the proxy logs
+  a warning and continues serving the previous valid
+  certificate.
+
+**Debounce behavior:** filesystem events are debounced by
+500ms to handle atomic rename patterns used by Kubernetes
+secret mounts, certbot, and cert-manager. A cert-manager
+rotation that writes a temp file and then renames it over
+the original triggers a single reload after the rename
+completes.
+
+**Alternative: graceful restart.** Pingora supports
+graceful restart via SIGHUP with FD passing. This reloads
+all configuration including certificates, but drains
+in-flight connections. Use graceful restart when
+hot-reload is not needed or for config changes beyond
+certificate rotation.
 
 ### Minimum TLS Version
 

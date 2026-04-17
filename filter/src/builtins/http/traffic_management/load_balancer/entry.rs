@@ -6,10 +6,10 @@
 use std::sync::Arc;
 
 use praxis_core::{
-    config::Cluster,
+    config::{CachedClusterTls, Cluster},
     connectivity::{ConnectionOptions, Upstream},
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{
     endpoint::build_weighted_endpoints,
@@ -30,28 +30,28 @@ pub(super) struct ClusterEntry {
     /// The load-balancing strategy for this cluster.
     pub(super) strategy: Strategy,
 
-    /// TLS settings for upstream connections. `None` means plain TCP.
-    pub(super) tls: Option<praxis_core::config::ClusterTls>,
+    /// Pre-cached TLS material. `None` means plain TCP.
+    pub(super) tls: Option<CachedClusterTls>,
 }
 
 impl ClusterEntry {
     /// Build an [`Upstream`] from a selected address and request context.
+    ///
+    /// When TLS is configured and no explicit SNI is set, falls back
+    /// to the `Host` header from the request.
     pub(super) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> Upstream {
         let tls = self.tls.clone().map(|mut t| {
-            if t.sni.is_none() {
-                t.sni = ctx
-                    .request
-                    .headers
-                    .get("host")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
+            if t.sni().is_none()
+                && let Some(host) = ctx.request.headers.get("host").and_then(|v| v.to_str().ok())
+            {
+                t.set_sni(host.to_owned());
             }
             t
         });
         Upstream {
             address: addr,
-            tls,
             connection: Arc::clone(&self.opts),
+            tls,
         }
     }
 }
@@ -67,10 +67,25 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> ClusterEntry {
         "cluster registered"
     );
 
+    let tls = cluster
+        .tls
+        .as_ref()
+        .and_then(|t| match CachedClusterTls::try_from_config(t) {
+            Ok(cached) => Some(cached),
+            Err(e) => {
+                warn!(
+                    cluster = %cluster.name,
+                    error = %e,
+                    "failed to cache TLS certificates; TLS disabled for this cluster"
+                );
+                None
+            },
+        });
+
     let strategy = build_strategy(&cluster.load_balancer_strategy, endpoints);
     ClusterEntry {
         opts: Arc::new(ConnectionOptions::from(cluster)),
-        tls: cluster.tls.clone(),
         strategy,
+        tls,
     }
 }

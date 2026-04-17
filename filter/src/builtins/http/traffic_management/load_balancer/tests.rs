@@ -282,7 +282,7 @@ async fn sni_fallback_to_host_header_when_sni_none() {
     let upstream = ctx.upstream.expect("upstream should be set");
     assert!(upstream.tls.is_some(), "TLS should be enabled");
     assert_eq!(
-        upstream.tls.as_ref().unwrap().sni.as_deref(),
+        upstream.tls.as_ref().unwrap().sni(),
         Some("api.example.com"),
         "SNI should fall back to Host header when sni is None"
     );
@@ -304,7 +304,7 @@ async fn sni_fallback_is_none_when_no_host_header() {
     let upstream = ctx.upstream.expect("upstream should be set");
     assert!(upstream.tls.is_some(), "TLS should be enabled");
     assert!(
-        upstream.tls.as_ref().unwrap().sni.is_none(),
+        upstream.tls.as_ref().unwrap().sni().is_none(),
         "SNI should be None when no Host header and no explicit sni"
     );
 }
@@ -329,7 +329,7 @@ async fn explicit_sni_overrides_host_header() {
     drop(lb.on_request(&mut ctx).await.unwrap());
     let upstream = ctx.upstream.expect("upstream should be set");
     assert_eq!(
-        upstream.tls.as_ref().unwrap().sni.as_deref(),
+        upstream.tls.as_ref().unwrap().sni(),
         Some("override.example.com"),
         "explicit sni should override Host header"
     );
@@ -394,7 +394,7 @@ fn build_cluster_entry_tls_and_sni() {
     let entry = build_cluster_entry(&cluster);
     assert!(entry.tls.is_some(), "TLS should be present");
     assert_eq!(
-        entry.tls.as_ref().unwrap().sni.as_deref(),
+        entry.tls.as_ref().unwrap().sni(),
         Some("api.example.com"),
         "SNI should be preserved"
     );
@@ -467,7 +467,7 @@ async fn tls_and_sni_wired_from_cluster() {
     let upstream = ctx.upstream.unwrap();
     assert!(upstream.tls.is_some(), "TLS should be enabled from cluster config");
     assert_eq!(
-        upstream.tls.as_ref().unwrap().sni.as_deref(),
+        upstream.tls.as_ref().unwrap().sni(),
         Some("api.example.com"),
         "SNI should match cluster config"
     );

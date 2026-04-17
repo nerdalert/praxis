@@ -76,17 +76,35 @@ pub(super) fn register_tcp_listeners(
 
 /// Build [`TlsSettings`] for a TCP listener.
 ///
-/// Always builds a [`ServerConfig`] via [`build_server_config`]
-/// and injects it with `with_server_config`, giving Praxis full
-/// control over TLS configuration.
+/// When `hot_reload` is enabled, uses a [`ReloadableCertResolver`]
+/// and spawns a [`CertWatcher`] background task. Otherwise builds
+/// a static [`ServerConfig`] via [`build_server_config`].
 ///
 /// [`TlsSettings`]: pingora_core::listeners::tls::TlsSettings
 /// [`ServerConfig`]: rustls::ServerConfig
-/// [`build_server_config`]: praxis_tls::tls_setup::build_server_config
+/// [`build_server_config`]: praxis_tls::setup::build_server_config
+/// [`ReloadableCertResolver`]: praxis_tls::reload::ReloadableCertResolver
+/// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
 fn build_tcp_tls_settings(
     tls: &praxis_tls::ListenerTls,
     address: &str,
 ) -> Result<pingora_core::listeners::tls::TlsSettings, ProxyError> {
+    if tls.is_hot_reload() {
+        tracing::debug!(address, "building TLS ServerConfig with hot-reload (TCP)");
+        let (server_config, swap_handle) = praxis_tls::setup::build_reloadable_server_config(tls)
+            .map_err(|e| ProxyError::Config(format!("TLS hot-reload for {address}: {e}")))?;
+
+        let pair =
+            tls.certificates.first().cloned().ok_or_else(|| {
+                ProxyError::Config(format!("TLS hot-reload for {address}: no certificate configured"))
+            })?;
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        praxis_tls::watcher::CertWatcher::spawn(swap_handle, pair, shutdown_rx);
+
+        return pingora_core::listeners::tls::TlsSettings::with_server_config(server_config)
+            .map_err(|e| ProxyError::Config(format!("TLS for {address}: {e}")));
+    }
+
     tracing::debug!(address, "building TLS ServerConfig (TCP)");
     let server_config = praxis_tls::setup::build_server_config(tls)
         .map_err(|e| ProxyError::Config(format!("TLS for {address}: {e}")))?;

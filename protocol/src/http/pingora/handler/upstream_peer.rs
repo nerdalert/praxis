@@ -37,13 +37,17 @@ pub(super) fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
     build_peer(upstream)
 }
 
-/// Parse the upstream address and build an `HttpPeer` with TLS/SNI config.
+/// Parse the upstream address and build an [`HttpPeer`] with TLS/SNI config.
 ///
-/// When TLS is configured (`upstream.tls` is `Some`), applies SNI, verify
-/// settings, and optional client cert for upstream mTLS. When `sni` is
-/// `None`, derives it from the upstream address hostname (unless it is
-/// an IP address, since IP-based SNI is not standard).
-#[allow(clippy::too_many_lines, reason = "sequential TLS branches")]
+/// TLS certificates are already pre-parsed in the [`CachedClusterTls`]
+/// attached to the upstream. This function converts the cached DER
+/// bytes into Pingora types without any filesystem I/O.
+///
+/// When `sni` is `None`, derives it from the upstream address hostname
+/// (unless it is an IP address).
+///
+/// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
+/// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
 fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
     let addr: std::net::SocketAddr = upstream.address.parse().map_err(|e| {
         tracing::warn!(address = %upstream.address, error = %e, "failed to parse upstream address");
@@ -54,84 +58,63 @@ fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
     })?;
 
     let tls_enabled = upstream.tls.is_some();
-    let sni = upstream.tls.as_ref().and_then(|t| t.sni.clone()).unwrap_or_else(|| {
-        if tls_enabled {
-            derive_sni(&upstream.address)
-        } else {
-            String::new()
-        }
-    });
+    let sni = upstream
+        .tls
+        .as_ref()
+        .and_then(|t| t.sni().map(str::to_owned))
+        .unwrap_or_else(|| {
+            if tls_enabled {
+                derive_sni(&upstream.address)
+            } else {
+                String::new()
+            }
+        });
 
     let mut peer = HttpPeer::new(addr, tls_enabled, sni);
     apply_connection_options(&mut peer, &upstream.connection);
 
     if let Some(ref tls) = upstream.tls {
-        if !tls.verify {
-            tracing::debug!(
-                upstream = %upstream.address,
-                "upstream TLS verification disabled for this peer"
-            );
-            peer.options.verify_cert = false;
-            peer.options.verify_hostname = false;
-        }
-
-        if let Some(ref ca) = tls.ca {
-            let wrapped = load_ca_certs(&ca.ca_path)
-                .map_err(|e| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, e))?;
-            peer.options.ca = Some(Arc::from(wrapped));
-        }
-
-        if let Some(ref client_cert) = tls.client_cert {
-            let cert_key = load_upstream_client_cert(&client_cert.cert_path, &client_cert.key_path)
-                .map_err(|e| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, e))?;
-            peer.client_cert_key = Some(Arc::new(cert_key));
-        }
+        apply_cached_tls(&mut peer, tls, &upstream.address);
     }
 
     Ok(Box::new(peer))
 }
 
-/// Load client certificate and key PEM files for upstream mTLS.
-fn load_upstream_client_cert(
-    cert_path: &str,
-    key_path: &str,
-) -> std::result::Result<pingora_core::utils::tls::CertKey, String> {
-    let cert_pem = std::fs::read(cert_path).map_err(|e| format!("failed to read client cert {cert_path}: {e}"))?;
-    let key_pem = std::fs::read(key_path).map_err(|e| format!("failed to read client key {key_path}: {e}"))?;
+/// Apply pre-cached TLS settings to an [`HttpPeer`].
+///
+/// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
+fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls, address: &str) {
+    if !tls.verify() {
+        tracing::debug!(upstream = %address, "upstream TLS verification disabled for this peer");
+        peer.options.verify_cert = false;
+        peer.options.verify_hostname = false;
+    }
 
-    let certs: Vec<Vec<u8>> = rustls_pemfile::certs(&mut &cert_pem[..])
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| format!("failed to parse client cert PEM {cert_path}: {e}"))?
-        .into_iter()
-        .map(|c| c.to_vec())
-        .collect();
-    let key: Vec<u8> = rustls_pemfile::private_key(&mut &key_pem[..])
-        .map_err(|e| format!("failed to parse client key PEM {key_path}: {e}"))?
-        .ok_or_else(|| format!("no private key found in {key_path}"))?
-        .secret_der()
-        .to_vec();
+    if let Some(ca) = tls.ca() {
+        peer.options.ca = Some(Arc::from(ca_from_cached(ca)));
+    }
 
-    Ok(pingora_core::utils::tls::CertKey::new(certs, key))
+    if let Some(client) = tls.client_cert() {
+        peer.client_cert_key = Some(Arc::new(client_cert_from_cached(client)));
+    }
 }
 
-/// Load CA certificates from a PEM file into [`WrappedX509`] values for per-peer verification.
+/// Convert cached CA DER bytes into [`WrappedX509`] values.
 ///
 /// [`WrappedX509`]: pingora_core::utils::tls::WrappedX509
-fn load_ca_certs(ca_path: &str) -> std::result::Result<Vec<pingora_core::utils::tls::WrappedX509>, String> {
-    let ca_pem = std::fs::read(ca_path).map_err(|e| format!("failed to read CA {ca_path}: {e}"))?;
-    let certs: Vec<Vec<u8>> = rustls_pemfile::certs(&mut &ca_pem[..])
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| format!("failed to parse CA PEM {ca_path}: {e}"))?
-        .into_iter()
-        .map(|c| c.to_vec())
-        .collect();
-    if certs.is_empty() {
-        return Err(format!("no certificates found in CA file {ca_path}"));
-    }
-    Ok(certs
-        .into_iter()
-        .map(|der| pingora_core::utils::tls::WrappedX509::new(der, pingora_core::utils::tls::parse_x509))
-        .collect())
+fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::utils::tls::WrappedX509> {
+    cached
+        .der_certs()
+        .iter()
+        .map(|der| pingora_core::utils::tls::WrappedX509::new(der.clone(), pingora_core::utils::tls::parse_x509))
+        .collect()
+}
+
+/// Convert cached client cert/key DER bytes into a [`CertKey`].
+///
+/// [`CertKey`]: pingora_core::utils::tls::CertKey
+fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora_core::utils::tls::CertKey {
+    pingora_core::utils::tls::CertKey::new(cached.cert_der().to_vec(), cached.key_der().to_vec())
 }
 
 /// Derive an SNI hostname from an `address` string in `host:port` form.
@@ -157,7 +140,7 @@ mod tests {
     use std::sync::Arc;
 
     use praxis_core::connectivity::{ConnectionOptions, Upstream};
-    use praxis_tls::ClusterTls;
+    use praxis_tls::{CachedClusterTls, ClusterTls};
 
     use super::*;
 
@@ -171,13 +154,14 @@ mod tests {
 
     #[test]
     fn build_peer_with_tls_enabled() {
+        let tls = ClusterTls {
+            sni: Some("api.example.com".to_owned()),
+            ..ClusterTls::default()
+        };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
-            tls: Some(ClusterTls {
-                sni: Some("api.example.com".to_owned()),
-                ..ClusterTls::default()
-            }),
             connection: Arc::new(ConnectionOptions::default()),
+            tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
         let peer = build_peer(&upstream).expect("should build TLS peer");
         assert!(!peer.sni.is_empty(), "TLS peer should have a non-empty SNI");
@@ -203,8 +187,8 @@ mod tests {
     fn build_peer_without_tls() {
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8080"),
-            tls: None,
             connection: Arc::new(ConnectionOptions::default()),
+            tls: None,
         };
         let peer = build_peer(&upstream).expect("should build plain peer");
         assert_eq!(peer.sni, "", "plain peer should have empty SNI");
@@ -212,14 +196,15 @@ mod tests {
 
     #[test]
     fn build_peer_with_tls_verify_disabled() {
+        let tls = ClusterTls {
+            sni: Some("self-signed.local".to_owned()),
+            verify: false,
+            ..ClusterTls::default()
+        };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
-            tls: Some(ClusterTls {
-                verify: false,
-                sni: Some("self-signed.local".to_owned()),
-                ..ClusterTls::default()
-            }),
             connection: Arc::new(ConnectionOptions::default()),
+            tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
         let peer = build_peer(&upstream).expect("should build peer with verification disabled");
         assert!(
@@ -234,13 +219,14 @@ mod tests {
 
     #[test]
     fn build_peer_with_tls_verify_enabled() {
+        let tls = ClusterTls {
+            sni: Some("api.example.com".to_owned()),
+            ..ClusterTls::default()
+        };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
-            tls: Some(ClusterTls {
-                sni: Some("api.example.com".to_owned()),
-                ..ClusterTls::default()
-            }),
             connection: Arc::new(ConnectionOptions::default()),
+            tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
         let peer = build_peer(&upstream).expect("should build peer with verification enabled");
         assert!(
@@ -325,67 +311,57 @@ mod tests {
     }
 
     #[test]
-    fn load_ca_certs_with_valid_ca() {
+    fn build_peer_with_cached_ca() {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
-        let certs = load_ca_certs(ca_path).expect("valid CA file should load");
-        assert_eq!(certs.len(), 1, "should load exactly one CA cert");
-    }
-
-    #[test]
-    fn load_ca_certs_nonexistent_file_returns_error() {
-        let err = load_ca_certs("/nonexistent/ca.pem").expect_err("nonexistent file should fail");
-        assert!(
-            err.contains("failed to read CA"),
-            "error should mention read failure: {err}"
-        );
-    }
-
-    #[test]
-    fn load_ca_certs_empty_pem_returns_error() {
-        let temp_dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
-        let empty_path = temp_dir.path().join("empty.pem");
-        std::fs::write(&empty_path, "").expect("write empty PEM should succeed");
-
-        let err =
-            load_ca_certs(empty_path.to_str().expect("path should be valid UTF-8")).expect_err("empty PEM should fail");
-        assert!(
-            err.contains("no certificates found"),
-            "error should mention no certificates: {err}"
-        );
-    }
-
-    #[test]
-    fn build_peer_with_ca_applies_custom_ca() {
-        let ca = gen_ca_file();
-        let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
-
+        let tls = ClusterTls {
+            ca: Some(praxis_tls::CaConfig {
+                ca_path: ca_path.to_owned(),
+            }),
+            sni: Some("api.example.com".to_owned()),
+            ..ClusterTls::default()
+        };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
-            tls: Some(ClusterTls {
-                ca: Some(praxis_tls::CaConfig {
-                    ca_path: ca_path.to_owned(),
-                }),
-                sni: Some("api.example.com".to_owned()),
-                ..ClusterTls::default()
-            }),
             connection: Arc::new(ConnectionOptions::default()),
+            tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
-        let peer = build_peer(&upstream).expect("should build peer with custom CA");
-        assert!(peer.options.ca.is_some(), "peer should have custom CA set");
+        let peer = build_peer(&upstream).expect("should build peer with cached CA");
+        assert!(peer.options.ca.is_some(), "peer should have custom CA set from cache");
+    }
+
+    #[test]
+    fn ca_from_cached_produces_wrapped_x509() {
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
+
+        let cached = praxis_tls::CachedCaCerts::from_pem_file(ca_path).expect("valid CA should parse");
+        let wrapped = ca_from_cached(&cached);
+        assert_eq!(wrapped.len(), 1, "should produce one WrappedX509");
+    }
+
+    #[test]
+    fn client_cert_from_cached_produces_cert_key() {
+        let pair = gen_cert_key_files();
+        let cert_path = pair.cert_path.to_str().expect("cert path should be valid UTF-8");
+        let key_path = pair.key_path.to_str().expect("key path should be valid UTF-8");
+
+        let cached =
+            praxis_tls::CachedClientCert::from_pem_files(cert_path, key_path).expect("valid cert+key should parse");
+        let _cert_key = client_cert_from_cached(&cached);
     }
 
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    /// Create a test upstream with the given address.
+    /// Create a test upstream with the given address (no TLS).
     fn make_upstream(address: &str) -> Upstream {
         Upstream {
             address: Arc::from(address),
-            tls: None,
             connection: Arc::new(ConnectionOptions::default()),
+            tls: None,
         }
     }
 
@@ -395,6 +371,18 @@ mod tests {
         ca_path: std::path::PathBuf,
 
         /// Temp directory holding the cert file.
+        _temp_dir: tempfile::TempDir,
+    }
+
+    /// Generated cert + key files with temp dir lifetime.
+    struct TestCertKey {
+        /// Path to the certificate PEM file.
+        cert_path: std::path::PathBuf,
+
+        /// Path to the private key PEM file.
+        key_path: std::path::PathBuf,
+
+        /// Temp directory holding the files.
         _temp_dir: tempfile::TempDir,
     }
 
@@ -414,6 +402,28 @@ mod tests {
 
         TestCa {
             ca_path,
+            _temp_dir: temp_dir,
+        }
+    }
+
+    /// Generate a self-signed cert + key pair for testing.
+    fn gen_cert_key_files() -> TestCertKey {
+        use rcgen::{CertificateParams, DnType, KeyPair};
+
+        let key = KeyPair::generate().expect("key generation should succeed");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params should be valid");
+        params.distinguished_name.push(DnType::CommonName, "Test Cert");
+        let cert = params.self_signed(&key).expect("self-sign should succeed");
+
+        let temp_dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
+        let cert_path = temp_dir.path().join("cert.pem");
+        let key_path = temp_dir.path().join("key.pem");
+        std::fs::write(&cert_path, cert.pem()).expect("write cert PEM should succeed");
+        std::fs::write(&key_path, key.serialize_pem()).expect("write key PEM should succeed");
+
+        TestCertKey {
+            cert_path,
+            key_path,
             _temp_dir: temp_dir,
         }
     }

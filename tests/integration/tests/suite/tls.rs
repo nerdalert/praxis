@@ -897,6 +897,7 @@ listeners:
             - api.example.com
         - cert_path: "{cert}"
           key_path: "{key}"
+          default: true
 filter_chains:
   - name: main
     filters:
@@ -930,6 +931,10 @@ filter_chains:
             .server_names
             .is_empty(),
         "last cert (default) should have no server_names"
+    );
+    assert!(
+        config.listeners[0].tls.as_ref().unwrap().certificates[2].default,
+        "last cert should be marked as default"
     );
 
     let addr = start_tls_proxy(&config, &client_config);
@@ -1145,6 +1150,7 @@ listeners:
             - alpha.localhost
         - cert_path: "{beta_cert}"
           key_path: "{beta_key}"
+          default: true
 filter_chains:
   - name: main
     filters:
@@ -1389,6 +1395,7 @@ listeners:
             - beta.test
         - cert_path: "{default_cert}"
           key_path: "{default_key}"
+          default: true
 filter_chains:
   - name: main
     filters:
@@ -1467,6 +1474,7 @@ listeners:
             - alpha.test
         - cert_path: "{default_cert}"
           key_path: "{default_key}"
+          default: true
 filter_chains:
   - name: main
     filters:
@@ -1597,6 +1605,7 @@ listeners:
             - alpha.mtls
         - cert_path: "{beta_cert}"
           key_path: "{beta_key}"
+          default: true
       client_ca:
         ca_path: "{ca}"
       client_cert_mode: require
@@ -1654,6 +1663,7 @@ listeners:
             - alpha.tls13
         - cert_path: "{beta_cert}"
           key_path: "{beta_key}"
+          default: true
       min_version: tls13
 filter_chains:
   - name: main
@@ -1748,6 +1758,156 @@ filter_chains:
         peer_der, certs.server_cert_der,
         "mTLS + TLS 1.3 listener should present the configured server certificate"
     );
+}
+
+#[test]
+fn hot_reload_serves_rotated_certificate() {
+    let original = TestCertificates::generate();
+    let client_config = original.client_config();
+
+    let backend_port = start_backend("hot-reload-ok");
+    let proxy_port = free_port();
+
+    let cert_dir = tempfile::TempDir::new().unwrap();
+    let cert_path = cert_dir.path().join("server.pem");
+    let key_path = cert_dir.path().join("server-key.pem");
+    std::fs::copy(&original.cert_path, &cert_path).unwrap();
+    std::fs::copy(&original.key_path, &key_path).unwrap();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      hot_reload: true
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = cert_path.display(),
+        key = key_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    start_full_proxy(config);
+
+    let addr = format!("127.0.0.1:{proxy_port}");
+    wait_for_https(&addr, &client_config);
+
+    let initial_der = get_peer_cert_der(&addr, &client_config, "localhost");
+    assert_eq!(
+        initial_der, original.server_cert_der,
+        "initial cert should match the original"
+    );
+
+    let rotated = TestCertificates::generate();
+    let rotated_key_pem = std::fs::read(&rotated.key_path).unwrap();
+    let rotated_cert_pem = std::fs::read(&rotated.cert_path).unwrap();
+    std::fs::write(&key_path, &rotated_key_pem).unwrap();
+    std::fs::write(&cert_path, &rotated_cert_pem).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    let rotated_client = rotated.client_config();
+    let rotated_der = get_peer_cert_der(&addr, &rotated_client, "localhost");
+    assert_eq!(
+        rotated_der, rotated.server_cert_der,
+        "after rotation the proxy should serve the new certificate"
+    );
+
+    assert_ne!(
+        original.server_cert_der, rotated.server_cert_der,
+        "original and rotated certs must be distinct for this test to be valid"
+    );
+}
+
+#[test]
+fn hot_reload_invalid_cert_keeps_old() {
+    let original = TestCertificates::generate();
+    let client_config = original.client_config();
+
+    let backend_port = start_backend("hot-reload-invalid-ok");
+    let proxy_port = free_port();
+
+    let cert_dir = tempfile::TempDir::new().unwrap();
+    let cert_path = cert_dir.path().join("server.pem");
+    let key_path = cert_dir.path().join("server-key.pem");
+    std::fs::copy(&original.cert_path, &cert_path).unwrap();
+    std::fs::copy(&original.key_path, &key_path).unwrap();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      hot_reload: true
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = cert_path.display(),
+        key = key_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    start_full_proxy(config);
+
+    let addr = format!("127.0.0.1:{proxy_port}");
+    wait_for_https(&addr, &client_config);
+
+    let initial_der = get_peer_cert_der(&addr, &client_config, "localhost");
+    assert_eq!(
+        initial_der, original.server_cert_der,
+        "initial cert should match the original"
+    );
+
+    std::fs::write(&cert_path, b"not a valid cert").unwrap();
+    std::fs::write(&key_path, b"not a valid key").unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let after_der = get_peer_cert_der(&addr, &client_config, "localhost");
+    assert_eq!(
+        after_der, original.server_cert_der,
+        "after invalid rotation the proxy should still serve the original certificate"
+    );
+
+    let (status, body) = https_get(&addr, "/", &client_config);
+    assert_eq!(
+        status, 200,
+        "proxy should still serve traffic after invalid cert rotation"
+    );
+    assert_eq!(body, "hot-reload-invalid-ok", "response body should match backend");
 }
 
 // -----------------------------------------------------------------------------

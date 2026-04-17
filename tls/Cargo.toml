@@ -16,14 +16,21 @@ name = "praxis_tls"
 [lints]
 workspace = true
 
+[features]
+hot-reload = ["dep:arc-swap", "dep:notify", "dep:tokio"]
+
 [dependencies]
+arc-swap = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt"], optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }

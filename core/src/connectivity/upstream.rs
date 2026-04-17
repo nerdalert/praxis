@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use praxis_tls::ClusterTls;
+use praxis_tls::CachedClusterTls;
 
 use super::ConnectionOptions;
 
@@ -14,6 +14,10 @@ use super::ConnectionOptions;
 // -----------------------------------------------------------------------------
 
 /// An upstream endpoint to proxy requests to.
+///
+/// TLS material (CA certs, client cert/key) is pre-parsed at config
+/// time and cached in [`CachedClusterTls`], eliminating per-connection
+/// filesystem I/O.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -29,6 +33,8 @@ use super::ConnectionOptions;
 /// assert_eq!(&*upstream.address, "127.0.0.1:8080");
 /// assert!(upstream.tls.is_none());
 /// ```
+///
+/// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
 #[derive(Debug, Clone)]
 pub struct Upstream {
     /// Address in `host:port` form.
@@ -37,8 +43,8 @@ pub struct Upstream {
     /// Connection tuning for this upstream.
     pub connection: Arc<ConnectionOptions>,
 
-    /// TLS settings. `None` means plain TCP.
-    pub tls: Option<ClusterTls>,
+    /// Pre-cached TLS settings. `None` means plain TCP.
+    pub tls: Option<CachedClusterTls>,
 }
 
 // -----------------------------------------------------------------------------
@@ -47,6 +53,8 @@ pub struct Upstream {
 
 #[cfg(test)]
 mod tests {
+    use praxis_tls::ClusterTls;
+
     use super::*;
 
     #[test]
@@ -62,10 +70,11 @@ mod tests {
             sni: Some("api.example.com".to_owned()),
             ..ClusterTls::default()
         };
-        let u = make_upstream("10.0.0.1:443", Some(tls));
+        let cached = CachedClusterTls::try_from_config(&tls).unwrap();
+        let u = make_upstream("10.0.0.1:443", Some(cached));
         assert!(u.tls.is_some(), "tls should be present");
         assert_eq!(
-            u.tls.as_ref().expect("tls should be present").sni.as_deref(),
+            u.tls.as_ref().expect("tls should be present").sni(),
             Some("api.example.com"),
             "sni should match configured value"
         );
@@ -73,9 +82,10 @@ mod tests {
 
     #[test]
     fn tls_verify_defaults_to_true() {
-        let u = make_upstream("10.0.0.1:443", Some(ClusterTls::default()));
+        let cached = CachedClusterTls::try_from_config(&ClusterTls::default()).unwrap();
+        let u = make_upstream("10.0.0.1:443", Some(cached));
         assert!(
-            u.tls.as_ref().expect("tls should be present").verify,
+            u.tls.as_ref().expect("tls should be present").verify(),
             "verify should default to true"
         );
     }
@@ -86,9 +96,10 @@ mod tests {
             verify: false,
             ..ClusterTls::default()
         };
-        let u = make_upstream("10.0.0.1:443", Some(tls));
+        let cached = CachedClusterTls::try_from_config(&tls).unwrap();
+        let u = make_upstream("10.0.0.1:443", Some(cached));
         assert!(
-            !u.tls.as_ref().expect("tls should be present").verify,
+            !u.tls.as_ref().expect("tls should be present").verify(),
             "verify should be false when explicitly disabled"
         );
     }
@@ -97,8 +108,8 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    /// Build an [`Upstream`] with the given address and optional TLS config.
-    fn make_upstream(address: &str, tls: Option<ClusterTls>) -> Upstream {
+    /// Build an [`Upstream`] with the given address and optional cached TLS config.
+    fn make_upstream(address: &str, tls: Option<CachedClusterTls>) -> Upstream {
         Upstream {
             address: Arc::from(address),
             tls,

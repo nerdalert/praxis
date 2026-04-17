@@ -30,6 +30,17 @@ use crate::ClientCertMode;
 /// ```
 #[derive(Debug, Error)]
 pub enum TlsError {
+    /// A certificate has no `server_names` and `default` is not set to `true`.
+    #[error("certificate {path} has no server_names and is not marked default: true; this is ambiguous")]
+    AmbiguousCert {
+        /// The path of the ambiguous certificate.
+        path: String,
+    },
+
+    /// Cannot enable hot-reload with multiple certificates (SNI).
+    #[error("hot_reload requires exactly one certificate; multi-cert SNI configs are not supported")]
+    HotReloadMultipleCerts,
+
     /// Failed to load or parse a TLS file (certificate, key, or CA).
     #[error("failed to load TLS file {path}: {detail}")]
     FileLoadError {
@@ -46,6 +57,10 @@ pub enum TlsError {
         /// The mode that requires a CA.
         mode: ClientCertMode,
     },
+
+    /// More than one certificate has `default: true`.
+    #[error("multiple certificates are marked default: true; only one default certificate is allowed")]
+    MultipleDefaults,
 
     /// No certificates provided in listener TLS config.
     #[error("at least one certificate is required in listener TLS config")]
@@ -100,6 +115,33 @@ mod tests {
         assert!(
             e.to_string().contains("at least one certificate"),
             "should mention certificate requirement"
+        );
+    }
+
+    #[test]
+    fn error_display_hot_reload_multiple_certs() {
+        let e = TlsError::HotReloadMultipleCerts;
+        assert!(e.to_string().contains("hot_reload"), "should mention hot_reload: {e}");
+    }
+
+    #[test]
+    fn error_display_ambiguous_cert() {
+        let e = TlsError::AmbiguousCert {
+            path: "/etc/ssl/mystery.pem".to_owned(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("ambiguous"), "should mention ambiguous: {msg}");
+        assert!(msg.contains("default: true"), "should mention default: true: {msg}");
+    }
+
+    #[test]
+    fn error_display_multiple_defaults() {
+        let e = TlsError::MultipleDefaults;
+        let msg = e.to_string();
+        assert!(msg.contains("multiple"), "should mention multiple: {msg}");
+        assert!(
+            msg.contains("only one default"),
+            "should mention only one default: {msg}"
         );
     }
 }

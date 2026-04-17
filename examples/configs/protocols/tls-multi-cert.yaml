@@ -1,8 +1,8 @@
 # TLS Multi-Certificate SNI
 #
 # Multiple certificates on one listener; Praxis selects the
-# certificate matching the client's SNI hostname. The last
-# entry (no server_names) is the default fallback.
+# certificate matching the client's SNI hostname. The entry
+# with `default: true` is the fallback for unmatched SNI.
 #
 #   Client -> TLS(api.example.com) -> Praxis :8443 -> HTTP -> Backend :3000
 #   Client -> TLS(web.example.com) -> Praxis :8443 -> HTTP -> Backend :3000
@@ -33,6 +33,7 @@ listeners:
 
         - cert_path: /etc/ssl/certs/default.pem
           key_path: /etc/ssl/private/default-key.pem
+          default: true
 
 filter_chains:
   - name: main

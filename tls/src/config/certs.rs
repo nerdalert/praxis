@@ -36,12 +36,17 @@ pub struct CertKeyPair {
     /// Path to the PEM certificate file.
     pub cert_path: String,
 
+    /// Whether this certificate is the default fallback for unmatched SNI.
+    ///
+    /// At most one certificate in a multi-cert config may set this to
+    /// `true`. The default entry does not need `server_names`.
+    #[serde(default)]
+    pub default: bool,
+
     /// Path to the PEM private key file.
     pub key_path: String,
 
     /// SNI hostnames this certificate serves (listener only).
-    ///
-    /// Empty means this is the default (fallback) certificate.
     #[serde(default)]
     pub server_names: Vec<String>,
 }
@@ -120,6 +125,7 @@ mod tests {
         let tmp = temp_cert_key();
         let pair = CertKeyPair {
             cert_path: tmp.cert.clone(),
+            default: false,
             key_path: tmp.key.clone(),
             server_names: Vec::new(),
         };

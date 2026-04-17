@@ -10,7 +10,7 @@
 //! [`ListenerTls`]: crate::ListenerTls
 //! [`SniCertResolver`]: crate::setup::SniCertResolver
 
-mod loader;
+pub(crate) mod loader;
 mod sni;
 
 use std::sync::Arc;
@@ -102,6 +102,66 @@ pub fn build_server_config(tls: &ListenerTls) -> Result<Arc<ServerConfig>, TlsEr
     Ok(Arc::new(config))
 }
 
+/// Build a `rustls::ServerConfig` that uses a [`ReloadableCertResolver`]
+/// for hot-reload support.
+///
+/// Returns the server config and a shared [`ArcSwap`] handle. The
+/// watcher task stores new certificates into this handle; the
+/// resolver reads from it during TLS handshakes.
+///
+/// # Errors
+///
+/// Returns [`TlsError`] if the initial certificate cannot be loaded
+/// or the mTLS CA is invalid.
+///
+/// [`TlsError`]: crate::TlsError
+/// [`ReloadableCertResolver`]: crate::reload::ReloadableCertResolver
+/// [`ArcSwap`]: arc_swap::ArcSwap
+#[cfg(feature = "hot-reload")]
+#[allow(clippy::indexing_slicing, reason = "validated non-empty")]
+#[allow(
+    clippy::type_complexity,
+    reason = "return type is inherently complex due to ArcSwap + CertifiedKey"
+)]
+pub fn build_reloadable_server_config(
+    tls: &ListenerTls,
+) -> Result<(Arc<ServerConfig>, Arc<arc_swap::ArcSwap<rustls::sign::CertifiedKey>>), TlsError> {
+    let versions = match tls.min_version {
+        Some(TlsVersion::Tls13) => vec![&version::TLS13],
+        Some(TlsVersion::Tls12) | None => vec![&version::TLS12, &version::TLS13],
+    };
+    let provider = default_crypto_provider();
+    let builder = ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&versions)
+        .map_err(|e| TlsError::FileLoadError {
+            path: tls.certificates[0].cert_path.clone(),
+            detail: format!("failed to set TLS protocol versions: {e}"),
+        })?;
+
+    let builder = if tls.client_cert_mode == ClientCertMode::None {
+        builder.with_no_client_auth()
+    } else {
+        let ca_path =
+            tls.client_ca
+                .as_ref()
+                .map(|ca| ca.ca_path.as_str())
+                .ok_or_else(|| TlsError::MissingClientCa {
+                    mode: tls.client_cert_mode.clone(),
+                })?;
+        let verifier = client_auth::build_client_verifier(ca_path, &tls.client_cert_mode)?;
+        builder.with_client_cert_verifier(verifier)
+    };
+
+    let primary = &tls.certificates[0];
+    let resolver = crate::reload::ReloadableCertResolver::new(primary)?;
+    let swap_handle = resolver.arc();
+
+    let mut config = builder.with_cert_resolver(Arc::new(resolver));
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    Ok((Arc::new(config), swap_handle))
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -117,11 +177,13 @@ mod tests {
         let tls = ListenerTls {
             certificates: vec![CertKeyPair {
                 cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+                default: false,
                 key_path: certs.key_path.to_str().expect("key path").to_owned(),
                 server_names: Vec::new(),
             }],
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
             min_version: None,
         };
 
@@ -141,17 +203,20 @@ mod tests {
             certificates: vec![
                 CertKeyPair {
                     cert_path: certs1.cert_path.to_str().expect("cert1 path").to_owned(),
+                    default: false,
                     key_path: certs1.key_path.to_str().expect("key1 path").to_owned(),
                     server_names: vec!["alpha.example.com".to_owned()],
                 },
                 CertKeyPair {
                     cert_path: certs2.cert_path.to_str().expect("cert2 path").to_owned(),
+                    default: true,
                     key_path: certs2.key_path.to_str().expect("key2 path").to_owned(),
                     server_names: Vec::new(),
                 },
             ],
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
             min_version: None,
         };
 
@@ -169,6 +234,7 @@ mod tests {
         let tls = ListenerTls {
             certificates: vec![CertKeyPair {
                 cert_path: server.cert_path.to_str().expect("cert path").to_owned(),
+                default: false,
                 key_path: server.key_path.to_str().expect("key path").to_owned(),
                 server_names: Vec::new(),
             }],
@@ -176,6 +242,7 @@ mod tests {
                 ca_path: server.ca_cert_path.to_str().expect("ca path").to_owned(),
             }),
             client_cert_mode: ClientCertMode::Require,
+            hot_reload: None,
             min_version: None,
         };
 
@@ -193,11 +260,13 @@ mod tests {
         let tls = ListenerTls {
             certificates: vec![CertKeyPair {
                 cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+                default: false,
                 key_path: certs.key_path.to_str().expect("key path").to_owned(),
                 server_names: Vec::new(),
             }],
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
             min_version: Some(TlsVersion::Tls13),
         };
 
@@ -214,11 +283,13 @@ mod tests {
         let tls = ListenerTls {
             certificates: vec![CertKeyPair {
                 cert_path: "/nonexistent/cert.pem".to_owned(),
+                default: false,
                 key_path: "/nonexistent/key.pem".to_owned(),
                 server_names: Vec::new(),
             }],
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
             min_version: None,
         };
 
@@ -234,11 +305,13 @@ mod tests {
         let tls = ListenerTls {
             certificates: vec![CertKeyPair {
                 cert_path: "/a".to_owned(),
+                default: false,
                 key_path: "/b".to_owned(),
                 server_names: Vec::new(),
             }],
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
             min_version: None,
         };
         assert!(
@@ -252,6 +325,7 @@ mod tests {
         let tls = ListenerTls {
             certificates: vec![CertKeyPair {
                 cert_path: "/a".to_owned(),
+                default: false,
                 key_path: "/b".to_owned(),
                 server_names: Vec::new(),
             }],
@@ -259,6 +333,7 @@ mod tests {
                 ca_path: "/ca.pem".to_owned(),
             }),
             client_cert_mode: ClientCertMode::Require,
+            hot_reload: None,
             min_version: None,
         };
         assert!(needs_custom_config(&tls), "mTLS config should need custom config");
@@ -269,11 +344,13 @@ mod tests {
         let tls = ListenerTls {
             certificates: vec![CertKeyPair {
                 cert_path: "/a".to_owned(),
+                default: false,
                 key_path: "/b".to_owned(),
                 server_names: Vec::new(),
             }],
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
             min_version: Some(TlsVersion::Tls13),
         };
         assert!(needs_custom_config(&tls), "min_version should need custom config");
@@ -285,17 +362,20 @@ mod tests {
             certificates: vec![
                 CertKeyPair {
                     cert_path: "/a".to_owned(),
+                    default: false,
                     key_path: "/b".to_owned(),
-                    server_names: Vec::new(),
+                    server_names: vec!["a.example.com".to_owned()],
                 },
                 CertKeyPair {
                     cert_path: "/c".to_owned(),
+                    default: true,
                     key_path: "/d".to_owned(),
                     server_names: Vec::new(),
                 },
             ],
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
             min_version: None,
         };
         assert!(needs_custom_config(&tls), "multi-cert should need custom config");

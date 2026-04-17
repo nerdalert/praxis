@@ -117,6 +117,7 @@ listeners:
             - www.example.com
         - cert_path: {fb_cert}
           key_path: {fb_key}
+          default: true
 
 filter_chains:
   - name: main
@@ -156,6 +157,7 @@ filter_chains:
         tls.certificates[2].server_names.is_empty(),
         "fallback cert should have no server_names"
     );
+    assert!(tls.certificates[2].default, "fallback cert should be marked as default");
 }
 
 #[test]
