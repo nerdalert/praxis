@@ -23,6 +23,7 @@ members = [
     "tests/smoke",
     "tests/utils",
 ]
+exclude = ["tests/fuzz"]
 
 [workspace.package]
 version = "0.1.0"

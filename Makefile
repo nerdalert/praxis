@@ -16,6 +16,7 @@ endif
 	test-security test-security-suite test-resilience test-smoke \
 	bench \
 	lint fmt audit coverage coverage-check \
+	fuzz fuzz-build \
 	container container-run \
 	run-echo run-debug \
 	tools clean-tools \
@@ -100,6 +101,20 @@ test-smoke:
 
 bench: $(VEGETA) $(FORTIO)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p benchmarks
+
+# -------------------------------------------------------------------
+# Fuzz
+# -------------------------------------------------------------------
+
+FUZZ_DURATION ?= 120
+
+fuzz:
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_sni -- -max_total_time=$(FUZZ_DURATION)
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_path_sanitize -- -max_total_time=$(FUZZ_DURATION)
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_config_parse -- -max_total_time=$(FUZZ_DURATION)
+
+fuzz-build:
+	cargo +nightly fuzz build --fuzz-dir tests/fuzz
 
 # -------------------------------------------------------------------
 # Quality
@@ -237,6 +252,10 @@ help:
 	@echo ""
 	@echo "Bench:"
 	@echo "  bench                Criterion micro-benchmarks"
+	@echo ""
+	@echo "Fuzz (requires cargo-fuzz + nightly):"
+	@echo "  fuzz                 run all fuzz targets (FUZZ_DURATION=60)"
+	@echo "  fuzz-build           build fuzz targets without running"
 	@echo ""
 	@echo "Quality:"
 	@echo "  lint                 clippy + rustfmt check"
