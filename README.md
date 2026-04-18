@@ -1,6 +1,7 @@
 # Praxis
 
 [![Tests](https://github.com/praxis-proxy/praxis/actions/workflows/tests.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/tests.yaml)
+[![CodeQL](https://github.com/praxis-proxy/praxis/actions/workflows/codeql.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/codeql.yaml)
 [![Conformance](https://github.com/praxis-proxy/praxis/actions/workflows/conformance.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/conformance.yaml)
 [![Supply Chain](https://github.com/praxis-proxy/praxis/actions/workflows/supply-chain.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/supply-chain.yaml)
 [![MSRV: 1.94](https://img.shields.io/badge/MSRV-1.94-brightgreen.svg)](https://blog.rust-lang.org/)
@@ -11,18 +12,18 @@ Praxis is a high performance and security-first proxy server and framework for A
 ## Getting Started
 
 - [Quickstart](docs/quickstart.md)
-- [Features](docs/features.md)
-- [Configuration](docs/configuration.md)
 - [Example configs](examples/README.md)
 
 ## Documentation
 
+- [Configuration](docs/configuration.md)
+- [Features](docs/features.md)
 - [Filters](docs/filters.md)
 - [Extensions](docs/extensions.md)
 - [TLS](docs/tls.md)
 - [Security Hardening](docs/security-hardening.md)
 
-### Contributing
+## Contributing
 
 Familiarize yourself with the documentation:
 
