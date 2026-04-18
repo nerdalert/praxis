@@ -15,7 +15,8 @@ pub use backend::{
     start_hop_by_hop_response_backend, start_slow_backend, start_uri_echo_backend,
 };
 pub use http_client::{
-    http_get, http_get_v6, http_post, http_send, json_post, parse_body, parse_header, parse_header_all, parse_status,
+    http_get, http_get_retry, http_get_v6, http_post, http_send, json_post, parse_body, parse_header, parse_header_all,
+    parse_status,
 };
 pub use port::{PortGuard, bind_unique_port, free_port, free_port_guard, free_port_v6, ipv6_available};
 pub use tls::{

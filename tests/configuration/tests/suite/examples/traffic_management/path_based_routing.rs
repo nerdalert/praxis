@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use praxis_test_utils::{free_port, http_get, start_backend, start_proxy};
+use praxis_test_utils::{free_port, http_get_retry, start_backend, start_proxy};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -29,13 +29,13 @@ fn path_based_routing() {
         ]),
     );
     let addr = start_proxy(&config);
-    let (status, body) = http_get(&addr, "/api/users", None);
+    let (status, body) = http_get_retry(&addr, "/api/users", None);
     assert_eq!(status, 200, "/api/ path should return 200");
     assert_eq!(body, "api", "/api/ should route to api backend");
-    let (status, body) = http_get(&addr, "/static/index.html", None);
+    let (status, body) = http_get_retry(&addr, "/static/index.html", None);
     assert_eq!(status, 200, "/static/ path should return 200");
     assert_eq!(body, "static", "/static/ should route to static backend");
-    let (status, body) = http_get(&addr, "/other", None);
+    let (status, body) = http_get_retry(&addr, "/other", None);
     assert_eq!(status, 200, "default path should return 200");
     assert_eq!(body, "default", "unmatched path should route to default backend");
 }

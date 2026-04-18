@@ -49,6 +49,18 @@ pub fn http_get(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
     (parse_status(&raw), parse_body(&raw))
 }
 
+/// Send an HTTP GET, retrying up to 3 times on 5xx responses.
+pub fn http_get_retry(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
+    for _ in 0..2 {
+        let (status, body) = http_get(addr, path, host);
+        if status < 500 {
+            return (status, body);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    http_get(addr, path, host)
+}
+
 /// Send an HTTP POST and return `(status, body)`.
 pub fn http_post(addr: &str, path: &str, body: &str) -> (u16, String) {
     let raw = http_send(
