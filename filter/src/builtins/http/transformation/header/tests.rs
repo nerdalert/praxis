@@ -267,6 +267,8 @@ fn make_header_filter(yaml: &str) -> HeaderFilter {
     let cfg: HeaderFilterConfig = serde_yaml::from_value(config).unwrap();
     HeaderFilter {
         request_add: cfg.request_add.into_iter().map(|p| (p.name, p.value)).collect(),
+        request_set: cfg.request_set.into_iter().map(|p| (p.name, p.value)).collect(),
+        request_remove: cfg.request_remove,
         response_add: cfg
             .response_add
             .into_iter()

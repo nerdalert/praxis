@@ -26,6 +26,9 @@ pub struct HttpFilterContext<'a> {
     /// Extra headers to inject into the upstream request.
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
 
+    /// Header names to remove from the upstream request.
+    pub remove_request_headers: Vec<Cow<'static, str>>,
+
     /// Shared health registry for endpoint health lookups.
     pub health_registry: Option<&'a HealthRegistry>,
 

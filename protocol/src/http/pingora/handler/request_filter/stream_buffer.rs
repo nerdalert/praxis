@@ -3,7 +3,7 @@
 
 //! StreamBuffer pre-read logic and TRACE response construction.
 
-use std::{borrow::Cow, collections::VecDeque};
+use std::collections::VecDeque;
 
 use pingora_proxy::Session;
 use praxis_filter::{BodyBuffer, BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request};
@@ -82,15 +82,16 @@ pub(super) async fn pre_read_body(
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
     request: &Request,
-) -> Result<Vec<(Cow<'static, str>, String)>, PreReadError> {
+) -> Result<super::RequestHeaderOps, PreReadError> {
     let caps = pipeline.body_capabilities();
     let max_bytes = match caps.request_body_mode {
         BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(usize::MAX),
-        _ => return Ok(Vec::new()),
+        _ => return Ok(super::RequestHeaderOps { extra: Vec::new(), remove: Vec::new() }),
     };
 
     let mut buffer = BodyBuffer::new(max_bytes);
     let mut all_extra_headers = Vec::new();
+    let mut all_remove_headers = Vec::new();
     let mut released = false;
 
     loop {
@@ -119,6 +120,7 @@ pub(super) async fn pre_read_body(
         ctx.cluster = filter_ctx.cluster;
         ctx.upstream = filter_ctx.upstream;
         all_extra_headers.extend(filter_ctx.extra_request_headers);
+        all_remove_headers.extend(filter_ctx.remove_request_headers);
 
         match action {
             Ok(FilterAction::Continue) => {},
@@ -149,5 +151,8 @@ pub(super) async fn pre_read_body(
 
     ctx.request_body_released = true;
 
-    Ok(all_extra_headers)
+    Ok(super::RequestHeaderOps {
+        extra: all_extra_headers,
+        remove: all_remove_headers,
+    })
 }

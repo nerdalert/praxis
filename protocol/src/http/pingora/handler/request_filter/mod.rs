@@ -68,9 +68,13 @@ pub(in crate::http) async fn execute(
     if matches!(caps.request_body_mode, BodyMode::StreamBuffer { .. }) {
         tracing::debug!("pre-reading request body for StreamBuffer inspection");
         match stream_buffer::pre_read_body(pipeline, session, ctx, &request).await {
-            Ok(extra_headers) => {
-                tracing::debug!(count = extra_headers.len(), "injecting promoted headers");
-                for (name, value) in extra_headers {
+            Ok(header_ops) => {
+                tracing::debug!(extra = header_ops.extra.len(), remove = header_ops.remove.len(), "applying pre-read header ops");
+                for name in &header_ops.remove {
+                    let _removed = session.req_header_mut().remove_header(name.as_ref());
+                    request.headers.remove(name.as_ref());
+                }
+                for (name, value) in header_ops.extra {
                     if let (Ok(hname), Ok(hval)) = (
                         http::header::HeaderName::from_bytes(name.as_bytes()),
                         http::header::HeaderValue::from_str(&value),
@@ -96,8 +100,11 @@ pub(in crate::http) async fn execute(
     }
 
     match run_pipeline(pipeline, request, ctx).await {
-        Ok((FilterAction::Continue | FilterAction::Release, extra_headers)) => {
-            for (name, value) in extra_headers {
+        Ok((FilterAction::Continue | FilterAction::Release, header_ops)) => {
+            for name in &header_ops.remove {
+                let _removed = session.req_header_mut().remove_header(name.as_ref());
+            }
+            for (name, value) in header_ops.extra {
                 let _insert = session.req_header_mut().insert_header(name.into_owned(), value);
             }
             Ok(false)
@@ -118,21 +125,30 @@ pub(in crate::http) async fn execute(
 // Header-Phase Pipeline
 // -----------------------------------------------------------------------------
 
+/// Headers to add and remove from the upstream request after pipeline execution.
+struct RequestHeaderOps {
+    /// Headers to insert (set/add) on the upstream request.
+    extra: Vec<(Cow<'static, str>, String)>,
+    /// Header names to remove from the upstream request.
+    remove: Vec<Cow<'static, str>>,
+}
+
 /// Run the request-phase filter pipeline and snapshot the request for later phases.
 ///
-/// Returns the final action and any extra headers promoted by filters.
+/// Returns the final action and any header operations to apply.
 async fn run_pipeline(
     pipeline: &FilterPipeline,
     request: Request,
     ctx: &mut PingoraRequestCtx,
-) -> std::result::Result<(FilterAction, Vec<(Cow<'static, str>, String)>), FilterError> {
-    let (action, extra_headers, cluster, upstream, rewritten_path) = {
+) -> std::result::Result<(FilterAction, RequestHeaderOps), FilterError> {
+    let (action, extra_headers, remove_headers, cluster, upstream, rewritten_path) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
         let action = pipeline.execute_http_request(&mut filter_ctx).await;
         (
             action,
             filter_ctx.extra_request_headers,
+            filter_ctx.remove_request_headers,
             filter_ctx.cluster,
             filter_ctx.upstream,
             filter_ctx.rewritten_path,
@@ -146,9 +162,15 @@ async fn run_pipeline(
             ctx.cluster = cluster;
             ctx.upstream = upstream;
             ctx.rewritten_path = rewritten_path;
-            Ok((FilterAction::Continue, extra_headers))
+            Ok((FilterAction::Continue, RequestHeaderOps {
+                extra: extra_headers,
+                remove: remove_headers,
+            }))
         },
-        Ok(FilterAction::Reject(rejection)) => Ok((FilterAction::Reject(rejection), Vec::new())),
+        Ok(FilterAction::Reject(rejection)) => Ok((FilterAction::Reject(rejection), RequestHeaderOps {
+            extra: Vec::new(),
+            remove: Vec::new(),
+        })),
         Err(e) => Err(e),
     }
 }
@@ -169,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_pipeline_continues() {
-        let (action, extra_headers) = run_pipeline(&empty_pipeline(), make_request(), &mut make_ctx())
+        let (action, header_ops) = run_pipeline(&empty_pipeline(), make_request(), &mut make_ctx())
             .await
             .unwrap();
 
@@ -178,7 +200,7 @@ mod tests {
             "empty pipeline should continue"
         );
         assert!(
-            extra_headers.is_empty(),
+            header_ops.extra.is_empty(),
             "empty pipeline should produce no extra headers"
         );
     }
@@ -231,10 +253,10 @@ mod tests {
         let pipeline = empty_pipeline();
         let mut ctx = make_ctx();
 
-        let (_, extra_headers) = run_pipeline(&pipeline, make_request(), &mut ctx).await.unwrap();
+        let (_, header_ops) = run_pipeline(&pipeline, make_request(), &mut ctx).await.unwrap();
 
         assert!(
-            extra_headers.is_empty(),
+            header_ops.extra.is_empty(),
             "empty pipeline should produce no extra headers"
         );
     }
