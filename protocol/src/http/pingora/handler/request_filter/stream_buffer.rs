@@ -86,7 +86,12 @@ pub(super) async fn pre_read_body(
     let caps = pipeline.body_capabilities();
     let max_bytes = match caps.request_body_mode {
         BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(usize::MAX),
-        _ => return Ok(super::RequestHeaderOps { extra: Vec::new(), remove: Vec::new() }),
+        _ => {
+            return Ok(super::RequestHeaderOps {
+                extra: Vec::new(),
+                remove: Vec::new(),
+            });
+        },
     };
 
     let mut buffer = BodyBuffer::new(max_bytes);
@@ -104,11 +109,10 @@ pub(super) async fn pre_read_body(
         let end_of_stream = chunk.is_none();
         let mut body = chunk;
 
-        if !released
-            && let Some(ref b) = body
-            && buffer.push(b.clone()).is_err()
-        {
-            return Err(PreReadError::Rejected(Rejection::status(413)));
+        if let Some(ref b) = body {
+            if buffer.push(b.clone()).is_err() {
+                return Err(PreReadError::Rejected(Rejection::status(413)));
+            }
         }
 
         let mut filter_ctx = ctx.build_filter_context(pipeline, request, None);

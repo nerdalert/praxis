@@ -69,7 +69,11 @@ pub(in crate::http) async fn execute(
         tracing::debug!("pre-reading request body for StreamBuffer inspection");
         match stream_buffer::pre_read_body(pipeline, session, ctx, &request).await {
             Ok(header_ops) => {
-                tracing::debug!(extra = header_ops.extra.len(), remove = header_ops.remove.len(), "applying pre-read header ops");
+                tracing::debug!(
+                    extra = header_ops.extra.len(),
+                    remove = header_ops.remove.len(),
+                    "applying pre-read header ops"
+                );
                 for name in &header_ops.remove {
                     let _removed = session.req_header_mut().remove_header(name.as_ref());
                     request.headers.remove(name.as_ref());
@@ -162,15 +166,21 @@ async fn run_pipeline(
             ctx.cluster = cluster;
             ctx.upstream = upstream;
             ctx.rewritten_path = rewritten_path;
-            Ok((FilterAction::Continue, RequestHeaderOps {
-                extra: extra_headers,
-                remove: remove_headers,
-            }))
+            Ok((
+                FilterAction::Continue,
+                RequestHeaderOps {
+                    extra: extra_headers,
+                    remove: remove_headers,
+                },
+            ))
         },
-        Ok(FilterAction::Reject(rejection)) => Ok((FilterAction::Reject(rejection), RequestHeaderOps {
-            extra: Vec::new(),
-            remove: Vec::new(),
-        })),
+        Ok(FilterAction::Reject(rejection)) => Ok((
+            FilterAction::Reject(rejection),
+            RequestHeaderOps {
+                extra: Vec::new(),
+                remove: Vec::new(),
+            },
+        )),
         Err(e) => Err(e),
     }
 }

@@ -146,8 +146,7 @@ impl HeaderFilter {
 
         for name in &cfg.request_remove {
             http::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_e| {
-                let msg: FilterError =
-                    format!("headers filter: invalid header name '{name}' in request_remove").into();
+                let msg: FilterError = format!("headers filter: invalid header name '{name}' in request_remove").into();
                 msg
             })?;
         }
