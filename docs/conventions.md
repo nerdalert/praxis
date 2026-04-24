@@ -29,15 +29,26 @@
 
 ### Comments vs Tracing
 
-Prefer `tracing::info!`, `tracing::debug!`, or
-`tracing::trace!` over inline comments for describing
-runtime behavior. Comments that say what the code is doing
-at runtime ("parse the config", "reject the request",
-"skip this filter") should be tracing calls instead.
+Comments answer **"why?"**, never **"what?"**.
 
-Use comments only when explaining compile-time or
-structural rationale (the "why", not the "what"), or when
-the context is too long for a tracing message.
+**"What?" belongs in `tracing`**, not comments. If a
+comment describes what the code is doing at runtime
+("parse the config", "reject the request", "skip this
+filter"), replace it with a `tracing::debug!`,
+`tracing::trace!`, or `tracing::info!` call. Runtime
+narration (what the code did, what it decided, what it
+skipped) is structured logging, not commentary.
+
+**"Why?" belongs in comments**, but only when
+non-obvious. A hidden constraint, a subtle invariant, a
+workaround for a specific bug, or behavior that would
+surprise a reader: these justify a comment. If removing
+the comment would not confuse a future reader, do not
+write it.
+
+**"What?" at the code level needs neither.** Well-named
+identifiers already explain what the code does. Do not
+write comments that restate what names already convey.
 
 ### Testing
 

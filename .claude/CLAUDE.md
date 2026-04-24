@@ -54,8 +54,8 @@ guide. Key points:
 - `#![deny(unsafe_code)]` in all crates
 - All items (public and private) require `///` doc
   comments; enforced by `missing_docs` lint
-- Prefer `tracing` calls over inline comments for
-  runtime behavior
+- Comments answer "why?", never "what?"; use
+  `tracing` for runtime narration
 - Prefer `to_owned()` over `to_string()` for `&str` to `String`
 - Use inline format args: `format!("{var}")`
 - Use let-chains, `is_some_and()`, `strip_prefix()`
