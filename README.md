@@ -25,13 +25,12 @@ Praxis is a high performance and security-first proxy server and framework for A
 
 ## Contributing
 
-Familiarize yourself with the documentation:
+Issues and pull requests are welcome. Familiarize yourself
+with the following documentation first:
 
 - [Architecture](docs/architecture.md)
 - [Conventions](docs/conventions.md)
 - [Development](docs/development.md)
 - [Benchmarks](docs/benchmarks.md)
-
-Issues and pull requests are welcome.
 
 For larger changes, open an issue or discussion first.
