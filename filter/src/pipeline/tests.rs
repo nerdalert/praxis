@@ -12,7 +12,7 @@ use ::http::{HeaderMap, Method, StatusCode};
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::{FilterPipeline, body::compute_body_capabilities};
+use super::{FilterPipeline, body::compute_body_capabilities, filter::PipelineFilter};
 use crate::{
     FilterAction, FilterEntry, FilterError, FilterRegistry,
     any_filter::AnyFilter,
@@ -36,9 +36,11 @@ fn build_empty_pipeline() {
 fn build_unknown_filter_errors() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![FilterEntry {
+        branch_chains: None,
         conditions: vec![],
         filter_type: "nonexistent".into(),
         config: serde_yaml::Value::Null,
+        name: None,
         response_conditions: vec![],
     }];
     match FilterPipeline::build(&mut entries, &registry) {
@@ -59,9 +61,11 @@ fn build_with_valid_filters() {
         serde_yaml::Value::Sequence(vec![]),
     );
     let mut entries = vec![FilterEntry {
+        branch_chains: None,
         conditions: vec![],
         filter_type: "router".into(),
         config: serde_yaml::Value::Mapping(router_config),
+        name: None,
         response_conditions: vec![],
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
@@ -74,15 +78,19 @@ fn build_stops_on_first_error() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "bad_filter".into(),
             config: serde_yaml::Value::Null,
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -741,9 +749,11 @@ async fn execute_request_body_condition_gating() {
 fn errors_load_balancer_without_router() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![FilterEntry {
+        branch_chains: None,
         conditions: vec![],
         filter_type: "load_balancer".into(),
         config: serde_yaml::from_str("clusters: []").unwrap(),
+        name: None,
         response_conditions: vec![],
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
@@ -761,15 +771,19 @@ fn no_error_when_router_precedes_load_balancer() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
             config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -786,15 +800,19 @@ fn errors_unconditional_static_response_followed_by_filters() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "static_response".into(),
             config: serde_yaml::from_str("status: 200").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes: []").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -811,21 +829,27 @@ fn no_error_for_conditional_static_response() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![when_path("/health")],
             filter_type: "static_response".into(),
             config: serde_yaml::from_str("status: 200").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
             config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -842,21 +866,27 @@ fn errors_duplicate_router() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes: []").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes: []").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
             config: serde_yaml::from_str("clusters: []").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -873,21 +903,27 @@ fn errors_duplicate_load_balancer() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
             config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
             config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -903,9 +939,11 @@ fn errors_duplicate_load_balancer() {
 fn errors_conditional_security_filter() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![FilterEntry {
+        branch_chains: None,
         conditions: vec![when_path("/api")],
         filter_type: "ip_acl".into(),
         config: serde_yaml::from_str("allow: [\"10.0.0.0/8\"]").unwrap(),
+        name: None,
         response_conditions: vec![],
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
@@ -922,9 +960,11 @@ fn errors_conditional_security_filter() {
 fn no_error_for_unconditional_security_filter() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![FilterEntry {
+        branch_chains: None,
         conditions: vec![],
         filter_type: "ip_acl".into(),
         config: serde_yaml::from_str("allow: [\"10.0.0.0/8\"]").unwrap(),
+        name: None,
         response_conditions: vec![],
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
@@ -956,9 +996,11 @@ fn empty_pipeline_no_warnings() {
 fn warns_router_without_lb() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![FilterEntry {
+        branch_chains: None,
         conditions: vec![],
         filter_type: "router".into(),
         config: serde_yaml::from_str("routes: []").unwrap(),
+        name: None,
         response_conditions: vec![],
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
@@ -976,16 +1018,20 @@ fn errors_misaligned_clusters() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: missing_cluster").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
             config: serde_yaml::from_str("clusters:\n  - name: other_cluster\n    endpoints: [\"10.0.0.1:80\"]")
                 .unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -1004,15 +1050,19 @@ fn no_error_for_aligned_clusters() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: backend").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
             config: serde_yaml::from_str("clusters:\n  - name: backend\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -1029,15 +1079,19 @@ fn warns_all_routers_conditional() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![when_path("/api")],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes: []").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
             config: serde_yaml::from_str("clusters: []").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -1056,15 +1110,19 @@ fn no_warning_when_unconditional_router_exists() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![when_path("/api")],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes: []").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes: []").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -1201,15 +1259,19 @@ fn errors_duplicate_path_rewrite_filters() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "path_rewrite".into(),
             config: serde_yaml::from_str("strip_prefix: \"/api\"").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "path_rewrite".into(),
             config: serde_yaml::from_str("add_prefix: \"/v2\"").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -1228,18 +1290,22 @@ fn errors_mixed_path_and_url_rewrite_filters() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "path_rewrite".into(),
             config: serde_yaml::from_str("strip_prefix: \"/api\"").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "url_rewrite".into(),
             config: serde_yaml::from_str(
                 "operations:\n  - regex_replace:\n      pattern: \"^/a\"\n      replacement: \"/b\"",
             )
             .unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -1257,9 +1323,11 @@ fn errors_mixed_path_and_url_rewrite_filters() {
 fn no_error_single_path_rewrite_filter() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![FilterEntry {
+        branch_chains: None,
         conditions: vec![],
         filter_type: "path_rewrite".into(),
         config: serde_yaml::from_str("strip_prefix: \"/api\"").unwrap(),
+        name: None,
         response_conditions: vec![],
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
@@ -1275,18 +1343,22 @@ fn no_error_duplicate_rewrite_with_allow_override() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "path_rewrite".into(),
             config: serde_yaml::from_str("strip_prefix: \"/api\"").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "url_rewrite".into(),
             config: serde_yaml::from_str(
                 "operations:\n  - regex_replace:\n      pattern: \"^/a\"\n      replacement: \"/b\"\nallow_rewrite_override: true",
             )
             .unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -1303,18 +1375,22 @@ fn error_when_allow_override_on_first_not_last() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "path_rewrite".into(),
             config: serde_yaml::from_str("strip_prefix: \"/api\"\nallow_rewrite_override: true").unwrap(),
+            name: None,
             response_conditions: vec![],
         },
         FilterEntry {
+            branch_chains: None,
             conditions: vec![],
             filter_type: "url_rewrite".into(),
             config: serde_yaml::from_str(
                 "operations:\n  - regex_replace:\n      pattern: \"^/a\"\n      replacement: \"/b\"",
             )
             .unwrap(),
+            name: None,
             response_conditions: vec![],
         },
     ];
@@ -1323,6 +1399,153 @@ fn error_when_allow_override_on_first_not_last() {
     assert!(
         errors.iter().any(|e| e.contains("rewriting filters")),
         "override on first filter should not suppress error: {errors:?}"
+    );
+}
+
+#[tokio::test]
+async fn skip_to_excludes_skipped_filters_from_response() {
+    let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let mut filter_a = PipelineFilter::new(
+        AnyFilter::Http(Box::new(LoggingFilter {
+            label: "A",
+            log: Arc::clone(&log),
+        })),
+        vec![],
+        vec![],
+    );
+    filter_a.branches = vec![super::branch::ResolvedBranch {
+        condition: None,
+        filters: vec![],
+        max_iterations: None,
+        name: Arc::from("skip_branch"),
+        rejoin: super::branch::RejoinTarget::SkipTo(2),
+    }];
+
+    let filter_b = PipelineFilter::new(
+        AnyFilter::Http(Box::new(LoggingFilter {
+            label: "B",
+            log: Arc::clone(&log),
+        })),
+        vec![],
+        vec![],
+    );
+
+    let filter_c = PipelineFilter::new(
+        AnyFilter::Http(Box::new(LoggingFilter {
+            label: "C",
+            log: Arc::clone(&log),
+        })),
+        vec![],
+        vec![],
+    );
+
+    let pipeline = FilterPipeline {
+        body_capabilities: BodyCapabilities::default(),
+        compression: None,
+        filters: vec![filter_a, filter_b, filter_c],
+        health_registry: None,
+    };
+
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    log.lock().unwrap().clear();
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    let recorded = log.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["C", "A"],
+        "response should skip B (skipped by SkipTo) and run C then A in reverse"
+    );
+}
+
+#[tokio::test]
+async fn all_executed_filters_run_on_response() {
+    let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let pipeline = FilterPipeline {
+        body_capabilities: BodyCapabilities::default(),
+        compression: None,
+        filters: vec![
+            PipelineFilter::new(
+                AnyFilter::Http(Box::new(LoggingFilter {
+                    label: "first",
+                    log: Arc::clone(&log),
+                })),
+                vec![],
+                vec![],
+            ),
+            PipelineFilter::new(
+                AnyFilter::Http(Box::new(LoggingFilter {
+                    label: "second",
+                    log: Arc::clone(&log),
+                })),
+                vec![],
+                vec![],
+            ),
+        ],
+        health_registry: None,
+    };
+
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    log.lock().unwrap().clear();
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    let recorded = log.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["second", "first"],
+        "all request-executed filters should run on_response in reverse"
+    );
+}
+
+#[tokio::test]
+async fn skipped_filter_skips_its_branches() {
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    let branch_filter = PipelineFilter::new(
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::clone(&counter),
+        })),
+        vec![],
+        vec![],
+    );
+    let branch = super::branch::ResolvedBranch {
+        condition: None,
+        filters: vec![branch_filter],
+        max_iterations: None,
+        name: Arc::from("should_not_fire"),
+        rejoin: super::branch::RejoinTarget::Next,
+    };
+
+    let mut parent = PipelineFilter::new(
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::new(AtomicUsize::new(0)),
+        })),
+        vec![when_path("/api")],
+        vec![],
+    );
+    parent.branches = vec![branch];
+
+    let pipeline = FilterPipeline {
+        body_capabilities: BodyCapabilities::default(),
+        compression: None,
+        filters: vec![parent],
+        health_registry: None,
+    };
+
+    let req = crate::test_utils::make_request(Method::GET, "/other");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "branch filter should not execute when parent filter is skipped by conditions"
     );
 }
 
@@ -1598,7 +1821,7 @@ impl HttpFilter for SwapHeaderFilter {
 fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
     let filters: Vec<_> = filters
         .into_iter()
-        .map(|f| (AnyFilter::Http(f), vec![], vec![]))
+        .map(|f| PipelineFilter::new(AnyFilter::Http(f), vec![], vec![]))
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
@@ -1616,7 +1839,7 @@ fn make_pipeline_with_conditions(
 ) -> FilterPipeline {
     let filters: Vec<_> = filters
         .into_iter()
-        .map(|(f, c)| (AnyFilter::Http(f), c, vec![]))
+        .map(|(f, c)| PipelineFilter::new(AnyFilter::Http(f), c, vec![]))
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
@@ -1634,7 +1857,7 @@ fn make_pipeline_with_response_conditions(
 ) -> FilterPipeline {
     let filters: Vec<_> = filters
         .into_iter()
-        .map(|(f, rc)| (AnyFilter::Http(f), vec![], rc))
+        .map(|(f, rc)| PipelineFilter::new(AnyFilter::Http(f), vec![], rc))
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 

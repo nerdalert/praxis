@@ -4,9 +4,13 @@
 //! Filter pipeline: ordered chain of filters executed on each request.
 
 mod body;
+pub(crate) mod branch;
 mod build;
+mod build_branch;
 mod checks;
 mod clusters;
+pub(crate) mod evaluate;
+pub(crate) mod filter;
 mod http;
 mod http_utils;
 mod tcp;
@@ -17,6 +21,7 @@ mod tests;
 use praxis_core::health::HealthRegistry;
 use tracing::warn;
 
+use self::filter::PipelineFilter;
 use crate::{
     FilterError,
     body::{BodyCapabilities, BodyMode},
@@ -26,13 +31,6 @@ use crate::{
 // -----------------------------------------------------------------------------
 // FilterPipeline
 // -----------------------------------------------------------------------------
-
-/// A filter paired with its request-phase and response-phase conditions.
-pub(crate) type ConditionalFilter = (
-    crate::any_filter::AnyFilter,
-    Vec<praxis_core::config::Condition>,
-    Vec<praxis_core::config::ResponseCondition>,
-);
 
 /// An ordered list of filters executed on every request.
 ///
@@ -50,8 +48,8 @@ pub struct FilterPipeline {
     /// Compression configuration, if a compression filter is present.
     compression: Option<CompressionConfig>,
 
-    /// Ordered list of filters with their request and response conditions.
-    pub(crate) filters: Vec<ConditionalFilter>,
+    /// Ordered list of filters with their conditions and branches.
+    pub(crate) filters: Vec<PipelineFilter>,
 
     /// Shared health registry for endpoint health lookups.
     health_registry: Option<HealthRegistry>,

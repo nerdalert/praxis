@@ -5,7 +5,7 @@
 
 use praxis_core::config::ResponseCondition;
 
-use super::ConditionalFilter;
+use super::filter::PipelineFilter;
 use crate::{
     any_filter::AnyFilter,
     body::{BodyAccess, BodyCapabilities, BodyMode},
@@ -60,27 +60,34 @@ pub(crate) fn merge_body_mode(current: &mut BodyMode, filter_mode: BodyMode) {
 // -----------------------------------------------------------------------------
 
 /// Merge all filters' body access declarations into a single capability set.
-pub(super) fn compute_body_capabilities(filters: &[ConditionalFilter]) -> BodyCapabilities {
+pub(super) fn compute_body_capabilities(filters: &[PipelineFilter]) -> BodyCapabilities {
     let mut caps = BodyCapabilities::default();
+    accumulate_caps(&mut caps, filters);
+    caps
+}
 
-    for (filter, _conditions, resp_conditions) in filters {
-        let http_filter = match filter {
+/// Recursively accumulate body capabilities from a slice of pipeline filters.
+pub(super) fn accumulate_caps(caps: &mut BodyCapabilities, filters: &[PipelineFilter]) {
+    for pf in filters {
+        let http_filter = match &pf.filter {
             AnyFilter::Http(f) => f.as_ref(),
             AnyFilter::Tcp(_) => continue,
         };
 
-        accumulate_request_body(&mut caps, http_filter);
-        accumulate_response_body(&mut caps, http_filter);
+        accumulate_request_body(caps, http_filter);
+        accumulate_response_body(caps, http_filter);
 
         if http_filter.needs_request_context() {
             caps.needs_request_context = true;
         }
         if !caps.any_response_condition_uses_headers {
-            caps.any_response_condition_uses_headers = resp_conditions_use_headers(resp_conditions);
+            caps.any_response_condition_uses_headers = resp_conditions_use_headers(&pf.response_conditions);
+        }
+
+        for branch in &pf.branches {
+            accumulate_caps(caps, &branch.filters);
         }
     }
-
-    caps
 }
 
 /// Accumulate request body capabilities from a single filter.
@@ -331,5 +338,133 @@ mod tests {
             resp_conditions_use_headers(&conds),
             "should return true for Unless variant with headers"
         );
+    }
+
+    #[test]
+    fn body_caps_recurse_into_branches() {
+        use std::sync::Arc;
+
+        use async_trait::async_trait;
+        use bytes::Bytes;
+
+        use crate::{
+            FilterAction, FilterError,
+            filter::HttpFilter,
+            pipeline::branch::{RejoinTarget, ResolvedBranch},
+        };
+
+        struct BranchBodyFilter;
+
+        #[async_trait]
+        impl HttpFilter for BranchBodyFilter {
+            fn name(&self) -> &'static str {
+                "branch_body"
+            }
+
+            async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::Continue)
+            }
+
+            fn request_body_access(&self) -> BodyAccess {
+                BodyAccess::ReadWrite
+            }
+
+            fn request_body_mode(&self) -> BodyMode {
+                BodyMode::Buffer { max_bytes: 4096 }
+            }
+
+            async fn on_request_body(
+                &self,
+                _ctx: &mut crate::HttpFilterContext<'_>,
+                _body: &mut Option<Bytes>,
+                _eos: bool,
+            ) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::Continue)
+            }
+        }
+
+        let branch_filter = PipelineFilter {
+            branches: vec![],
+            conditions: vec![],
+            filter: AnyFilter::Http(Box::new(BranchBodyFilter)),
+            name: None,
+            response_conditions: vec![],
+        };
+        let branch = ResolvedBranch {
+            condition: None,
+            filters: vec![branch_filter],
+            max_iterations: None,
+            name: Arc::from("body_branch"),
+            rejoin: RejoinTarget::Next,
+        };
+        let parent = PipelineFilter {
+            branches: vec![branch],
+            conditions: vec![],
+            filter: AnyFilter::Http(Box::new(NoopHttpFilter)),
+            name: None,
+            response_conditions: vec![],
+        };
+        let caps = compute_body_capabilities(&[parent]);
+        assert!(
+            caps.needs_request_body,
+            "body filter in branch should enable request body"
+        );
+        assert!(
+            caps.any_request_body_writer,
+            "ReadWrite filter in branch should set writer flag"
+        );
+        assert_eq!(
+            caps.request_body_mode,
+            BodyMode::Buffer { max_bytes: 4096 },
+            "Buffer mode from branch filter should propagate"
+        );
+    }
+
+    #[test]
+    fn body_caps_no_branch_body_filters_has_no_effect() {
+        use std::sync::Arc;
+
+        use crate::pipeline::branch::{RejoinTarget, ResolvedBranch};
+
+        let branch = ResolvedBranch {
+            condition: None,
+            filters: vec![PipelineFilter::new(
+                AnyFilter::Http(Box::new(NoopHttpFilter)),
+                vec![],
+                vec![],
+            )],
+            max_iterations: None,
+            name: Arc::from("noop_branch"),
+            rejoin: RejoinTarget::Next,
+        };
+        let parent = PipelineFilter {
+            branches: vec![branch],
+            conditions: vec![],
+            filter: AnyFilter::Http(Box::new(NoopHttpFilter)),
+            name: None,
+            response_conditions: vec![],
+        };
+        let caps = compute_body_capabilities(&[parent]);
+        assert!(
+            !caps.needs_request_body,
+            "branch without body filters should not enable request body"
+        );
+    }
+
+    /// Noop HTTP filter for body capability branch testing.
+    struct NoopHttpFilter;
+
+    #[async_trait::async_trait]
+    impl crate::filter::HttpFilter for NoopHttpFilter {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            Ok(crate::FilterAction::Continue)
+        }
     }
 }

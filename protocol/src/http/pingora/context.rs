@@ -129,9 +129,12 @@ impl PingoraRequestCtx {
         response_header: Option<&'a mut praxis_filter::Response>,
     ) -> praxis_filter::HttpFilterContext<'a> {
         praxis_filter::HttpFilterContext {
+            branch_iterations: std::collections::HashMap::new(),
             client_addr: self.client_addr,
             cluster: self.cluster.take(),
+            executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
+            filter_results: std::collections::HashMap::new(),
             health_registry: pipeline.health_registry(),
             request,
             request_body_bytes: self.request_body_bytes,
@@ -177,9 +180,12 @@ impl PingoraRequestCtx {
     ) -> Option<praxis_filter::HttpFilterContext<'a>> {
         let request = self.request_snapshot.as_ref()?;
         Some(praxis_filter::HttpFilterContext {
+            branch_iterations: std::collections::HashMap::new(),
             client_addr: self.client_addr,
             cluster: self.cluster.take(),
+            executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
+            filter_results: std::collections::HashMap::new(),
             health_registry: pipeline.health_registry(),
             request,
             request_body_bytes: self.request_body_bytes,

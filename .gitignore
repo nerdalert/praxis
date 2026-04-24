@@ -26,6 +26,8 @@ coverage/
 .*/
 !.cargo/
 !.github/
+!.claude/
+.claude/*
 !.claude/CLAUDE.md
 
 # Docs are markdown only

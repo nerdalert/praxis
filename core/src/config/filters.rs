@@ -60,6 +60,7 @@ pub struct FilterChainConfig {
 /// .unwrap();
 /// assert_eq!(entry.filter_type, "router");
 /// assert!(entry.conditions.is_empty());
+/// assert!(entry.name.is_none());
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct FilterEntry {
@@ -67,10 +68,20 @@ pub struct FilterEntry {
     #[serde(rename = "filter")]
     pub filter_type: String,
 
+    /// Optional branch chains evaluated after this filter
+    /// based on filter result conditions.
+    #[serde(default)]
+    pub branch_chains: Option<Vec<super::BranchChainConfig>>,
+
     /// Ordered conditions that gate whether this filter runs on requests.
     /// Empty means the filter always runs.
     #[serde(default)]
     pub conditions: Vec<Condition>,
+
+    /// Optional user-assigned name for this filter entry.
+    /// Used as a rejoin target by branch chains.
+    #[serde(default)]
+    pub name: Option<String>,
 
     /// Ordered conditions that gate whether this filter runs on responses.
     /// Evaluated against the upstream response (status, headers).
@@ -215,5 +226,53 @@ response_add:
         assert_eq!(entry.filter_type, "headers", "filter_type mismatch");
         assert!(entry.conditions.is_empty(), "request conditions should be empty");
         assert_eq!(entry.response_conditions.len(), 2, "should have 2 response conditions");
+    }
+
+    #[test]
+    fn parse_filter_entry_with_name() {
+        let yaml = r#"
+filter: router
+name: routing
+routes: []
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(entry.name.as_deref(), Some("routing"), "name should be 'routing'");
+    }
+
+    #[test]
+    fn parse_filter_entry_name_defaults_to_none() {
+        let yaml = r#"
+filter: router
+routes: []
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert!(entry.name.is_none(), "name should default to None");
+    }
+
+    #[test]
+    fn parse_filter_entry_with_branch_chains() {
+        let yaml = r#"
+filter: headers
+branch_chains:
+  - name: my_branch
+    chains:
+      - name: inline
+        filters:
+          - filter: headers
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert!(entry.branch_chains.is_some(), "branch_chains should be present");
+        let branches = entry.branch_chains.unwrap();
+        assert_eq!(branches.len(), 1, "should have 1 branch chain");
+        assert_eq!(branches[0].name, "my_branch", "branch name mismatch");
+    }
+
+    #[test]
+    fn parse_filter_entry_branch_chains_defaults_to_none() {
+        let yaml = r#"
+filter: headers
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert!(entry.branch_chains.is_none(), "branch_chains should default to None");
     }
 }

@@ -3,10 +3,12 @@
 
 //! Transport-agnostic HTTP request/response metadata and per-request filter context.
 
-use std::{borrow::Cow, net::IpAddr, sync::Arc, time::Instant};
+use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
 use http::{HeaderMap, Method, StatusCode, Uri};
 use praxis_core::{connectivity::Upstream, health::HealthRegistry};
+
+use crate::results::FilterResultSet;
 
 // -----------------------------------------------------------------------------
 // HttpFilterContext
@@ -17,14 +19,33 @@ use praxis_core::{connectivity::Upstream, health::HealthRegistry};
 /// Created by the protocol layer for each incoming request. Filters read
 /// and mutate it to select clusters, choose upstreams, and inject headers.
 pub struct HttpFilterContext<'a> {
+    /// Iteration counters for re-entrant branches.
+    /// Branch name -> current iteration count.
+    pub branch_iterations: HashMap<Arc<str>, u32>,
+
     /// Downstream client IP address (from the TCP connection).
     pub client_addr: Option<IpAddr>,
+
+    /// Tracks which pipeline filter indices actually executed
+    /// during the request phase. The response phase skips
+    /// filters that did not run (e.g. due to [`SkipTo`]).
+    ///
+    /// [`SkipTo`]: crate::pipeline::branch::BranchOutcome::SkipTo
+    pub executed_filter_indices: Vec<bool>,
 
     /// The cluster name selected by the router filter.
     pub cluster: Option<Arc<str>>,
 
     /// Extra headers to inject into the upstream request.
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
+
+    /// Filter result map: `filter_name` -> result entries.
+    ///
+    /// Filters write string key-value pairs here during
+    /// `on_request` or `on_response`. The pipeline executor
+    /// reads these to evaluate branch conditions. Cleared
+    /// after branch evaluation at each filter.
+    pub filter_results: HashMap<&'static str, FilterResultSet>,
 
     /// Shared health registry for endpoint health lookups.
     pub health_registry: Option<&'a HealthRegistry>,

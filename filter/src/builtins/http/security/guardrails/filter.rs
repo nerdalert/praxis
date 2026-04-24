@@ -7,11 +7,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{
-    config::{DEFAULT_MAX_BODY_BYTES, GuardrailsConfig},
+    config::{DEFAULT_MAX_BODY_BYTES, GuardrailsAction, GuardrailsConfig},
     rule::{CompiledRule, RuleTarget, parse_matcher, parse_target},
 };
 use crate::{
-    FilterAction, FilterError, Rejection,
+    FilterAction, FilterError, FilterResultSet, Rejection,
     body::{BodyAccess, BodyMode},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -59,6 +59,9 @@ use crate::{
 /// assert_eq!(filter.name(), "guardrails");
 /// ```
 pub struct GuardrailsFilter {
+    /// What to do when a rule matches.
+    pub(super) action: GuardrailsAction,
+
     /// Compiled rules for per-request evaluation.
     pub(super) rules: Vec<CompiledRule>,
 
@@ -118,7 +121,19 @@ impl GuardrailsFilter {
             });
         }
 
-        Ok(Box::new(Self { rules, needs_body }))
+        Ok(Box::new(Self {
+            action: cfg.action,
+            rules,
+            needs_body,
+        }))
+    }
+
+    /// Return the appropriate [`FilterAction`] when a rule matches.
+    fn blocked_action(&self) -> FilterAction {
+        match self.action {
+            GuardrailsAction::Reject => unauthorized(),
+            GuardrailsAction::Flag => FilterAction::Continue,
+        }
     }
 
     /// Check all header-targeted rules against the request headers.
@@ -194,26 +209,35 @@ impl HttpFilter for GuardrailsFilter {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if self.check_headers(ctx) {
-            return Ok(unauthorized());
+            write_result(ctx, "blocked");
+            return Ok(self.blocked_action());
         }
+
+        if !self.needs_body {
+            write_result(ctx, "passed");
+        }
+
         Ok(FilterAction::Continue)
     }
 
     async fn on_request_body(
         &self,
-        _ctx: &mut HttpFilterContext<'_>,
+        ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
         _end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         let Some(chunk) = body.as_ref() else {
+            write_result(ctx, "passed");
             return Ok(FilterAction::Continue);
         };
 
         let text = String::from_utf8_lossy(chunk);
         if self.check_body(&text) {
-            return Ok(unauthorized());
+            write_result(ctx, "blocked");
+            return Ok(self.blocked_action());
         }
 
+        write_result(ctx, "passed");
         Ok(FilterAction::Continue)
     }
 }
@@ -221,6 +245,17 @@ impl HttpFilter for GuardrailsFilter {
 // -----------------------------------------------------------------------------
 // Utility Functions
 // -----------------------------------------------------------------------------
+
+/// Write a guardrails status result to the filter context.
+fn write_result(ctx: &mut HttpFilterContext<'_>, status: &'static str) {
+    let mut rs = FilterResultSet::new();
+    if let Err(e) = rs.set("status", status) {
+        tracing::warn!(error = %e, "failed to write guardrails result");
+        return;
+    }
+    ctx.filter_results.insert("guardrails", rs);
+    tracing::debug!(status, "guardrails result written");
+}
 
 /// Rejection response for guardrails violations.
 fn unauthorized() -> FilterAction {

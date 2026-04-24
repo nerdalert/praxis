@@ -6,7 +6,7 @@
 use praxis_core::config::FilterEntry;
 use tracing::warn;
 
-use super::ConditionalFilter;
+use super::filter::PipelineFilter;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -42,12 +42,12 @@ pub(super) fn check_lb_without_router(names: &[&str], errors: &mut Vec<String>) 
 #[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_unconditional_static_response(
     names: &[&str],
-    filters: &[ConditionalFilter],
+    filters: &[PipelineFilter],
     errors: &mut Vec<String>,
 ) {
     for (i, name) in names.iter().enumerate() {
         if *name == "static_response" && i + 1 < names.len() {
-            let (_, conditions, _) = &filters[i];
+            let conditions = &filters[i].conditions;
             if conditions.is_empty() {
                 errors.push(format!(
                     "unconditional static_response at \
@@ -62,10 +62,10 @@ pub(super) fn check_unconditional_static_response(
 
 /// Security filters with request conditions (bypass risk).
 #[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
-pub(super) fn check_conditional_security(names: &[&str], filters: &[ConditionalFilter], errors: &mut Vec<String>) {
+pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilter], errors: &mut Vec<String>) {
     for (i, name) in names.iter().enumerate() {
         if SECURITY_FILTERS.contains(name) {
-            let (_, conditions, _) = &filters[i];
+            let conditions = &filters[i].conditions;
             if !conditions.is_empty() {
                 errors.push(format!(
                     "security filter '{name}' at position {i} has \
@@ -175,7 +175,7 @@ pub(super) fn check_router_without_lb(names: &[&str], warnings: &mut Vec<String>
 
 /// All routers conditional with no unconditional fallback.
 #[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
-pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[ConditionalFilter], warnings: &mut Vec<String>) {
+pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[PipelineFilter], warnings: &mut Vec<String>) {
     let router_indices: Vec<usize> = names
         .iter()
         .enumerate()
@@ -187,10 +187,7 @@ pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[Condition
         return;
     }
 
-    let all_conditional = router_indices.iter().all(|&i| {
-        let (_, conditions, _) = &filters[i];
-        !conditions.is_empty()
-    });
+    let all_conditional = router_indices.iter().all(|&i| !filters[i].conditions.is_empty());
 
     if all_conditional {
         warnings.push(

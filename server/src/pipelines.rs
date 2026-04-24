@@ -38,7 +38,7 @@ pub(crate) fn resolve_pipelines(
             entries.extend_from_slice(chain_filters);
         }
 
-        let mut pipeline = FilterPipeline::build(&mut entries, registry)?;
+        let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains)?;
         pipeline.apply_body_limits(
             config.body_limits.max_request_bytes,
             config.body_limits.max_response_bytes,

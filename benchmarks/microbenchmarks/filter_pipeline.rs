@@ -108,9 +108,11 @@ fn bench_pipeline_execute_request(c: &mut Criterion) {
 /// Build a [`FilterEntry`] from a filter type name and YAML config string.
 fn filter_entry(filter_type: &str, yaml: &str) -> FilterEntry {
     FilterEntry {
+        branch_chains: None,
         filter_type: filter_type.into(),
         config: serde_yaml::from_str(yaml).unwrap(),
         conditions: vec![],
+        name: None,
         response_conditions: vec![],
     }
 }

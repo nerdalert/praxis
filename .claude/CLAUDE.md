@@ -108,6 +108,27 @@ See `docs/extensions.md` for the full guide.
    `core/src/config/listener.rs`
 3. Wire in `server/src/server.rs`
 
+## Branch Chains
+
+Conditional branching in filter pipelines based on
+filter results. Key files:
+
+- `core/src/config/branch_chain.rs`: config types
+- `core/src/config/chain_ref.rs`: `ChainRef` enum
+- `core/src/config/validate/branch_chain.rs`: validation
+- `filter/src/results.rs`: `FilterResultSet` type
+- `filter/src/pipeline/filter.rs`: `PipelineFilter`
+- `filter/src/pipeline/branch.rs`: runtime types
+- `filter/src/pipeline/build_branch.rs`: resolution
+- `filter/src/pipeline/evaluate.rs`: execution
+
+Filters write results to `FilterResultSet` without
+knowing about branches. The pipeline executor reads
+results to evaluate branch conditions and dispatch.
+Branches rejoin at configurable points (next,
+terminal, named filter, re-entrance with iteration
+limits).
+
 ## Filter Organization
 
 Filters live under

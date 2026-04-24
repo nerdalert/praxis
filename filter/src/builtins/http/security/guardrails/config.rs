@@ -19,6 +19,37 @@ pub(super) const MAX_REGEX_PATTERN_LEN: usize = 1024;
 pub(super) const MAX_REGEX_SIZE: usize = 1_048_576;
 
 // -----------------------------------------------------------------------------
+// GuardrailsAction
+// -----------------------------------------------------------------------------
+
+/// What happens when a guardrail rule matches.
+///
+/// ```
+/// use praxis_filter::GuardrailsAction;
+///
+/// let action: GuardrailsAction = serde_yaml::from_str("reject").unwrap();
+/// assert!(matches!(action, GuardrailsAction::Reject));
+///
+/// let flag: GuardrailsAction = serde_yaml::from_str("flag").unwrap();
+/// assert!(matches!(flag, GuardrailsAction::Flag));
+/// ```
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GuardrailsAction {
+    /// Reject the request immediately with 401 (default).
+    #[default]
+    Reject,
+
+    /// Write `status=blocked` to [`FilterResultSet`] but
+    /// return [`Continue`], allowing branch chains to
+    /// decide the response.
+    ///
+    /// [`FilterResultSet`]: crate::FilterResultSet
+    /// [`Continue`]: crate::FilterAction::Continue
+    Flag,
+}
+
+// -----------------------------------------------------------------------------
 // RuleConfig
 // -----------------------------------------------------------------------------
 
@@ -51,6 +82,10 @@ pub(super) struct RuleConfig {
 /// Deserialized YAML config for the guardrails filter.
 #[derive(Debug, Deserialize)]
 pub(super) struct GuardrailsConfig {
+    /// What to do when a rule matches (default: reject).
+    #[serde(default)]
+    pub action: GuardrailsAction,
+
     /// List of rules to evaluate.
     pub rules: Vec<RuleConfig>,
 }

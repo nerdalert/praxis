@@ -11,7 +11,7 @@ use super::{
     config::DEFAULT_MAX_BODY_BYTES,
     rule::{CompiledRule, RuleMatcher, RuleTarget},
 };
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, FilterResultSet, filter::HttpFilter};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -294,9 +294,127 @@ async fn negated_body_pattern_allows_json() {
     );
 }
 
+#[tokio::test]
+async fn header_reject_writes_blocked_result() {
+    let f = make_filter(vec![header_contains("x-bad", "yes")]);
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("x-bad", "yes".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let _action = f.on_request(&mut ctx).await.unwrap();
+    assert_result(&ctx.filter_results, "blocked");
+}
+
+#[tokio::test]
+async fn header_pass_writes_passed_result() {
+    let f = make_filter(vec![header_contains("x-bad", "yes")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let _action = f.on_request(&mut ctx).await.unwrap();
+    assert_result(&ctx.filter_results, "passed");
+}
+
+#[tokio::test]
+async fn body_reject_writes_blocked_result() {
+    let f = make_filter(vec![body_contains("DROP TABLE")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(b"SELECT 1; DROP TABLE users;"));
+    let _action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert_result(&ctx.filter_results, "blocked");
+}
+
+#[tokio::test]
+async fn body_pass_writes_passed_result() {
+    let f = make_filter(vec![body_contains("DROP TABLE")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(b"SELECT 1 FROM users"));
+    let _action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert_result(&ctx.filter_results, "passed");
+}
+
+#[tokio::test]
+async fn none_body_writes_passed_result() {
+    let f = make_filter(vec![body_contains("evil")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body: Option<Bytes> = None;
+    let _action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert_result(&ctx.filter_results, "passed");
+}
+
+#[tokio::test]
+async fn header_only_filter_writes_passed_without_body_phase() {
+    let f = make_filter(vec![header_contains("user-agent", "bad-bot")]);
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("user-agent", "good-bot/1.0".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let _action = f.on_request(&mut ctx).await.unwrap();
+    assert_result(&ctx.filter_results, "passed");
+}
+
+#[tokio::test]
+async fn flag_action_continues_on_match() {
+    let f = make_flag_filter(vec![header_contains("x-bad", "yes")]);
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("x-bad", "yes".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "flag action should continue even on match"
+    );
+    assert_result(&ctx.filter_results, "blocked");
+}
+
+#[tokio::test]
+async fn flag_action_body_continues_on_match() {
+    let f = make_flag_filter(vec![body_contains("DROP TABLE")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(b"SELECT 1; DROP TABLE users;"));
+    let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "flag action should continue even on body match"
+    );
+    assert_result(&ctx.filter_results, "blocked");
+}
+
+#[tokio::test]
+async fn body_filter_defers_result_to_body_phase() {
+    let f = make_filter(vec![body_contains("evil")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let _action = f.on_request(&mut ctx).await.unwrap();
+    assert!(
+        !ctx.filter_results.contains_key("guardrails"),
+        "body-targeting filter should not write results in on_request"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Assert that the guardrails filter wrote the expected status result.
+fn assert_result(results: &std::collections::HashMap<&'static str, FilterResultSet>, expected: &str) {
+    let rs = results.get("guardrails").expect("guardrails result should be present");
+    assert_eq!(
+        rs.get("status"),
+        Some(expected),
+        "guardrails status should be '{expected}'"
+    );
+}
 
 /// Build a header-contains rule for testing.
 fn header_contains(name: &str, needle: &str) -> CompiledRule {
@@ -361,8 +479,22 @@ fn body_not_pattern(re: &str) -> CompiledRule {
     }
 }
 
-/// Build a filter from compiled rules.
+/// Build a filter from compiled rules with default reject action.
 fn make_filter(rules: Vec<CompiledRule>) -> GuardrailsFilter {
     let needs_body = rules.iter().any(|r| matches!(r.target, RuleTarget::Body));
-    GuardrailsFilter { rules, needs_body }
+    GuardrailsFilter {
+        action: super::config::GuardrailsAction::Reject,
+        rules,
+        needs_body,
+    }
+}
+
+/// Build a filter from compiled rules with flag action.
+fn make_flag_filter(rules: Vec<CompiledRule>) -> GuardrailsFilter {
+    let needs_body = rules.iter().any(|r| matches!(r.target, RuleTarget::Body));
+    GuardrailsFilter {
+        action: super::config::GuardrailsAction::Flag,
+        rules,
+        needs_body,
+    }
 }

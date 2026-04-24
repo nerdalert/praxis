@@ -10,5 +10,5 @@ mod ip_acl;
 
 pub use cors::CorsFilter;
 pub use forwarded_headers::ForwardedHeadersFilter;
-pub use guardrails::GuardrailsFilter;
+pub use guardrails::{GuardrailsAction, GuardrailsFilter};
 pub use ip_acl::IpAclFilter;

@@ -8,6 +8,7 @@ use std::path::{Component, Path};
 use tracing::warn;
 
 use super::{
+    branch_chain::validate_branch_chains,
     cluster::validate_clusters,
     filter_chain::validate_filter_chains,
     listener::{validate_listener_names, validate_listeners},
@@ -38,6 +39,7 @@ impl Config {
         validate_listeners(&mut self.listeners)?;
         validate_listener_names(&self.listeners)?;
         validate_filter_chains(&self.filter_chains, &self.listeners)?;
+        validate_branch_chains(&self.filter_chains)?;
         validate_admin_address(self.admin.address.as_deref(), self.insecure_options.allow_public_admin)?;
 
         let all_tcp = self.listeners.iter().all(|l| l.protocol == ProtocolKind::Tcp);

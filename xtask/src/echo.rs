@@ -111,10 +111,12 @@ fn build_static_response_entry(args: &Args) -> FilterEntry {
     filter_config.insert("body".into(), args.body.clone().into());
 
     FilterEntry {
+        branch_chains: None,
         filter_type: "static_response".into(),
         conditions: vec![],
-        response_conditions: vec![],
         config: serde_yaml::Value::Mapping(filter_config),
+        name: None,
+        response_conditions: vec![],
     }
 }
 

@@ -3,12 +3,12 @@
 
 //! Pipeline construction and ordering diagnostics.
 
-use std::mem;
+use std::{collections::HashMap, mem, sync::Arc};
 
 use praxis_core::config::FilterEntry;
 use tracing::debug;
 
-use super::{FilterPipeline, body::compute_body_capabilities};
+use super::{FilterPipeline, body::compute_body_capabilities, filter::PipelineFilter};
 use crate::{FilterError, any_filter::AnyFilter, registry::FilterRegistry};
 
 // -----------------------------------------------------------------------------
@@ -34,15 +34,46 @@ impl FilterPipeline {
                 conditions = has_conditions,
                 "filter added to pipeline"
             );
-            filters.push((
+            let mut pf = PipelineFilter::new(
                 filter,
                 mem::take(&mut entry.conditions),
                 mem::take(&mut entry.response_conditions),
-            ));
+            );
+            pf.name = entry.name.as_ref().map(|n| Arc::from(n.as_str()));
+            filters.push(pf);
         }
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
 
+        Ok(Self {
+            body_capabilities,
+            compression,
+            filters,
+            health_registry: None,
+        })
+    }
+
+    /// Build a pipeline with branch chain resolution.
+    ///
+    /// Like [`build`], but also resolves `branch_chains` on each
+    /// filter entry into runtime [`ResolvedBranch`] types using
+    /// the provided chain lookup table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if any filter fails to instantiate
+    /// or any branch chain reference is unresolvable.
+    ///
+    /// [`build`]: FilterPipeline::build
+    /// [`ResolvedBranch`]: super::branch::ResolvedBranch
+    pub fn build_with_chains(
+        entries: &mut [FilterEntry],
+        registry: &FilterRegistry,
+        chains: &HashMap<&str, &[FilterEntry]>,
+    ) -> Result<Self, FilterError> {
+        let filters = super::build_branch::resolve_chain_filters(entries, registry, chains, 0)?;
+        let body_capabilities = compute_body_capabilities(&filters);
+        let compression = extract_compression_config(&filters);
         Ok(Self {
             body_capabilities,
             compression,
@@ -60,9 +91,11 @@ impl FilterPipeline {
     ///
     /// let registry = FilterRegistry::with_builtins();
     /// let mut entries = vec![FilterEntry {
+    ///     branch_chains: None,
     ///     filter_type: "load_balancer".into(),
     ///     config: serde_yaml::from_str("clusters: []").unwrap(),
     ///     conditions: vec![],
+    ///     name: None,
     ///     response_conditions: vec![],
     /// }];
     /// let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
@@ -76,7 +109,7 @@ impl FilterPipeline {
     ///
     /// [`build`]: FilterPipeline::build
     pub fn ordering_errors(&self, entries: &[FilterEntry]) -> Vec<String> {
-        let names: Vec<&str> = self.filters.iter().map(|(f, ..)| f.name()).collect();
+        let names: Vec<&str> = self.filters.iter().map(|pf| pf.filter.name()).collect();
 
         let mut errors = Vec::new();
 
@@ -100,6 +133,7 @@ impl FilterPipeline {
     ///
     /// let registry = FilterRegistry::with_builtins();
     /// let mut entries = vec![FilterEntry {
+    ///     branch_chains: None,
     ///     filter_type: "router".into(),
     ///     config: serde_yaml::from_str("routes: []").unwrap(),
     ///     conditions: vec![praxis_core::config::Condition::When(
@@ -110,6 +144,7 @@ impl FilterPipeline {
     ///             headers: None,
     ///         },
     ///     )],
+    ///     name: None,
     ///     response_conditions: vec![],
     /// }];
     /// let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
@@ -121,7 +156,7 @@ impl FilterPipeline {
     /// );
     /// ```
     pub fn ordering_warnings(&self) -> Vec<String> {
-        let names: Vec<&str> = self.filters.iter().map(|(f, ..)| f.name()).collect();
+        let names: Vec<&str> = self.filters.iter().map(|pf| pf.filter.name()).collect();
 
         let mut warnings = Vec::new();
 
@@ -138,10 +173,10 @@ impl FilterPipeline {
 
 /// Scan the filter list for a compression filter and extract its config.
 fn extract_compression_config(
-    filters: &[super::ConditionalFilter],
+    filters: &[PipelineFilter],
 ) -> Option<crate::builtins::http::payload_processing::compression_config::CompressionConfig> {
-    for (filter, ..) in filters {
-        if let AnyFilter::Http(f) = filter
+    for pf in filters {
+        if let AnyFilter::Http(f) = &pf.filter
             && let Some(cfg) = f.compression_config()
         {
             return Some(cfg.clone());

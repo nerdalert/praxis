@@ -13,12 +13,16 @@ use crate::{FilterError, actions::FilterAction, any_filter::AnyFilter, tcp_filte
 impl FilterPipeline {
     /// Run all TCP connect filters in order.
     ///
+    /// TCP filters do not participate in branch chain
+    /// evaluation currently. TCP pipelines execute filters
+    /// sequentially without conditional branching or rejoin logic.
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter rejects or fails.
     pub async fn execute_tcp_connect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        for (filter, _conditions, _resp_conditions) in &self.filters {
-            let tcp_filter = match filter {
+        for pf in &self.filters {
+            let tcp_filter = match &pf.filter {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
             };
@@ -38,8 +42,8 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] if any filter fails.
     pub async fn execute_tcp_disconnect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<(), FilterError> {
-        for (filter, _conditions, _resp_conditions) in self.filters.iter().rev() {
-            let tcp_filter = match filter {
+        for pf in self.filters.iter().rev() {
+            let tcp_filter = match &pf.filter {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
             };
@@ -199,9 +203,11 @@ mod tests {
     async fn http_filters_skipped_in_tcp_execution() {
         let registry = FilterRegistry::with_builtins();
         let mut entries = vec![crate::FilterEntry {
+            branch_chains: None,
             filter_type: "router".into(),
             config: serde_yaml::from_str("routes: []").unwrap(),
             conditions: vec![],
+            name: None,
             response_conditions: vec![],
         }];
         let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
@@ -299,7 +305,7 @@ mod tests {
     fn make_tcp_pipeline(filters: Vec<Box<dyn TcpFilter>>) -> FilterPipeline {
         let filters: Vec<_> = filters
             .into_iter()
-            .map(|f| (AnyFilter::Tcp(f), vec![], vec![]))
+            .map(|f| crate::pipeline::filter::PipelineFilter::new(AnyFilter::Tcp(f), vec![], vec![]))
             .collect();
         FilterPipeline {
             body_capabilities: BodyCapabilities::default(),

@@ -8,6 +8,8 @@ use tracing::{debug, trace, warn};
 
 use super::{
     FilterPipeline,
+    branch::BranchOutcome,
+    filter::PipelineFilter,
     http_utils::{
         BodyFilterOutcome, accumulate_body_bytes, as_request_body_filter, as_response_body_filter,
         dispatch_body_result, released_or_continue, run_response_filter, skip_by_response_conditions,
@@ -24,34 +26,39 @@ use crate::{
 impl FilterPipeline {
     /// Run all HTTP request filters in order.
     ///
+    /// Tracks which filter indices actually executed so the
+    /// response phase can skip filters that were bypassed
+    /// (e.g. by [`SkipTo`]).
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
+    ///
+    /// [`SkipTo`]: BranchOutcome::SkipTo
+    #[allow(clippy::indexing_slicing, reason = "while loop bounds idx")]
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        for (filter, conditions, _resp_conditions) in &self.filters {
-            let http_filter = match filter {
-                AnyFilter::Http(f) => f.as_ref(),
-                AnyFilter::Tcp(_) => continue,
-            };
-            if !should_execute(conditions, ctx.request) {
-                trace!(filter = http_filter.name(), "skipped by conditions");
-                continue;
+        ctx.executed_filter_indices = vec![false; self.filters.len()];
+        let mut idx = 0;
+        while idx < self.filters.len() {
+            let pf = &self.filters[idx];
+
+            match run_request_filter(pf, ctx).await? {
+                RequestFilterResult::Skip => {
+                    idx += 1;
+                    continue;
+                },
+                RequestFilterResult::Reject(r) => return Ok(FilterAction::Reject(r)),
+                RequestFilterResult::Continue => {},
             }
-            trace!(filter = http_filter.name(), "on_request");
-            match http_filter.on_request(ctx).await {
-                Ok(FilterAction::Continue | FilterAction::Release) => {},
-                Ok(FilterAction::Reject(rejection)) => {
-                    debug!(
-                        filter = http_filter.name(),
-                        status = rejection.status,
-                        "filter rejected request"
-                    );
-                    return Ok(FilterAction::Reject(rejection));
-                },
-                Err(e) => {
-                    warn!(filter = http_filter.name(), error = %e, "filter error during request");
-                    return Err(e);
-                },
+
+            ctx.executed_filter_indices[idx] = true;
+
+            let branch_outcome = super::evaluate::evaluate_branches(&pf.branches, ctx, idx).await?;
+            match branch_outcome {
+                BranchOutcome::Continue => idx += 1,
+                BranchOutcome::Terminal => return Ok(FilterAction::Continue),
+                BranchOutcome::SkipTo(t) | BranchOutcome::ReEnter(t) => idx = t,
+                BranchOutcome::Reject(r) => return Ok(FilterAction::Reject(r)),
             }
         }
         Ok(FilterAction::Continue)
@@ -59,16 +66,28 @@ impl FilterPipeline {
 
     /// Run all HTTP response filters in reverse order.
     ///
+    /// Skips filters that did not execute during the request
+    /// phase (tracked by [`executed_filter_indices`]).
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
+    ///
+    /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        for (filter, _req_conditions, resp_conditions) in self.filters.iter().rev() {
-            let http_filter = match filter {
+        for (idx, pf) in self.filters.iter().enumerate().rev() {
+            if ctx.executed_filter_indices.get(idx) == Some(&false) {
+                trace!(
+                    filter = pf.filter.name(),
+                    "skipped on_response (not executed in request phase)"
+                );
+                continue;
+            }
+            let http_filter = match &pf.filter {
                 AnyFilter::Http(f) => f.as_ref(),
                 AnyFilter::Tcp(_) => continue,
             };
-            if skip_by_response_conditions(http_filter, resp_conditions, ctx) {
+            if skip_by_response_conditions(http_filter, &pf.response_conditions, ctx) {
                 continue;
             }
             trace!(filter = http_filter.name(), "on_response");
@@ -93,8 +112,8 @@ impl FilterPipeline {
     ) -> Result<FilterAction, FilterError> {
         accumulate_body_bytes(&mut ctx.request_body_bytes, body);
         let mut released = false;
-        for (filter, conditions, _resp_conditions) in &self.filters {
-            let Some(http_filter) = as_request_body_filter(filter, conditions, ctx.request) else {
+        for pf in &self.filters {
+            let Some(http_filter) = as_request_body_filter(&pf.filter, &pf.conditions, ctx.request) else {
                 continue;
             };
             trace!(filter = http_filter.name(), "on_request_body");
@@ -124,8 +143,8 @@ impl FilterPipeline {
     ) -> Result<FilterAction, FilterError> {
         accumulate_body_bytes(&mut ctx.response_body_bytes, body);
         let mut released = false;
-        for (filter, _req_conditions, resp_conditions) in self.filters.iter().rev() {
-            let Some(http_filter) = as_response_body_filter(filter, resp_conditions, ctx) else {
+        for pf in self.filters.iter().rev() {
+            let Some(http_filter) = as_response_body_filter(&pf.filter, &pf.response_conditions, ctx) else {
                 continue;
             };
             trace!(filter = http_filter.name(), "on_response_body");
@@ -140,6 +159,53 @@ impl FilterPipeline {
             }
         }
         Ok(released_or_continue(released))
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Request Filter Utilities
+// -----------------------------------------------------------------------------
+
+/// Outcome of running a single request filter.
+enum RequestFilterResult {
+    /// Filter executed successfully; continue pipeline.
+    Continue,
+
+    /// Filter rejected the request.
+    Reject(crate::actions::Rejection),
+
+    /// Filter was skipped (TCP or conditions).
+    Skip,
+}
+
+/// Run a single request filter, handling conditions and tracing.
+async fn run_request_filter(
+    pf: &PipelineFilter,
+    ctx: &mut HttpFilterContext<'_>,
+) -> Result<RequestFilterResult, FilterError> {
+    let http_filter = match &pf.filter {
+        AnyFilter::Http(f) => f.as_ref(),
+        AnyFilter::Tcp(_) => return Ok(RequestFilterResult::Skip),
+    };
+    if !should_execute(&pf.conditions, ctx.request) {
+        trace!(filter = http_filter.name(), "skipped by conditions");
+        return Ok(RequestFilterResult::Skip);
+    }
+    trace!(filter = http_filter.name(), "on_request");
+    match http_filter.on_request(ctx).await {
+        Ok(FilterAction::Continue | FilterAction::Release) => Ok(RequestFilterResult::Continue),
+        Ok(FilterAction::Reject(rejection)) => {
+            debug!(
+                filter = http_filter.name(),
+                status = rejection.status,
+                "filter rejected request"
+            );
+            Ok(RequestFilterResult::Reject(rejection))
+        },
+        Err(e) => {
+            warn!(filter = http_filter.name(), error = %e, "filter error during request");
+            Err(e)
+        },
     }
 }
 

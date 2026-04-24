@@ -10,6 +10,8 @@ use serde::Deserialize;
 mod admin;
 mod body_limits;
 mod bootstrap;
+mod branch_chain;
+mod chain_ref;
 mod cluster;
 mod condition;
 mod filters;
@@ -23,6 +25,8 @@ mod validate;
 pub use admin::AdminConfig;
 pub use body_limits::BodyLimitsConfig;
 pub use bootstrap::{DEFAULT_CONFIG, load_config};
+pub use branch_chain::{BranchChainConfig, BranchCondition};
+pub use chain_ref::ChainRef;
 pub use cluster::{
     Cluster, ConsistentHashOpts, Endpoint, HealthCheckConfig, HealthCheckType, LoadBalancerStrategy,
     ParameterisedStrategy, SimpleStrategy,
@@ -35,6 +39,7 @@ use parse::check_yaml_safety;
 pub use praxis_tls::{CachedClusterTls, ClusterTls};
 pub use route::Route;
 pub use runtime::RuntimeConfig;
+pub use validate::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING};
 
 // -----------------------------------------------------------------------------
 // Config

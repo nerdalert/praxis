@@ -17,13 +17,14 @@ mod factory;
 mod filter;
 mod pipeline;
 mod registry;
+mod results;
 mod tcp_filter;
 
 pub use actions::{FilterAction, Rejection};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 pub use builtins::{
-    GuardrailsFilter, LoadBalancerFilter, RouterFilter,
+    GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, RouterFilter,
     http::payload_processing::compression_config::CompressionConfig, normalize_mapped_ipv4, normalize_rewritten_path,
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
@@ -33,6 +34,7 @@ pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::FilterPipeline;
 pub use praxis_core::config::FilterEntry;
 pub use registry::FilterRegistry;
+pub use results::FilterResultSet;
 pub use tcp_filter::{TcpFilter, TcpFilterContext};
 
 // -----------------------------------------------------------------------------
@@ -215,9 +217,12 @@ pub(crate) mod test_utils {
 
     pub(crate) fn make_filter_context(req: &Request) -> HttpFilterContext<'_> {
         HttpFilterContext {
+            branch_iterations: std::collections::HashMap::new(),
             client_addr: None,
             cluster: None,
+            executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
+            filter_results: std::collections::HashMap::new(),
             health_registry: None,
             request: req,
             request_body_bytes: 0,

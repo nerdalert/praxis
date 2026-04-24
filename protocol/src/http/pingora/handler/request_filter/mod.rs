@@ -336,9 +336,11 @@ mod tests {
         let yaml = format!("status: {status}");
         let config: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         let mut entries = vec![praxis_filter::FilterEntry {
+            branch_chains: None,
             filter_type: "static_response".into(),
             config,
             conditions: vec![],
+            name: None,
             response_conditions: vec![],
         }];
         FilterPipeline::build(&mut entries, &registry).unwrap()
