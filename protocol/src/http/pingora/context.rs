@@ -3,7 +3,7 @@
 
 //! Per-request context that carries filter pipeline results through Pingora's request/response lifecycle hooks.
 
-use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
+use std::{collections::{HashMap, VecDeque}, net::IpAddr, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use praxis_core::connectivity::Upstream;
@@ -37,6 +37,16 @@ pub struct PingoraRequestCtx {
 
     /// Name of the cluster selected by the router filter.
     pub cluster: Option<Arc<str>>,
+
+    /// Per-request metadata persisted across all Pingora lifecycle phases.
+    ///
+    /// Set by filters during request phase (e.g. auth, model extraction).
+    /// Available during response phase, response body, and logging cleanup.
+    /// Carried in [`PingoraRequestCtx`] so it survives across
+    /// [`HttpFilterContext`] rebuilds.
+    ///
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    pub filter_metadata: HashMap<String, String>,
 
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
@@ -131,6 +141,7 @@ impl PingoraRequestCtx {
         praxis_filter::HttpFilterContext {
             client_addr: self.client_addr,
             cluster: self.cluster.take(),
+            filter_metadata: std::mem::take(&mut self.filter_metadata),
             extra_request_headers: Vec::new(),
             remove_request_headers: Vec::new(),
             health_registry: pipeline.health_registry(),
@@ -180,6 +191,7 @@ impl PingoraRequestCtx {
         Some(praxis_filter::HttpFilterContext {
             client_addr: self.client_addr,
             cluster: self.cluster.take(),
+            filter_metadata: std::mem::take(&mut self.filter_metadata),
             extra_request_headers: Vec::new(),
             remove_request_headers: Vec::new(),
             health_registry: pipeline.health_registry(),
@@ -201,6 +213,7 @@ impl Default for PingoraRequestCtx {
             client_addr: None,
             client_http_version: None,
             cluster: None,
+            filter_metadata: HashMap::new(),
             pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,

@@ -96,7 +96,7 @@ pub(super) fn execute(
         BodyMode::StreamBuffer { .. } | BodyMode::Stream => {},
     }
 
-    let (result, body_bytes, cluster, upstream) = {
+    let (result, body_bytes, cluster, upstream, metadata) = {
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -104,11 +104,12 @@ pub(super) fn execute(
             )
         })?;
         let r = pipeline.execute_http_response_body(&mut fctx, body, end_of_stream);
-        (r, fctx.response_body_bytes, fctx.cluster, fctx.upstream)
+        (r, fctx.response_body_bytes, fctx.cluster, fctx.upstream, fctx.filter_metadata)
     };
     ctx.response_body_bytes = body_bytes;
     ctx.cluster = cluster;
     ctx.upstream = upstream;
+    ctx.filter_metadata = metadata;
     match result {
         Ok(FilterAction::Continue) => {
             if is_stream_buffer && !ctx.response_body_released {

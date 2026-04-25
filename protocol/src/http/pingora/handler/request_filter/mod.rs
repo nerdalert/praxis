@@ -145,7 +145,7 @@ async fn run_pipeline(
     request: Request,
     ctx: &mut PingoraRequestCtx,
 ) -> std::result::Result<(FilterAction, RequestHeaderOps), FilterError> {
-    let (action, extra_headers, remove_headers, cluster, upstream, rewritten_path) = {
+    let (action, extra_headers, remove_headers, cluster, upstream, rewritten_path, metadata) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
         let action = pipeline.execute_http_request(&mut filter_ctx).await;
@@ -156,6 +156,7 @@ async fn run_pipeline(
             filter_ctx.cluster,
             filter_ctx.upstream,
             filter_ctx.rewritten_path,
+            filter_ctx.filter_metadata,
         )
     };
 
@@ -166,6 +167,7 @@ async fn run_pipeline(
             ctx.cluster = cluster;
             ctx.upstream = upstream;
             ctx.rewritten_path = rewritten_path;
+            ctx.filter_metadata = metadata;
             Ok((
                 FilterAction::Continue,
                 RequestHeaderOps {

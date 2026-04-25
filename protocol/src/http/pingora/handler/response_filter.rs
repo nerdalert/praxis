@@ -46,7 +46,9 @@ async fn run_response_pipeline(
         )
     })?;
     let r = pipeline.execute_http_response(&mut fctx).await;
-    Ok((r, fctx.response_headers_modified))
+    let modified = fctx.response_headers_modified;
+    ctx.filter_metadata = fctx.filter_metadata;
+    Ok((r, modified))
 }
 
 /// Map the filter pipeline result to a Pingora Result, restoring headers on success.

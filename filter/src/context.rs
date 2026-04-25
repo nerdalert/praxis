@@ -3,7 +3,7 @@
 
 //! Transport-agnostic HTTP request/response metadata and per-request filter context.
 
-use std::{borrow::Cow, net::IpAddr, sync::Arc, time::Instant};
+use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
 use http::{HeaderMap, Method, StatusCode, Uri};
 use praxis_core::{connectivity::Upstream, health::HealthRegistry};
@@ -22,6 +22,20 @@ pub struct HttpFilterContext<'a> {
 
     /// The cluster name selected by the router filter.
     pub cluster: Option<Arc<str>>,
+
+    /// Per-request metadata set by filters for downstream consumption.
+    ///
+    /// Filters use this bag to pass validated identity, subscription,
+    /// model, and other descriptors to later filters in the pipeline.
+    /// For example, an auth filter stores `"user"` and `"subscription"`,
+    /// and a rate-limit filter reads them to build a composite key.
+    ///
+    /// Values are strings. Filters write with [`set_metadata`] and
+    /// read with [`metadata`].
+    ///
+    /// [`set_metadata`]: HttpFilterContext::set_metadata
+    /// [`metadata`]: HttpFilterContext::metadata
+    pub filter_metadata: HashMap<String, String>,
 
     /// Extra headers to inject into the upstream request.
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
@@ -86,9 +100,19 @@ impl HttpFilterContext<'_> {
         self.upstream.as_ref().map(|u| &*u.address)
     }
 
+    /// Retrieve a metadata value set by a preceding filter.
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.filter_metadata.get(key).map(|v| v.as_str())
+    }
+
     /// X-Request-ID header value, if present and valid UTF-8.
     pub fn request_id(&self) -> Option<&str> {
         self.request.headers.get("x-request-id").and_then(|v| v.to_str().ok())
+    }
+
+    /// Store a metadata value for consumption by later filters.
+    pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.filter_metadata.insert(key.into(), value.into());
     }
 }
 
@@ -228,6 +252,32 @@ mod tests {
             Some("10.0.0.1:8080"),
             "upstream addr should return set address"
         );
+    }
+
+    #[test]
+    fn metadata_returns_none_when_absent() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert!(ctx.metadata("user").is_none(), "missing key should return None");
+    }
+
+    #[test]
+    fn set_metadata_and_retrieve() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("user", "alice");
+        ctx.set_metadata("subscription", "gpt-4o-sub");
+        assert_eq!(ctx.metadata("user"), Some("alice"));
+        assert_eq!(ctx.metadata("subscription"), Some("gpt-4o-sub"));
+    }
+
+    #[test]
+    fn set_metadata_overwrites_existing() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("model", "qwen");
+        ctx.set_metadata("model", "mistral");
+        assert_eq!(ctx.metadata("model"), Some("mistral"));
     }
 
     #[test]

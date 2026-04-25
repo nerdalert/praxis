@@ -188,6 +188,7 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
         && let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None)
     {
         let _result = pipeline.execute_http_response(&mut filter_ctx).await;
+        ctx.filter_metadata = filter_ctx.filter_metadata;
     }
 }
 
