@@ -14,6 +14,20 @@ use tracing::info;
 use crate::http::pingora::json::json_response;
 
 // -----------------------------------------------------------------------------
+// Text Response
+// -----------------------------------------------------------------------------
+
+/// Build an HTTP response with a custom text content type.
+#[allow(clippy::expect_used, reason = "valid static response")]
+fn text_response(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> Response<Vec<u8>> {
+    Response::builder()
+        .status(status)
+        .header("Content-Type", content_type)
+        .body(body.into())
+        .expect("valid text response")
+}
+
+// -----------------------------------------------------------------------------
 // JSON Escaping
 // -----------------------------------------------------------------------------
 
@@ -154,6 +168,10 @@ impl ServeHttp for PingoraHealthService {
             "/ready" => {
                 let (status, body) = self.ready_response();
                 json_response(status, body.as_bytes())
+            },
+            "/metrics" => match crate::http::pingora::metrics::render() {
+                Some(body) => text_response(200, "text/plain; version=0.0.4; charset=utf-8", body),
+                None => text_response(503, "text/plain; charset=utf-8", "metrics recorder not installed\n"),
             },
             _ => json_response(404, br#"{"error":"not found"}"#),
         }
@@ -427,6 +445,28 @@ mod tests {
             escape_json_string("simple"),
             "simple",
             "plain string should pass through"
+        );
+    }
+
+    #[test]
+    fn text_response_sets_content_type() {
+        let resp = text_response(200, "text/plain; version=0.0.4; charset=utf-8", "hello");
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()["Content-Type"],
+            "text/plain; version=0.0.4; charset=utf-8",
+            "content-type should be prometheus text format"
+        );
+        assert_eq!(resp.body(), b"hello");
+    }
+
+    #[test]
+    fn text_response_503_for_missing_recorder() {
+        let resp = text_response(503, "text/plain; charset=utf-8", "metrics recorder not installed\n");
+        assert_eq!(resp.status(), 503);
+        assert!(
+            resp.body().starts_with(b"metrics recorder"),
+            "body should explain missing recorder"
         );
     }
 }

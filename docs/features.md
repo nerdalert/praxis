@@ -126,6 +126,12 @@ deployment guidance.
   counts when active health checks are configured, and
   returns 503 when any cluster has zero healthy
   endpoints
+- **Prometheus metrics** - `/metrics` on the admin
+  listener in Prometheus text exposition format.
+  Includes `praxis_http_requests_total` counter and
+  `praxis_http_request_duration_seconds` histogram
+  with method, status, and cluster labels. Rate-limit
+  and auth metrics are planned for later phases.
 
 ## Request/Response Transformation
 

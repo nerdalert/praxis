@@ -16,8 +16,8 @@ use praxis_filter::{CompressionConfig, FilterPipeline};
 use tracing::debug;
 
 use super::{
-    adjust_compression, handle_connect_failure, logging_cleanup, request_filter, response_filter, upstream_peer,
-    upstream_request, via,
+    adjust_compression, handle_connect_failure, logging_cleanup, request_filter, request_metrics, response_filter,
+    upstream_peer, upstream_request, via,
 };
 use crate::http::pingora::context::PingoraRequestCtx;
 
@@ -139,7 +139,8 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
         upstream_peer::execute(ctx)
     }
 
-    async fn logging(&self, _session: &mut Session, _e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
+    async fn logging(&self, session: &mut Session, e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
+        request_metrics::record_request_metrics(session, e, ctx);
         logging_cleanup(&self.pipeline, ctx).await;
     }
 }

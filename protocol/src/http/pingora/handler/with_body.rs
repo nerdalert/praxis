@@ -18,7 +18,7 @@ use tracing::debug;
 
 use super::{
     adjust_compression, handle_connect_failure, logging_cleanup, request_body_filter, request_filter,
-    response_body_filter, response_filter, upstream_peer, upstream_request, via,
+    request_metrics, response_body_filter, response_filter, upstream_peer, upstream_request, via,
 };
 use crate::http::pingora::context::PingoraRequestCtx;
 
@@ -174,7 +174,8 @@ impl ProxyHttp for PingoraHttpHandler {
         upstream_peer::execute(ctx)
     }
 
-    async fn logging(&self, _session: &mut Session, _e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
+    async fn logging(&self, session: &mut Session, e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
+        request_metrics::record_request_metrics(session, e, ctx);
         logging_cleanup(&self.pipeline, ctx).await;
     }
 }
