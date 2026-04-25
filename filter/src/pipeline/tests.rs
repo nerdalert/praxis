@@ -38,6 +38,7 @@ fn build_unknown_filter_errors() {
     let mut entries = vec![FilterEntry {
         conditions: vec![],
         filter_type: "nonexistent".into(),
+        failure_mode: praxis_core::config::FailureMode::default(),
         config: serde_yaml::Value::Null,
         response_conditions: vec![],
     }];
@@ -61,6 +62,7 @@ fn build_with_valid_filters() {
     let mut entries = vec![FilterEntry {
         conditions: vec![],
         filter_type: "router".into(),
+        failure_mode: praxis_core::config::FailureMode::default(),
         config: serde_yaml::Value::Mapping(router_config),
         response_conditions: vec![],
     }];
@@ -76,12 +78,14 @@ fn build_stops_on_first_error() {
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "bad_filter".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::Value::Null,
             response_conditions: vec![],
         },
@@ -743,6 +747,7 @@ fn errors_load_balancer_without_router() {
     let mut entries = vec![FilterEntry {
         conditions: vec![],
         filter_type: "load_balancer".into(),
+        failure_mode: praxis_core::config::FailureMode::default(),
         config: serde_yaml::from_str("clusters: []").unwrap(),
         response_conditions: vec![],
     }];
@@ -763,12 +768,14 @@ fn no_error_when_router_precedes_load_balancer() {
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "load_balancer".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
             response_conditions: vec![],
         },
@@ -788,12 +795,14 @@ fn errors_unconditional_static_response_followed_by_filters() {
         FilterEntry {
             conditions: vec![],
             filter_type: "static_response".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("status: 200").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes: []").unwrap(),
             response_conditions: vec![],
         },
@@ -813,18 +822,21 @@ fn no_error_for_conditional_static_response() {
         FilterEntry {
             conditions: vec![when_path("/health")],
             filter_type: "static_response".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("status: 200").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "load_balancer".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
             response_conditions: vec![],
         },
@@ -844,18 +856,21 @@ fn errors_duplicate_router() {
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes: []").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes: []").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "load_balancer".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("clusters: []").unwrap(),
             response_conditions: vec![],
         },
@@ -875,18 +890,21 @@ fn errors_duplicate_load_balancer() {
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "load_balancer".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "load_balancer".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
             response_conditions: vec![],
         },
@@ -905,6 +923,7 @@ fn errors_conditional_security_filter() {
     let mut entries = vec![FilterEntry {
         conditions: vec![when_path("/api")],
         filter_type: "ip_acl".into(),
+        failure_mode: praxis_core::config::FailureMode::default(),
         config: serde_yaml::from_str("allow: [\"10.0.0.0/8\"]").unwrap(),
         response_conditions: vec![],
     }];
@@ -924,6 +943,7 @@ fn no_error_for_unconditional_security_filter() {
     let mut entries = vec![FilterEntry {
         conditions: vec![],
         filter_type: "ip_acl".into(),
+        failure_mode: praxis_core::config::FailureMode::default(),
         config: serde_yaml::from_str("allow: [\"10.0.0.0/8\"]").unwrap(),
         response_conditions: vec![],
     }];
@@ -958,6 +978,7 @@ fn warns_router_without_lb() {
     let mut entries = vec![FilterEntry {
         conditions: vec![],
         filter_type: "router".into(),
+        failure_mode: praxis_core::config::FailureMode::default(),
         config: serde_yaml::from_str("routes: []").unwrap(),
         response_conditions: vec![],
     }];
@@ -978,12 +999,14 @@ fn errors_misaligned_clusters() {
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: missing_cluster").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "load_balancer".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("clusters:\n  - name: other_cluster\n    endpoints: [\"10.0.0.1:80\"]")
                 .unwrap(),
             response_conditions: vec![],
@@ -1006,12 +1029,14 @@ fn no_error_for_aligned_clusters() {
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: backend").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "load_balancer".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("clusters:\n  - name: backend\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
             response_conditions: vec![],
         },
@@ -1031,12 +1056,14 @@ fn warns_all_routers_conditional() {
         FilterEntry {
             conditions: vec![when_path("/api")],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes: []").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "load_balancer".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("clusters: []").unwrap(),
             response_conditions: vec![],
         },
@@ -1058,12 +1085,14 @@ fn no_warning_when_unconditional_router_exists() {
         FilterEntry {
             conditions: vec![when_path("/api")],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes: []").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes: []").unwrap(),
             response_conditions: vec![],
         },
@@ -1203,12 +1232,14 @@ fn errors_duplicate_path_rewrite_filters() {
         FilterEntry {
             conditions: vec![],
             filter_type: "path_rewrite".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("strip_prefix: \"/api\"").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "path_rewrite".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("add_prefix: \"/v2\"").unwrap(),
             response_conditions: vec![],
         },
@@ -1230,12 +1261,14 @@ fn errors_mixed_path_and_url_rewrite_filters() {
         FilterEntry {
             conditions: vec![],
             filter_type: "path_rewrite".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("strip_prefix: \"/api\"").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "url_rewrite".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str(
                 "operations:\n  - regex_replace:\n      pattern: \"^/a\"\n      replacement: \"/b\"",
             )
@@ -1259,6 +1292,7 @@ fn no_error_single_path_rewrite_filter() {
     let mut entries = vec![FilterEntry {
         conditions: vec![],
         filter_type: "path_rewrite".into(),
+        failure_mode: praxis_core::config::FailureMode::default(),
         config: serde_yaml::from_str("strip_prefix: \"/api\"").unwrap(),
         response_conditions: vec![],
     }];
@@ -1277,12 +1311,14 @@ fn no_error_duplicate_rewrite_with_allow_override() {
         FilterEntry {
             conditions: vec![],
             filter_type: "path_rewrite".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("strip_prefix: \"/api\"").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "url_rewrite".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str(
                 "operations:\n  - regex_replace:\n      pattern: \"^/a\"\n      replacement: \"/b\"\nallow_rewrite_override: true",
             )
@@ -1305,12 +1341,14 @@ fn error_when_allow_override_on_first_not_last() {
         FilterEntry {
             conditions: vec![],
             filter_type: "path_rewrite".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("strip_prefix: \"/api\"\nallow_rewrite_override: true").unwrap(),
             response_conditions: vec![],
         },
         FilterEntry {
             conditions: vec![],
             filter_type: "url_rewrite".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str(
                 "operations:\n  - regex_replace:\n      pattern: \"^/a\"\n      replacement: \"/b\"",
             )
@@ -1598,7 +1636,14 @@ impl HttpFilter for SwapHeaderFilter {
 fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
     let filters: Vec<_> = filters
         .into_iter()
-        .map(|f| (AnyFilter::Http(f), vec![], vec![]))
+        .map(|f| {
+            (
+                AnyFilter::Http(f),
+                vec![],
+                vec![],
+                praxis_core::config::FailureMode::default(),
+            )
+        })
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
@@ -1616,7 +1661,14 @@ fn make_pipeline_with_conditions(
 ) -> FilterPipeline {
     let filters: Vec<_> = filters
         .into_iter()
-        .map(|(f, c)| (AnyFilter::Http(f), c, vec![]))
+        .map(|(f, c)| {
+            (
+                AnyFilter::Http(f),
+                c,
+                vec![],
+                praxis_core::config::FailureMode::default(),
+            )
+        })
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
@@ -1634,7 +1686,14 @@ fn make_pipeline_with_response_conditions(
 ) -> FilterPipeline {
     let filters: Vec<_> = filters
         .into_iter()
-        .map(|(f, rc)| (AnyFilter::Http(f), vec![], rc))
+        .map(|(f, rc)| {
+            (
+                AnyFilter::Http(f),
+                vec![],
+                rc,
+                praxis_core::config::FailureMode::default(),
+            )
+        })
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 

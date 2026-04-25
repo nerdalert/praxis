@@ -10,6 +10,31 @@ use serde::Deserialize;
 use super::{Condition, ResponseCondition};
 
 // -----------------------------------------------------------------------------
+// FailureMode
+// -----------------------------------------------------------------------------
+
+/// How the pipeline should handle a filter error.
+///
+/// ```
+/// use praxis_core::config::FailureMode;
+///
+/// let mode: FailureMode = serde_yaml::from_str("closed").unwrap();
+/// assert!(matches!(mode, FailureMode::Closed));
+/// ```
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FailureMode {
+    /// Propagate the error immediately (default). The request
+    /// fails with a 500 response.
+    #[default]
+    Closed,
+
+    /// Log the error and continue the pipeline as if the
+    /// filter returned `Continue`.
+    Open,
+}
+
+// -----------------------------------------------------------------------------
 // FilterChainConfig
 // -----------------------------------------------------------------------------
 
@@ -77,6 +102,10 @@ pub struct FilterEntry {
     /// Empty means the filter always runs on responses.
     #[serde(default)]
     pub response_conditions: Vec<ResponseCondition>,
+
+    /// How to handle errors from this filter.
+    #[serde(default)]
+    pub failure_mode: FailureMode,
 
     /// Arbitrary YAML config passed to the filter's factory function.
     #[serde(flatten)]
@@ -181,6 +210,45 @@ request_add:
         let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(entry.filter_type, "headers", "filter_type mismatch");
         assert_eq!(entry.conditions.len(), 2, "should have 2 conditions");
+    }
+
+    #[test]
+    fn parse_failure_mode_closed() {
+        let mode: FailureMode = serde_yaml::from_str("closed").unwrap();
+        assert_eq!(mode, FailureMode::Closed);
+    }
+
+    #[test]
+    fn parse_failure_mode_open() {
+        let mode: FailureMode = serde_yaml::from_str("open").unwrap();
+        assert_eq!(mode, FailureMode::Open);
+    }
+
+    #[test]
+    fn failure_mode_defaults_to_closed() {
+        assert_eq!(FailureMode::default(), FailureMode::Closed);
+    }
+
+    #[test]
+    fn parse_filter_entry_with_failure_mode() {
+        let yaml = r#"
+filter: rate_limit
+failure_mode: open
+mode: global
+rate: 10
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(entry.failure_mode, FailureMode::Open);
+    }
+
+    #[test]
+    fn parse_filter_entry_default_failure_mode() {
+        let yaml = r#"
+filter: router
+routes: []
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(entry.failure_mode, FailureMode::Closed);
     }
 
     #[test]

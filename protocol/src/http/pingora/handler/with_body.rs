@@ -17,8 +17,8 @@ use praxis_filter::{CompressionConfig, FilterPipeline};
 use tracing::debug;
 
 use super::{
-    adjust_compression, handle_connect_failure, logging_cleanup, request_body_filter, request_filter,
-    request_metrics, response_body_filter, response_filter, upstream_peer, upstream_request, via,
+    adjust_compression, handle_connect_failure, logging_cleanup, request_body_filter, request_filter, request_metrics,
+    response_body_filter, response_filter, upstream_peer, upstream_request, via,
 };
 use crate::http::pingora::context::PingoraRequestCtx;
 

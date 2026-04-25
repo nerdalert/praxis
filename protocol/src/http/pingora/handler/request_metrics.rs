@@ -15,11 +15,7 @@ use super::super::context::PingoraRequestCtx;
 ///
 /// Called from the `logging()` hook in both `with_body` and `no_body`
 /// handlers, after the response has been sent (or failed).
-pub(super) fn record_request_metrics(
-    session: &Session,
-    _error: Option<&pingora_core::Error>,
-    ctx: &PingoraRequestCtx,
-) {
+pub(super) fn record_request_metrics(session: &Session, _error: Option<&pingora_core::Error>, ctx: &PingoraRequestCtx) {
     let method = session.req_header().method.as_str();
     let status = status_label(session);
     let cluster = ctx.cluster.as_deref().unwrap_or("none");

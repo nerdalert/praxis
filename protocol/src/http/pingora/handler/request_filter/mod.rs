@@ -374,6 +374,7 @@ mod tests {
             config,
             conditions: vec![],
             response_conditions: vec![],
+            failure_mode: praxis_core::config::FailureMode::default(),
         }];
         FilterPipeline::build(&mut entries, &registry).unwrap()
     }

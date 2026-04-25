@@ -14,14 +14,14 @@ use super::context::PingoraRequestCtx;
 
 /// Shared hop-by-hop header stripping logic.
 mod hop_by_hop;
-/// Request-level Prometheus metrics.
-mod request_metrics;
 /// HTTP handler without body filter hooks.
 mod no_body;
 /// Request body filter hook.
 mod request_body_filter;
 /// Request filter hook.
 mod request_filter;
+/// Request-level Prometheus metrics.
+mod request_metrics;
 /// Response body filter hook.
 mod response_body_filter;
 /// Response filter hook.

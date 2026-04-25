@@ -17,7 +17,7 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] if any filter rejects or fails.
     pub async fn execute_tcp_connect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        for (filter, _conditions, _resp_conditions) in &self.filters {
+        for (filter, _conditions, _resp_conditions, failure_mode) in &self.filters {
             let tcp_filter = match filter {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
@@ -25,7 +25,13 @@ impl FilterPipeline {
             match tcp_filter.on_connect(ctx).await {
                 Ok(FilterAction::Continue | FilterAction::Release) => {},
                 Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if *failure_mode == praxis_core::config::FailureMode::Open {
+                        tracing::warn!(filter = tcp_filter.name(), error = %e, "tcp connect error (fail-open, continuing)");
+                    } else {
+                        return Err(e);
+                    }
+                },
             }
         }
 
@@ -38,7 +44,7 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] if any filter fails.
     pub async fn execute_tcp_disconnect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<(), FilterError> {
-        for (filter, _conditions, _resp_conditions) in self.filters.iter().rev() {
+        for (filter, _conditions, _resp_conditions, _failure_mode) in self.filters.iter().rev() {
             let tcp_filter = match filter {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
@@ -200,6 +206,7 @@ mod tests {
         let registry = FilterRegistry::with_builtins();
         let mut entries = vec![crate::FilterEntry {
             filter_type: "router".into(),
+            failure_mode: praxis_core::config::FailureMode::default(),
             config: serde_yaml::from_str("routes: []").unwrap(),
             conditions: vec![],
             response_conditions: vec![],
@@ -299,7 +306,14 @@ mod tests {
     fn make_tcp_pipeline(filters: Vec<Box<dyn TcpFilter>>) -> FilterPipeline {
         let filters: Vec<_> = filters
             .into_iter()
-            .map(|f| (AnyFilter::Tcp(f), vec![], vec![]))
+            .map(|f| {
+                (
+                    AnyFilter::Tcp(f),
+                    vec![],
+                    vec![],
+                    praxis_core::config::FailureMode::default(),
+                )
+            })
             .collect();
         FilterPipeline {
             body_capabilities: BodyCapabilities::default(),

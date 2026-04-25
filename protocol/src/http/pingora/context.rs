@@ -3,7 +3,12 @@
 
 //! Per-request context that carries filter pipeline results through Pingora's request/response lifecycle hooks.
 
-use std::{collections::{HashMap, VecDeque}, net::IpAddr, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, VecDeque},
+    net::IpAddr,
+    sync::Arc,
+    time::Instant,
+};
 
 use bytes::Bytes;
 use praxis_core::connectivity::Upstream;

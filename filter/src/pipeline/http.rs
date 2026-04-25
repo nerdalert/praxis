@@ -4,6 +4,7 @@
 //! HTTP pipeline execution: request, response, and body filter phases.
 
 use bytes::Bytes;
+use praxis_core::config::FailureMode;
 use tracing::{debug, trace, warn};
 
 use super::{
@@ -28,7 +29,7 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] if any filter fails.
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        for (filter, conditions, _resp_conditions) in &self.filters {
+        for (filter, conditions, _resp_conditions, failure_mode) in &self.filters {
             let http_filter = match filter {
                 AnyFilter::Http(f) => f.as_ref(),
                 AnyFilter::Tcp(_) => continue,
@@ -49,8 +50,12 @@ impl FilterPipeline {
                     return Ok(FilterAction::Reject(rejection));
                 },
                 Err(e) => {
-                    warn!(filter = http_filter.name(), error = %e, "filter error during request");
-                    return Err(e);
+                    if *failure_mode == FailureMode::Open {
+                        warn!(filter = http_filter.name(), error = %e, "filter error during request (fail-open, continuing)");
+                    } else {
+                        warn!(filter = http_filter.name(), error = %e, "filter error during request");
+                        return Err(e);
+                    }
                 },
             }
         }
@@ -63,7 +68,7 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] if any filter fails.
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        for (filter, _req_conditions, resp_conditions) in self.filters.iter().rev() {
+        for (filter, _req_conditions, resp_conditions, failure_mode) in self.filters.iter().rev() {
             let http_filter = match filter {
                 AnyFilter::Http(f) => f.as_ref(),
                 AnyFilter::Tcp(_) => continue,
@@ -72,7 +77,7 @@ impl FilterPipeline {
                 continue;
             }
             trace!(filter = http_filter.name(), "on_response");
-            let action = run_response_filter(http_filter, ctx).await?;
+            let action = run_response_filter(http_filter, ctx, *failure_mode).await?;
             if let Some(rejection) = action {
                 return Ok(FilterAction::Reject(rejection));
             }
@@ -93,7 +98,7 @@ impl FilterPipeline {
     ) -> Result<FilterAction, FilterError> {
         accumulate_body_bytes(&mut ctx.request_body_bytes, body);
         let mut released = false;
-        for (filter, conditions, _resp_conditions) in &self.filters {
+        for (filter, conditions, _resp_conditions, failure_mode) in &self.filters {
             let Some(http_filter) = as_request_body_filter(filter, conditions, ctx.request) else {
                 continue;
             };
@@ -102,6 +107,7 @@ impl FilterPipeline {
                 http_filter.on_request_body(ctx, body, end_of_stream).await,
                 http_filter.name(),
                 "request body",
+                *failure_mode,
             )? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
@@ -124,7 +130,7 @@ impl FilterPipeline {
     ) -> Result<FilterAction, FilterError> {
         accumulate_body_bytes(&mut ctx.response_body_bytes, body);
         let mut released = false;
-        for (filter, _req_conditions, resp_conditions) in self.filters.iter().rev() {
+        for (filter, _req_conditions, resp_conditions, failure_mode) in self.filters.iter().rev() {
             let Some(http_filter) = as_response_body_filter(filter, resp_conditions, ctx) else {
                 continue;
             };
@@ -133,6 +139,7 @@ impl FilterPipeline {
                 http_filter.on_response_body(ctx, body, end_of_stream),
                 http_filter.name(),
                 "response body",
+                *failure_mode,
             )? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
@@ -150,7 +157,7 @@ impl FilterPipeline {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use praxis_core::config::{ResponseCondition, ResponseConditionMatch};
+    use praxis_core::config::{FailureMode, ResponseCondition, ResponseConditionMatch};
 
     use super::super::http_utils::{
         accumulate_body_bytes, dispatch_body_result, released_or_continue, skip_by_response_conditions,
@@ -279,7 +286,13 @@ mod tests {
 
     #[test]
     fn dispatch_body_result_continue() {
-        let outcome = dispatch_body_result(Ok(FilterAction::Continue), "test", "request body").unwrap();
+        let outcome = dispatch_body_result(
+            Ok(FilterAction::Continue),
+            "test",
+            "request body",
+            FailureMode::default(),
+        )
+        .unwrap();
         assert!(
             matches!(outcome, super::super::http_utils::BodyFilterOutcome::Continue),
             "Continue action should produce Continue outcome"
@@ -288,7 +301,13 @@ mod tests {
 
     #[test]
     fn dispatch_body_result_release() {
-        let outcome = dispatch_body_result(Ok(FilterAction::Release), "test", "request body").unwrap();
+        let outcome = dispatch_body_result(
+            Ok(FilterAction::Release),
+            "test",
+            "request body",
+            FailureMode::default(),
+        )
+        .unwrap();
         assert!(
             matches!(outcome, super::super::http_utils::BodyFilterOutcome::Released),
             "Release action should produce Released outcome"
@@ -297,8 +316,13 @@ mod tests {
 
     #[test]
     fn dispatch_body_result_reject() {
-        let outcome =
-            dispatch_body_result(Ok(FilterAction::Reject(Rejection::status(403))), "test", "request body").unwrap();
+        let outcome = dispatch_body_result(
+            Ok(FilterAction::Reject(Rejection::status(403))),
+            "test",
+            "request body",
+            FailureMode::default(),
+        )
+        .unwrap();
         assert!(
             matches!(outcome, super::super::http_utils::BodyFilterOutcome::Rejected(r) if r.status == 403),
             "Reject action should produce Rejected outcome with correct status"
@@ -308,7 +332,7 @@ mod tests {
     #[test]
     fn dispatch_body_result_error() {
         let err: FilterError = "boom".into();
-        let result = dispatch_body_result(Err(err), "test", "request body");
+        let result = dispatch_body_result(Err(err), "test", "request body", FailureMode::default());
         assert!(result.is_err(), "error result should propagate as Err");
         assert!(
             result.unwrap_err().to_string().contains("boom"),

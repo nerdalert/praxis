@@ -109,6 +109,7 @@ fn bench_pipeline_execute_request(c: &mut Criterion) {
 fn filter_entry(filter_type: &str, yaml: &str) -> FilterEntry {
     FilterEntry {
         filter_type: filter_type.into(),
+        failure_mode: praxis_core::config::FailureMode::default(),
         config: serde_yaml::from_str(yaml).unwrap(),
         conditions: vec![],
         response_conditions: vec![],

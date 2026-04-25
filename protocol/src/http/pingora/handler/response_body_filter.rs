@@ -104,7 +104,13 @@ pub(super) fn execute(
             )
         })?;
         let r = pipeline.execute_http_response_body(&mut fctx, body, end_of_stream);
-        (r, fctx.response_body_bytes, fctx.cluster, fctx.upstream, fctx.filter_metadata)
+        (
+            r,
+            fctx.response_body_bytes,
+            fctx.cluster,
+            fctx.upstream,
+            fctx.filter_metadata,
+        )
     };
     ctx.response_body_bytes = body_bytes;
     ctx.cluster = cluster;

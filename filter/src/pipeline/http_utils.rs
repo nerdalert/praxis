@@ -4,6 +4,7 @@
 //! Utility functions for HTTP pipeline execution.
 
 use bytes::Bytes;
+use praxis_core::config::FailureMode;
 use tracing::{debug, trace, warn};
 
 use crate::{
@@ -92,10 +93,16 @@ pub(super) enum BodyFilterOutcome {
 }
 
 /// Classify a body filter result into a [`BodyFilterOutcome`], logging on reject/error.
+///
+/// When `failure_mode` is [`FailureMode::Open`], errors are logged and
+/// treated as [`BodyFilterOutcome::Continue`] instead of propagating.
+/// Rejections are never bypassed by fail-open — they are intentional
+/// policy decisions, not filter failures.
 pub(super) fn dispatch_body_result(
     result: Result<FilterAction, FilterError>,
     filter_name: &str,
     phase: &str,
+    failure_mode: FailureMode,
 ) -> Result<BodyFilterOutcome, FilterError> {
     match result {
         Ok(FilterAction::Continue) => Ok(BodyFilterOutcome::Continue),
@@ -112,8 +119,13 @@ pub(super) fn dispatch_body_result(
             Ok(BodyFilterOutcome::Rejected(rejection))
         },
         Err(e) => {
-            warn!(filter = filter_name, error = %e, "filter error during {phase}");
-            Err(e)
+            if failure_mode == FailureMode::Open {
+                warn!(filter = filter_name, error = %e, "filter error during {phase} (fail-open, continuing)");
+                Ok(BodyFilterOutcome::Continue)
+            } else {
+                warn!(filter = filter_name, error = %e, "filter error during {phase}");
+                Err(e)
+            }
         },
     }
 }
@@ -139,6 +151,7 @@ pub(super) fn skip_by_response_conditions(
 pub(super) async fn run_response_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
+    failure_mode: FailureMode,
 ) -> Result<Option<Rejection>, FilterError> {
     let pre_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
     match http_filter.on_response(ctx).await {
@@ -160,8 +173,13 @@ pub(super) async fn run_response_filter(
             Ok(Some(rejection))
         },
         Err(e) => {
-            warn!(filter = http_filter.name(), error = %e, "filter error during response");
-            Err(e)
+            if failure_mode == FailureMode::Open {
+                warn!(filter = http_filter.name(), error = %e, "filter error during response (fail-open, continuing)");
+                Ok(None)
+            } else {
+                warn!(filter = http_filter.name(), error = %e, "filter error during response");
+                Err(e)
+            }
         },
     }
 }

@@ -27,11 +27,12 @@ use crate::{
 // FilterPipeline
 // -----------------------------------------------------------------------------
 
-/// A filter paired with its request-phase and response-phase conditions.
+/// A filter paired with its conditions and failure mode.
 pub(crate) type ConditionalFilter = (
     crate::any_filter::AnyFilter,
     Vec<praxis_core::config::Condition>,
     Vec<praxis_core::config::ResponseCondition>,
+    praxis_core::config::FailureMode,
 );
 
 /// An ordered list of filters executed on every request.
