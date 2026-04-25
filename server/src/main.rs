@@ -40,6 +40,10 @@ struct Cli {
 /// Entry point.
 #[allow(clippy::print_stderr, reason = "fatal error output")]
 fn main() {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let cli = Cli::parse();
     let explicit = cli.config.or_else(|| std::env::var("PRAXIS_CONFIG").ok());
     let config = praxis::load_config(explicit.as_deref()).unwrap_or_else(|e| praxis::fatal(&e));

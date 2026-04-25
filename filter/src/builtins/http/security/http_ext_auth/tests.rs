@@ -3,8 +3,6 @@
 
 //! Tests for the HTTP external auth filter.
 
-use std::io::Write;
-
 use super::*;
 
 // -----------------------------------------------------------------------------
@@ -296,31 +294,29 @@ struct MockGuard(tokio::sync::oneshot::Sender<()>);
 
 /// Start a mock HTTP server that returns a fixed status and body.
 async fn start_mock_server(status: u16, body: &str) -> (std::net::SocketAddr, MockGuard) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    listener.set_nonblocking(true).unwrap();
 
     let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
     let body = body.to_owned();
     let status_line = format!("HTTP/1.1 {status} OK");
 
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
         loop {
             tokio::select! {
                 accept = listener.accept() => {
-                    if let Ok((stream, _)) = accept {
-                        let mut std_stream = stream.into_std().unwrap();
-                        std_stream.set_nonblocking(false).unwrap();
+                    if let Ok((mut stream, _)) = accept {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
                         let mut buf = [0u8; 4096];
-                        drop(std::io::Read::read(&mut std_stream, &mut buf));
+                        drop(stream.read(&mut buf).await);
                         let response = format!(
                             "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             body.len(),
                             body,
                         );
-                        drop(std_stream.write_all(response.as_bytes()));
-                        drop(std_stream.flush());
+                        drop(stream.write_all(response.as_bytes()).await);
+                        drop(stream.flush().await);
+                        drop(stream.shutdown().await);
                     }
                 }
                 _ = &mut rx => break,

@@ -2119,6 +2119,7 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
+ "rustls",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
