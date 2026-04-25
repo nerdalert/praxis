@@ -1918,21 +1918,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "praxis-tests-configuration"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "praxis-proxy-core",
- "praxis-proxy-filter",
- "praxis-proxy-tls",
- "praxis-test-utils",
- "serde",
- "serde_json",
- "serde_yaml",
-]
-
-[[package]]
 name = "praxis-tests-conformance"
 version = "0.1.0"
 dependencies = [
@@ -1982,6 +1967,21 @@ dependencies = [
  "praxis-test-utils",
  "serde_yaml",
  "tokio",
+]
+
+[[package]]
+name = "praxis-tests-schema"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "praxis-proxy-core",
+ "praxis-proxy-filter",
+ "praxis-proxy-tls",
+ "praxis-test-utils",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

@@ -24,6 +24,7 @@ mod multi_listener;
 mod path_based_routing;
 mod path_rewriting;
 mod payload_processing;
+mod protocols;
 mod redirect;
 mod round_robin;
 mod session_affinity;

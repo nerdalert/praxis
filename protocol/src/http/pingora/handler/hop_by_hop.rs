@@ -97,7 +97,7 @@ pub(crate) fn strip_connection_tokens<R: RemoveHeader>(
         for token in s.split(',') {
             let trimmed = token.trim();
             if !trimmed.is_empty() && !static_list.iter().any(|h| trimmed.eq_ignore_ascii_case(h)) {
-                let _remove = msg.remove_header_by_name(trimmed);
+                msg.remove_header_by_name(trimmed);
             }
         }
     }
@@ -105,19 +105,19 @@ pub(crate) fn strip_connection_tokens<R: RemoveHeader>(
 
 /// Trait abstracting header removal for both request and response types.
 pub(crate) trait RemoveHeader {
-    /// Remove a header by name.
-    fn remove_header_by_name(&mut self, name: &str) -> Option<http::HeaderValue>;
+    /// Remove a header by name, discarding the value.
+    fn remove_header_by_name(&mut self, name: &str);
 }
 
 impl RemoveHeader for pingora_http::RequestHeader {
-    fn remove_header_by_name(&mut self, name: &str) -> Option<http::HeaderValue> {
-        self.remove_header(name)
+    fn remove_header_by_name(&mut self, name: &str) {
+        drop(self.remove_header(name));
     }
 }
 
 impl RemoveHeader for pingora_http::ResponseHeader {
-    fn remove_header_by_name(&mut self, name: &str) -> Option<http::HeaderValue> {
-        self.remove_header(name)
+    fn remove_header_by_name(&mut self, name: &str) {
+        drop(self.remove_header(name));
     }
 }
 

@@ -11,11 +11,8 @@ use praxis_core::{
 };
 use tracing::{debug, warn};
 
-use super::{
-    endpoint::build_weighted_endpoints,
-    strategy::{Strategy, build_strategy},
-};
-use crate::filter::HttpFilterContext;
+use super::strategy::{Strategy, build_strategy};
+use crate::{filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
 
 // -----------------------------------------------------------------------------
 // ClusterEntry

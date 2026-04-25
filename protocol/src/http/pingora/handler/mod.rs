@@ -68,6 +68,7 @@ const MAX_RETRIES: usize = 3;
 /// let listener = Listener {
 ///     name: "http".into(),
 ///     address: "127.0.0.1:8080".into(),
+///     cluster: None,
 ///     protocol: Default::default(),
 ///     tls: None,
 ///     upstream: None,

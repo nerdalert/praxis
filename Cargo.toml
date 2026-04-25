@@ -15,7 +15,7 @@ members = [
     "xtask",
 
     # Praxis Testing
-    "tests/configuration",
+    "tests/schema",
     "tests/conformance",
     "tests/integration",
     "tests/resilience",

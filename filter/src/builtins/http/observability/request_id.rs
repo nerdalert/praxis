@@ -125,7 +125,7 @@ impl HttpFilter for RequestIdFilter {
         debug!(request_id = %id, header = %self.header_name, "forwarding request ID");
 
         ctx.extra_request_headers
-            .push((Cow::Owned(String::from(&*self.header_name)), id));
+            .push((Cow::Owned(self.header_name.to_string()), id));
 
         Ok(FilterAction::Continue)
     }

@@ -35,10 +35,15 @@ fuzz_target!(|data: &str| {
 
     let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
     rt.block_on(async {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "fuzz.example.com".parse().unwrap());
+        headers.insert(http::header::ACCEPT, "*/*".parse().unwrap());
+        headers.insert(http::header::USER_AGENT, "praxis-fuzz/1.0".parse().unwrap());
+
         let request = praxis_filter::Request {
             method: http::Method::GET,
             uri: http::Uri::from_static("/fuzz"),
-            headers: http::HeaderMap::new(),
+            headers,
         };
 
         let mut ctx = praxis_filter::HttpFilterContext {
@@ -60,5 +65,17 @@ fuzz_target!(|data: &str| {
         };
 
         let _ = pipeline.execute_http_request(&mut ctx).await;
+
+        let mut resp = praxis_filter::Response {
+            status: http::StatusCode::OK,
+            headers: http::HeaderMap::new(),
+        };
+        ctx.response_header = Some(&mut resp);
+        let _ = pipeline.execute_http_response(&mut ctx).await;
+
+        if pipeline.body_capabilities().needs_request_body {
+            let mut body = Some(bytes::Bytes::from_static(b"fuzz-body"));
+            let _ = pipeline.execute_http_request_body(&mut ctx, &mut body, true).await;
+        }
     });
 });

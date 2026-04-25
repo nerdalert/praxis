@@ -7,6 +7,7 @@ use std::{borrow::Cow, future::Future, io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use pingora_core::{apps::ServerApp, protocols::Stream, server::ShutdownWatch};
+use praxis_core::health::HealthRegistry;
 use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
 use praxis_tls::sni;
 use tokio::{io::AsyncReadExt, net::TcpStream, sync::watch};
@@ -39,6 +40,12 @@ const PEEK_MAX: usize = 16384; // 16 KiB
 ///
 /// [`TcpFilterContext::upstream_addr`]: praxis_filter::TcpFilterContext::upstream_addr
 pub(crate) struct PingoraTcpProxy {
+    /// Cluster name for load-balanced TCP connections.
+    cluster: Option<Arc<str>>,
+
+    /// Shared health registry for endpoint health lookups.
+    health_registry: Option<HealthRegistry>,
+
     /// Optional idle timeout for the bidirectional forwarding session.
     idle_timeout: Option<Duration>,
 
@@ -56,11 +63,15 @@ impl PingoraTcpProxy {
     /// Create a TCP proxy, optionally targeting a fixed upstream address.
     pub(super) fn new(
         upstream_addr: Option<String>,
+        cluster: Option<Arc<str>>,
         pipeline: Arc<FilterPipeline>,
         idle_timeout: Option<Duration>,
         max_duration: Option<Duration>,
     ) -> Self {
+        let health_registry = pipeline.health_registry().cloned();
         Self {
+            cluster,
+            health_registry,
             idle_timeout,
             max_duration,
             pipeline,
@@ -135,6 +146,8 @@ impl PingoraTcpProxy {
             local_addr,
             sni,
             upstream_addr: upstream_cow,
+            cluster: self.cluster.clone(),
+            health_registry: self.health_registry.as_ref(),
             connect_time,
             bytes_in: 0,
             bytes_out: 0,
@@ -160,6 +173,8 @@ impl PingoraTcpProxy {
             local_addr,
             sni: sni_hostname,
             upstream_addr: Some(Cow::Borrowed(upstream_addr)),
+            cluster: self.cluster.clone(),
+            health_registry: self.health_registry.as_ref(),
             connect_time,
             bytes_in,
             bytes_out,

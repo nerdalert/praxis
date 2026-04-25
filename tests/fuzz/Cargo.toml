@@ -9,6 +9,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+bytes = "1.11.1"
 http = "1.4.0"
 libfuzzer-sys = "0.4.9"
 praxis-tls = { path = "../../tls", package = "praxis-proxy-tls" }

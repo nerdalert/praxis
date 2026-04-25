@@ -18,7 +18,9 @@ use praxis_core::{
     config::Config,
     health::{EndpointHealth, HealthRegistry},
 };
-use praxis_test_utils::{free_port, http_get, start_backend_with_shutdown, start_full_proxy, wait_for_http};
+use praxis_test_utils::{
+    free_port, http_get, start_backend_with_shutdown, start_full_proxy, start_proxy, wait_for_http,
+};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -469,6 +471,68 @@ filter_chains:
         consecutive_stable >= 5,
         "traffic should consistently route to stable backend (got {consecutive_stable} consecutive)"
     );
+}
+
+#[test]
+fn h2_probe_succeeds_against_proxy_listener() {
+    let backend_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let _guard = start_proxy(&config);
+
+    let addr = format!("127.0.0.1:{proxy_port}");
+    praxis_test_utils::wait_for_http2(&addr);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let result = rt.block_on(praxis_protocol::http::pingora::health::probe::h2_probe(
+        &addr,
+        Duration::from_secs(5),
+    ));
+    assert!(
+        result,
+        "h2_probe should succeed against a running proxy with h2c enabled"
+    );
+}
+
+#[test]
+fn h2_probe_fails_against_non_h2_endpoint() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let result = rt.block_on(praxis_protocol::http::pingora::health::probe::h2_probe(
+        "127.0.0.1:1",
+        Duration::from_millis(100),
+    ));
+    assert!(!result, "h2_probe should fail against a non-listening port");
 }
 
 // -----------------------------------------------------------------------------

@@ -329,6 +329,8 @@ mod tests {
             local_addr: "0.0.0.0:8080",
             sni: None,
             upstream_addr: Some(std::borrow::Cow::Borrowed("10.0.0.1:80")),
+            cluster: None,
+            health_registry: None,
             connect_time: std::time::Instant::now(),
             bytes_in: 0,
             bytes_out: 0,

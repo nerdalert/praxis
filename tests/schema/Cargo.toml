@@ -1,5 +1,5 @@
 [package]
-name = "praxis-tests-configuration"
+name = "praxis-tests-schema"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -678,7 +678,7 @@ a higher level and across multiple crates.
 
 | Crate | Purpose |
 | ------- | --------- |
-| `tests/configuration` | Config parsing and example validation |
+| `tests/schema` | Config parsing and example validation |
 | `tests/conformance` | RFC conformance (h2spec, HTTP semantics) |
 | `tests/integration` | End-to-end filter and proxy tests |
 | `tests/resilience` | Load, failure recovery, throughput |
