@@ -73,25 +73,52 @@ pub(crate) fn is_websocket_upgrade(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("websocket")
 }
 
-/// Collect extra header names declared in `Connection` values
-/// ([RFC 9110 Section 7.6.1]).
+/// Snapshot `Connection` header values before they are removed.
 ///
-/// Parses comma-separated tokens from the `Connection` header and
-/// returns any that are not already in the static list.
+/// Call this before stripping hop-by-hop headers, then pass the
+/// result to [`strip_connection_tokens`].
 ///
 /// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
-pub(crate) fn connection_tokens(headers: &HeaderMap, static_list: &[&str]) -> Vec<String> {
-    let mut extra = Vec::new();
-    for val in headers.get_all("connection") {
+pub(crate) fn snapshot_connection_values(headers: &HeaderMap) -> Vec<http::HeaderValue> {
+    headers.get_all("connection").iter().cloned().collect()
+}
+
+/// Remove headers declared in `Connection` tokens that are not in
+/// the static hop-by-hop list (those are already removed by the caller).
+///
+/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
+pub(crate) fn strip_connection_tokens<R: RemoveHeader>(
+    msg: &mut R,
+    values: &[http::HeaderValue],
+    static_list: &[&str],
+) {
+    for val in values {
         let Ok(s) = val.to_str() else { continue };
         for token in s.split(',') {
             let trimmed = token.trim();
             if !trimmed.is_empty() && !static_list.iter().any(|h| trimmed.eq_ignore_ascii_case(h)) {
-                extra.push(trimmed.to_owned());
+                let _remove = msg.remove_header_by_name(trimmed);
             }
         }
     }
-    extra
+}
+
+/// Trait abstracting header removal for both request and response types.
+pub(crate) trait RemoveHeader {
+    /// Remove a header by name.
+    fn remove_header_by_name(&mut self, name: &str) -> Option<http::HeaderValue>;
+}
+
+impl RemoveHeader for pingora_http::RequestHeader {
+    fn remove_header_by_name(&mut self, name: &str) -> Option<http::HeaderValue> {
+        self.remove_header(name)
+    }
+}
+
+impl RemoveHeader for pingora_http::ResponseHeader {
+    fn remove_header_by_name(&mut self, name: &str) -> Option<http::HeaderValue> {
+        self.remove_header(name)
+    }
 }
 
 // ---------------------------------------------------------------------------

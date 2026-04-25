@@ -38,7 +38,7 @@ use crate::{
 // CORS Constants
 // -----------------------------------------------------------------------------
 
-/// Pre-parsed `Origin` header value, avoids per-request allocation.
+/// Pre-parsed `Origin` header value for Vary responses.
 const VARY_ORIGIN: &str = "Origin";
 
 // -----------------------------------------------------------------------------

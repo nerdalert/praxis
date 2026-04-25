@@ -31,7 +31,7 @@ use super::{
 /// [RFC 6455]: https://datatracker.ietf.org/doc/html/rfc6455
 pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
     let is_ws = is_upgrade && is_websocket_request(&req.headers);
-    let extra = hop_by_hop::connection_tokens(&req.headers, REQUEST_HOP_BY_HOP);
+    let conn_values = hop_by_hop::snapshot_connection_values(&req.headers);
 
     for name in REQUEST_HOP_BY_HOP {
         if hop_by_hop::preserve_for_upgrade(name, is_ws) {
@@ -39,9 +39,7 @@ pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
         }
         let _remove = req.remove_header(*name);
     }
-    for name in &extra {
-        let _remove = req.remove_header(name.as_str());
-    }
+    hop_by_hop::strip_connection_tokens(req, &conn_values, REQUEST_HOP_BY_HOP);
 
     if is_upgrade && !is_ws {
         debug!("stripping non-WebSocket upgrade headers to prevent h2c smuggling");

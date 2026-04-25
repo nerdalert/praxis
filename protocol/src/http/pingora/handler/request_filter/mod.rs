@@ -46,6 +46,11 @@ pub(in crate::http) async fn execute(
         return Ok(true);
     }
 
+    if let Some(rejection) = super::normalize::normalize_request_headers(session) {
+        send_rejection(session, rejection).await;
+        return Ok(true);
+    }
+
     if let Some(handled) = validation::handle_max_forwards(session).await {
         return Ok(handled);
     }

@@ -11,8 +11,7 @@ use std::collections::HashSet;
 
 /// Pre-computed origin matching policy.
 ///
-/// Built at config parse time so per-request matching
-/// avoids allocations.
+/// Built at config parse time for per-request matching.
 ///
 /// # Example
 ///

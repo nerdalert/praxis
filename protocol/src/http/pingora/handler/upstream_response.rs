@@ -46,7 +46,7 @@ use super::hop_by_hop::{self, RESPONSE_HOP_BY_HOP};
 /// [RFC 6455]: https://datatracker.ietf.org/doc/html/rfc6455
 pub(crate) fn strip_hop_by_hop_response(resp: &mut ResponseHeader, is_upgrade_response: bool) {
     let is_ws = is_upgrade_response && is_websocket_response(&resp.headers);
-    let extra = hop_by_hop::connection_tokens(&resp.headers, RESPONSE_HOP_BY_HOP);
+    let conn_values = hop_by_hop::snapshot_connection_values(&resp.headers);
 
     for name in RESPONSE_HOP_BY_HOP {
         if hop_by_hop::preserve_for_upgrade(name, is_ws) {
@@ -54,9 +54,7 @@ pub(crate) fn strip_hop_by_hop_response(resp: &mut ResponseHeader, is_upgrade_re
         }
         let _remove = resp.remove_header(*name);
     }
-    for name in &extra {
-        let _remove = resp.remove_header(name.as_str());
-    }
+    hop_by_hop::strip_connection_tokens(resp, &conn_values, RESPONSE_HOP_BY_HOP);
 
     if is_upgrade_response && !is_ws {
         debug!("stripping non-WebSocket upgrade headers from 101 response");

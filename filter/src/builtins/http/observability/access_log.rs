@@ -144,7 +144,7 @@ fn truncate_u128(v: u128) -> u64 {
 /// logging. Prevents log injection via crafted request URIs.
 ///
 /// Returns [`Cow::Borrowed`] when the input contains no control
-/// characters (the common case for HTTP paths), avoiding allocation.
+/// characters (the common case for HTTP paths).
 fn sanitize_for_log(s: &str) -> Cow<'_, str> {
     if !s.bytes().any(|b| b.is_ascii_control()) {
         return Cow::Borrowed(s);

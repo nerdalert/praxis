@@ -16,6 +16,8 @@ use super::context::PingoraRequestCtx;
 mod hop_by_hop;
 /// HTTP handler without body filter hooks.
 mod no_body;
+/// Request header normalization (duplicate headers, obs-fold).
+mod normalize;
 /// Request body filter hook.
 mod request_body_filter;
 /// Request filter hook.
