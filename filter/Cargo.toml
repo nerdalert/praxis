@@ -25,6 +25,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 http = { workspace = true }
+metrics = { workspace = true }
 percent-encoding = { workspace = true }
 praxis-core = { workspace = true }
 regex = { workspace = true }

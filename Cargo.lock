@@ -1988,6 +1988,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "http",
+ "metrics",
  "percent-encoding",
  "praxis-proxy-core",
  "regex",

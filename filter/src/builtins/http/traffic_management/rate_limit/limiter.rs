@@ -9,7 +9,7 @@ use dashmap::DashMap;
 
 use super::{
     EVICTION_SCAN_LIMIT, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET,
-    MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
+    MAX_DESCRIPTOR_ENTRIES, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
 };
 use crate::builtins::http::{net::normalize_mapped_ipv4, traffic_management::token_bucket::TokenBucket};
 
@@ -97,6 +97,45 @@ impl RateLimitFilter {
         }
     }
 
+    /// Evict stale entries from a descriptor map when it exceeds [`MAX_DESCRIPTOR_ENTRIES`].
+    #[allow(clippy::too_many_lines, reason = "atomic CAS loop")]
+    pub(super) fn maybe_evict_descriptors(&self, map: &DashMap<String, TokenBucket>, now_nanos: u64) {
+        if map.len() <= MAX_DESCRIPTOR_ENTRIES {
+            return;
+        }
+
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "rate/burst nanos"
+        )]
+        let idle_threshold_nanos = (2.0 * self.burst / self.rate * 1_000_000_000.0) as u64;
+        let mut scanned = 0usize;
+        let mut evicted = 0usize;
+
+        map.retain(|_key, bucket| {
+            if scanned >= EVICTION_SCAN_LIMIT {
+                return true;
+            }
+            scanned += 1;
+            let last = bucket.last_refill_nanos();
+            if now_nanos.saturating_sub(last) > idle_threshold_nanos {
+                evicted += 1;
+                return false;
+            }
+            true
+        });
+
+        if evicted > 0 {
+            tracing::debug!(
+                evicted,
+                scanned,
+                remaining = map.len(),
+                "rate_limit: evicted stale descriptor entries"
+            );
+        }
+    }
+
     /// Try to acquire a token for the given request context.
     ///
     /// IPv4-mapped IPv6 addresses are normalized to plain IPv4 before
@@ -121,6 +160,7 @@ impl RateLimitFilter {
                     None => Err(bucket.current_tokens(self.rate, self.burst, now)),
                 }
             },
+            RateLimitState::Descriptor(_) => Ok(self.burst),
         }
     }
 
@@ -139,6 +179,7 @@ impl RateLimitFilter {
                 map.get(&ip)
                     .map_or(self.burst, |b| b.current_tokens(self.rate, self.burst, now))
             },
+            RateLimitState::Descriptor(_) => self.burst,
         }
     }
 }

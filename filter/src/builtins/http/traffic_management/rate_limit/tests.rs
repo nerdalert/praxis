@@ -275,6 +275,7 @@ fn per_ip_eviction_removes_stale_entries() {
         rate,
         burst,
         epoch: Instant::now(),
+        descriptor_policy: None,
     };
     filter.maybe_evict(&map, now_nanos);
 
@@ -303,6 +304,7 @@ fn per_ip_eviction_skips_when_below_threshold() {
         rate,
         burst,
         epoch: Instant::now(),
+        descriptor_policy: None,
     };
     filter.maybe_evict(&map, 999_999_999_999);
 
@@ -386,5 +388,279 @@ fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
         rate,
         burst: burst_f,
         epoch: Instant::now(),
+        descriptor_policy: None,
     }
+}
+
+// -----------------------------------------------------------------------------
+// Descriptor Mode Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn from_config_parses_descriptor_with_context() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 10
+burst: 20
+descriptor:
+  name: test-policy
+  sources:
+    - context: subscription
+    - context: model
+  missing: reject
+"#,
+    )
+    .unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "rate_limit");
+}
+
+#[test]
+fn from_config_parses_descriptor_with_trusted_headers() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 10
+burst: 20
+descriptor:
+  name: header-policy
+  trusted_headers: true
+  sources:
+    - header: X-MaaS-Subscription
+    - header: X-AI-Model
+  missing: skip
+"#,
+    )
+    .unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "rate_limit");
+}
+
+#[test]
+fn from_config_rejects_descriptor_without_block() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: descriptor\nrate: 10\nburst: 20").unwrap();
+    assert!(
+        RateLimitFilter::from_config(&yaml).is_err(),
+        "descriptor mode without config block should fail"
+    );
+}
+
+#[test]
+fn from_config_rejects_descriptor_no_sources() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 10
+burst: 20
+descriptor:
+  name: empty
+  sources: []
+"#,
+    )
+    .unwrap();
+    assert!(
+        RateLimitFilter::from_config(&yaml).is_err(),
+        "descriptor with no sources should fail"
+    );
+}
+
+#[test]
+fn from_config_rejects_header_without_trusted() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 10
+burst: 20
+descriptor:
+  sources:
+    - header: X-Spoofable
+"#,
+    )
+    .unwrap();
+    assert!(
+        RateLimitFilter::from_config(&yaml).is_err(),
+        "header source without trusted_headers should fail"
+    );
+}
+
+#[tokio::test]
+async fn descriptor_allows_within_burst() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 1
+burst: 2
+descriptor:
+  sources:
+    - context: sub
+  missing: reject
+"#,
+    )
+    .unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/");
+    req.headers.insert("x-request-id", "test".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("sub", "tenant-a");
+
+    let result = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(result, FilterAction::Continue),
+        "first request within burst should continue"
+    );
+}
+
+#[tokio::test]
+async fn descriptor_rejects_after_burst() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 0.001
+burst: 1
+descriptor:
+  sources:
+    - context: sub
+  missing: reject
+"#,
+    )
+    .unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+
+    let mut ctx1 = crate::test_utils::make_filter_context(&req);
+    ctx1.set_metadata("sub", "tenant-a");
+    let r1 = filter.on_request(&mut ctx1).await.unwrap();
+    assert!(matches!(r1, FilterAction::Continue));
+
+    let mut ctx2 = crate::test_utils::make_filter_context(&req);
+    ctx2.set_metadata("sub", "tenant-a");
+    let r2 = filter.on_request(&mut ctx2).await.unwrap();
+    assert!(
+        matches!(r2, FilterAction::Reject(r) if r.status == 429),
+        "second request should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn descriptor_isolates_different_keys() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 0.001
+burst: 1
+descriptor:
+  sources:
+    - context: sub
+  missing: reject
+"#,
+    )
+    .unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+
+    let mut ctx_a = crate::test_utils::make_filter_context(&req);
+    ctx_a.set_metadata("sub", "tenant-a");
+    let r_a = filter.on_request(&mut ctx_a).await.unwrap();
+    assert!(matches!(r_a, FilterAction::Continue));
+
+    let mut ctx_b = crate::test_utils::make_filter_context(&req);
+    ctx_b.set_metadata("sub", "tenant-b");
+    let r_b = filter.on_request(&mut ctx_b).await.unwrap();
+    assert!(
+        matches!(r_b, FilterAction::Continue),
+        "different descriptor should get its own bucket"
+    );
+}
+
+#[tokio::test]
+async fn descriptor_missing_reject() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 1
+burst: 10
+descriptor:
+  sources:
+    - context: sub
+  missing: reject
+"#,
+    )
+    .unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let result = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(result, FilterAction::Reject(r) if r.status == 429),
+        "missing descriptor with reject should return 429"
+    );
+}
+
+#[tokio::test]
+async fn descriptor_missing_skip() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 1
+burst: 10
+descriptor:
+  sources:
+    - context: sub
+  missing: skip
+"#,
+    )
+    .unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let result = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(result, FilterAction::Continue),
+        "missing descriptor with skip should continue"
+    );
+}
+
+#[tokio::test]
+async fn descriptor_composite_key_isolates() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+mode: descriptor
+rate: 0.001
+burst: 1
+descriptor:
+  sources:
+    - context: sub
+    - context: model
+  missing: reject
+"#,
+    )
+    .unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+
+    let mut ctx1 = crate::test_utils::make_filter_context(&req);
+    ctx1.set_metadata("sub", "t1");
+    ctx1.set_metadata("model", "qwen");
+    let r1 = filter.on_request(&mut ctx1).await.unwrap();
+    assert!(matches!(r1, FilterAction::Continue));
+
+    let mut ctx2 = crate::test_utils::make_filter_context(&req);
+    ctx2.set_metadata("sub", "t1");
+    ctx2.set_metadata("model", "mistral");
+    let r2 = filter.on_request(&mut ctx2).await.unwrap();
+    assert!(
+        matches!(r2, FilterAction::Continue),
+        "different composite key should get its own bucket"
+    );
+}
+
+#[test]
+fn build_descriptor_key_collision_safe() {
+    use super::build_descriptor_key;
+    let key1 = build_descriptor_key(&[("sub", "a:b"), ("model", "c")]);
+    let key2 = build_descriptor_key(&[("sub", "a"), ("model", "b;model=1:c")]);
+    assert_ne!(key1, key2, "different values should produce different keys");
 }
