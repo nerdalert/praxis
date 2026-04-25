@@ -118,6 +118,11 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "cors", CorsFilter::from_config);
     register_http(factories, "headers", HeaderFilter::from_config);
     register_http(factories, "forwarded_headers", ForwardedHeadersFilter::from_config);
+    register_http(
+        factories,
+        "http_ext_auth",
+        crate::builtins::http::security::HttpExtAuthFilter::from_config,
+    );
     register_http(factories, "guardrails", crate::GuardrailsFilter::from_config);
     register_http(factories, "ip_acl", IpAclFilter::from_config);
     register_http(factories, "load_balancer", crate::LoadBalancerFilter::from_config);

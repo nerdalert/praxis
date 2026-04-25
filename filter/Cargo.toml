@@ -27,6 +27,8 @@ dashmap = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true }
 percent-encoding = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
 praxis-core = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }

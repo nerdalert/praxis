@@ -7,7 +7,7 @@ mod ai;
 pub(crate) mod net;
 mod observability;
 pub(crate) mod payload_processing;
-mod security;
+pub(crate) mod security;
 mod traffic_management;
 mod transformation;
 
