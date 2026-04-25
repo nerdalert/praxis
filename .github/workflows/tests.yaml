@@ -98,8 +98,8 @@ jobs:
       - name: Unit tests
         run: make test-unit
 
-      - name: Config tests
-        run: make test-configuration
+      - name: Schema tests
+        run: make test-schema
 
       - name: Security tests
         run: make test-security

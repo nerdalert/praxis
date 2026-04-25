@@ -79,6 +79,7 @@ fn build_config(args: &Args) -> Config {
 fn echo_listener(address: &str) -> Listener {
     Listener {
         address: address.into(),
+        cluster: None,
         downstream_read_timeout_ms: None,
         filter_chains: vec!["echo".into()],
         name: "echo".into(),

@@ -344,6 +344,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
         insecure_options: InsecureOptions::default(),
         listeners: vec![Listener {
             address: address.to_owned(),
+            cluster: None,
             downstream_read_timeout_ms: None,
             filter_chains: vec!["backend".to_owned()],
             name: "backend".to_owned(),

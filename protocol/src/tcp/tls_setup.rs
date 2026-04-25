@@ -18,14 +18,14 @@ use super::proxy::PingoraTcpProxy;
 // Types
 // -----------------------------------------------------------------------------
 
-/// Grouping key: `(upstream, idle_timeout_ms, max_duration_secs)`.
-pub(super) type TcpGroupKey = (Option<String>, Option<u64>, Option<u64>);
+/// Grouping key: `(upstream, cluster, idle_timeout_ms, max_duration_secs)`.
+pub(super) type TcpGroupKey = (Option<String>, Option<String>, Option<u64>, Option<u64>);
 
 // -----------------------------------------------------------------------------
 // Grouping
 // -----------------------------------------------------------------------------
 
-/// Group TCP listeners by `(upstream, idle_timeout, max_duration)`.
+/// Group TCP listeners by `(upstream, cluster, idle_timeout, max_duration)`.
 pub(super) fn group_tcp_listeners(config: &Config) -> HashMap<TcpGroupKey, Vec<&praxis_core::config::Listener>> {
     let mut groups: HashMap<TcpGroupKey, Vec<&praxis_core::config::Listener>> = HashMap::new();
     for listener in &config.listeners {
@@ -34,6 +34,7 @@ pub(super) fn group_tcp_listeners(config: &Config) -> HashMap<TcpGroupKey, Vec<&
         }
         let key = (
             listener.upstream.clone(),
+            listener.cluster.clone(),
             listener.tcp_idle_timeout_ms,
             listener.tcp_max_duration_secs,
         );
@@ -141,7 +142,7 @@ listeners:
         .unwrap();
         let groups = group_tcp_listeners(&config);
         assert_eq!(groups.len(), 1, "same upstream + timeout should produce one group");
-        let key = (Some("10.0.0.1:5432".to_owned()), Some(300_000), None);
+        let key = (Some("10.0.0.1:5432".to_owned()), None, Some(300_000), None);
         assert_eq!(groups[&key].len(), 2, "both listeners should be in the same group");
     }
 
@@ -218,7 +219,7 @@ filter_chains:
         .unwrap();
         let groups = group_tcp_listeners(&config);
         assert_eq!(groups.len(), 1, "HTTP listeners should be excluded");
-        let key = (Some("10.0.0.1:5432".to_owned()), Some(300_000), None);
+        let key = (Some("10.0.0.1:5432".to_owned()), None, Some(300_000), None);
         assert!(groups.contains_key(&key), "only TCP listener should be grouped");
     }
 
@@ -231,7 +232,7 @@ filter_chains:
             1,
             "TCP listener without upstream should be grouped with None key"
         );
-        let key = (None, None, None);
+        let key = (None, None, None, None);
         assert!(groups.contains_key(&key), "group key should have None upstream");
     }
 
@@ -283,6 +284,7 @@ filter_chains:
             listeners: vec![Listener {
                 name: "orphan".to_owned(),
                 address: "0.0.0.0:9999".to_owned(),
+                cluster: None,
                 protocol: ProtocolKind::Tcp,
                 tls: None,
                 upstream: None,

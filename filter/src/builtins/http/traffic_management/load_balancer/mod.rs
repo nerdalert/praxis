@@ -3,11 +3,7 @@
 
 //! Load-balancer filter: select an upstream endpoint from the routed cluster.
 
-mod consistent_hash;
-mod endpoint;
 mod entry;
-mod least_connections;
-mod round_robin;
 mod strategy;
 
 #[cfg(test)]

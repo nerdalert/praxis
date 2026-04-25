@@ -120,6 +120,7 @@ fn is_websocket_101(headers: &http::HeaderMap) -> bool {
         .get(http::header::UPGRADE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("websocket"))
+        && headers.get("sec-websocket-accept").is_some()
 }
 
 // -----------------------------------------------------------------------------
@@ -183,6 +184,7 @@ mod tests {
         let mut resp = pingora_http::ResponseHeader::build(101, None).unwrap();
         drop(resp.insert_header("upgrade", "websocket"));
         drop(resp.insert_header("connection", "Upgrade"));
+        drop(resp.insert_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
         let mut ctx = make_ctx();
 
         execute(&pipeline, &mut resp, &mut ctx).await.unwrap();
@@ -242,6 +244,10 @@ mod tests {
     fn is_websocket_101_with_valid_header() {
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::UPGRADE, "websocket".parse().unwrap());
+        headers.insert(
+            "sec-websocket-accept".parse::<http::header::HeaderName>().unwrap(),
+            "x".parse().unwrap(),
+        );
         assert!(is_websocket_101(&headers), "should recognize lowercase websocket");
     }
 
@@ -249,11 +255,15 @@ mod tests {
     fn is_websocket_101_case_insensitive() {
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::UPGRADE, "WebSocket".parse().unwrap());
+        headers.insert(
+            "sec-websocket-accept".parse::<http::header::HeaderName>().unwrap(),
+            "x".parse().unwrap(),
+        );
         assert!(is_websocket_101(&headers), "should recognize mixed-case WebSocket");
     }
 
     #[test]
-    fn is_websocket_101_missing_header() {
+    fn is_websocket_101_missing_upgrade_header() {
         let headers = http::HeaderMap::new();
         assert!(
             !is_websocket_101(&headers),
@@ -262,9 +272,23 @@ mod tests {
     }
 
     #[test]
+    fn is_websocket_101_missing_accept_header() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::UPGRADE, "websocket".parse().unwrap());
+        assert!(
+            !is_websocket_101(&headers),
+            "missing Sec-WebSocket-Accept header should return false"
+        );
+    }
+
+    #[test]
     fn is_websocket_101_wrong_protocol() {
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::UPGRADE, "h2c".parse().unwrap());
+        headers.insert(
+            "sec-websocket-accept".parse::<http::header::HeaderName>().unwrap(),
+            "x".parse().unwrap(),
+        );
         assert!(!is_websocket_101(&headers), "h2c should not be treated as websocket");
     }
 

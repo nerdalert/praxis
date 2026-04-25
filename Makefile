@@ -15,7 +15,7 @@ endif
 
 .PHONY: all build release check clean \
 	test test-unit \
-	test-configuration test-integration test-conformance \
+	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience test-smoke \
 	bench \
 	lint fmt doc audit coverage coverage-check \
@@ -89,8 +89,8 @@ test-unit:
 	cargo test -p praxis-proxy-protocol $(_NOCAPTURE)
 	cargo test -p praxis $(_NOCAPTURE)
 
-test-configuration:
-	cargo test -p praxis-tests-configuration $(_NOCAPTURE)
+test-schema:
+	cargo test -p praxis-tests-schema $(_NOCAPTURE)
 
 test-integration:
 	cargo test -p praxis-tests-integration $(_NOCAPTURE)
@@ -106,10 +106,9 @@ test-security-suite:
 test-resilience:
 	cargo test -p praxis-tests-resilience $(_NOCAPTURE)
 
-test-config-validation:
-	cargo test -p praxis-tests-configuration $(_NOCAPTURE)
+test-config-validation: test-schema
 
-test-config: test-configuration
+test-config: test-schema
 
 test-smoke:
 	cargo test -p praxis-tests-smoke $(_NOCAPTURE)
@@ -292,14 +291,14 @@ help:
 	@echo "Test:"
 	@echo "  test                 run all tests"
 	@echo "  test-unit            unit tests (core, filter, protocol, praxis)"
-	@echo "  test-configuration   config validation + example tests"
+	@echo "  test-schema   config validation + example tests"
 	@echo "  test-integration     integration tests only"
 	@echo "  test-conformance     conformance tests only"
 	@echo "  test-security        security test suite"
 	@echo "  test-security-suite  security tests only"
 	@echo "  test-resilience      resilience tests only"
-	@echo "  test-config-validation  alias for test-configuration"
-	@echo "  test-config          alias for test-configuration"
+	@echo "  test-config-validation  alias for test-schema"
+	@echo "  test-config          alias for test-schema"
 	@echo "  test-smoke           smoke tests only"
 	@echo ""
 	@echo "Bench:"

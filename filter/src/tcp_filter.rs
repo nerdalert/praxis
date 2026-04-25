@@ -3,9 +3,10 @@
 
 //! The [`TcpFilter`] trait and per-connection [`TcpFilterContext`].
 
-use std::{borrow::Cow, time::Instant};
+use std::{borrow::Cow, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use praxis_core::health::HealthRegistry;
 
 use crate::{actions::FilterAction, filter::FilterError};
 
@@ -44,6 +45,8 @@ use crate::{actions::FilterAction, filter::FilterError};
 ///     local_addr: "0.0.0.0:8080",
 ///     sni: None,
 ///     upstream_addr: Some(Cow::Borrowed("10.0.0.1:80")),
+///     cluster: None,
+///     health_registry: None,
 ///     connect_time: Instant::now(),
 ///     bytes_in: 0,
 ///     bytes_out: 0,
@@ -89,6 +92,15 @@ pub struct TcpFilterContext<'a> {
     /// provides one.
     pub upstream_addr: Option<Cow<'a, str>>,
 
+    /// Cluster name selected for this connection.
+    ///
+    /// Set by the listener config when `cluster` is configured.
+    /// Read by `tcp_load_balancer` to look up the strategy.
+    pub cluster: Option<Arc<str>>,
+
+    /// Shared health registry for endpoint health lookups.
+    pub health_registry: Option<&'a HealthRegistry>,
+
     /// When the connection was accepted.
     pub connect_time: Instant,
 
@@ -122,6 +134,8 @@ mod tests {
             local_addr: "0.0.0.0:5432",
             sni: None,
             upstream_addr: Some(Cow::Borrowed("10.0.0.1:5432")),
+            cluster: None,
+            health_registry: None,
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
@@ -138,6 +152,8 @@ mod tests {
             local_addr: "0.0.0.0:5432",
             sni: None,
             upstream_addr: Some(Cow::Borrowed("10.0.0.1:5432")),
+            cluster: None,
+            health_registry: None,
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
