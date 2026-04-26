@@ -34,6 +34,7 @@ struct StaticResponseConfig {
 
 /// A name/value header pair in the static response config.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HeaderEntry {
     /// Header field name.
     name: String,
