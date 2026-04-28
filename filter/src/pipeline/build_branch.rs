@@ -92,6 +92,7 @@ fn build_filters(
             mem::take(&mut entry.conditions),
             mem::take(&mut entry.response_conditions),
         );
+        pf.failure_mode = entry.failure_mode;
         pf.name = entry.name.as_ref().map(|n| Arc::from(n.as_str()));
         branch_configs.push(entry.branch_chains.take());
         filters.push(pf);
@@ -299,7 +300,7 @@ fn resolve_named_rejoin(
 mod tests {
     use std::collections::HashMap;
 
-    use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, FilterEntry};
+    use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, FailureMode, FilterEntry};
 
     use super::*;
     use crate::FilterRegistry;
@@ -672,6 +673,7 @@ mod tests {
             branch_chains: None,
             conditions: vec![],
             config: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            failure_mode: FailureMode::default(),
             filter_type: filter_type.to_owned(),
             name: name.map(|n| n.to_owned()),
             response_conditions: vec![],
