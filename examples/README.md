@@ -41,6 +41,7 @@ page.
 | File | Description |
 | ------ | ------------- |
 | [ai-inference-body-based-routing.yaml](configs/payload-processing/ai-inference-body-based-routing.yaml) | Route LLM requests by model field in JSON body |
+| [json-rpc-routing.yaml](configs/payload-processing/json-rpc-routing.yaml) | Route JSON-RPC 2.0 requests by method for MCP and A2A protocols |
 | [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | Stream-buffered body inspection before forwarding |
 | [compression.yaml](configs/payload-processing/compression.yaml) | Gzip, brotli, and zstd response compression |
 | [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | Extract multiple JSON fields into headers in one pass |
