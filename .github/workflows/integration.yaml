@@ -1,4 +1,4 @@
-name: Tests (Conformance)
+name: Tests (Integration)
 
 # ------------------------------------------------------------------------------
 # Workflow Settings
@@ -29,7 +29,7 @@ env:
 
 jobs:
   # -----------------------------------------------------------------
-  # Conformance test suites (tests/ crates)
+  # Integration test suites (tests/ crates)
   # -----------------------------------------------------------------
 
   test:
