@@ -138,4 +138,4 @@ jobs:
           GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-reviewer copilot
+          gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-reviewer @copilot
