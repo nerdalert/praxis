@@ -59,7 +59,7 @@ impl Protocol for PingoraHttp {
         }
 
         if let Some(admin_addr) = &config.admin.address {
-            health::add_health_endpoint_to_pingora_server(server.server_mut(), admin_addr, None, config.admin.verbose);
+            health::add_admin_endpoints_to_pingora_server(server.server_mut(), admin_addr, None, config.admin.verbose);
         }
 
         Ok(cert_watcher_shutdowns)

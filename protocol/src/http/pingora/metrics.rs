@@ -5,7 +5,18 @@
 
 use std::sync::OnceLock;
 
+use metrics::{counter, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Counter for completed HTTP requests.
+const HTTP_REQUESTS_TOTAL: &str = "praxis_http_requests_total";
+
+/// Histogram for HTTP request duration in seconds.
+const HTTP_REQUEST_DURATION_SECONDS: &str = "praxis_http_request_duration_seconds";
 
 // -----------------------------------------------------------------------------
 // Recorder Installation
@@ -96,4 +107,45 @@ pub fn method_label(method: &str) -> &'static str {
         "CONNECT" => "CONNECT",
         _ => "OTHER",
     }
+}
+
+// -----------------------------------------------------------------------------
+// Metric Recording
+// -----------------------------------------------------------------------------
+
+/// Labels for a completed HTTP request.
+///
+/// Static labels (`method`, `status_class`, `route`) use `&'static str`
+/// so the metrics facade can intern them without per-request allocation.
+/// Only `cluster` is dynamic.
+pub(crate) struct RequestMetricLabels<'a> {
+    /// HTTP method (e.g. `"GET"`).
+    pub method: &'static str,
+    /// Status class (e.g. `"2xx"`).
+    pub status_class: &'static str,
+    /// Route name or `"unknown"`.
+    pub route: &'static str,
+    /// Cluster name or `"none"`.
+    pub cluster: &'a str,
+}
+
+/// Record HTTP request metrics for a completed request.
+pub(crate) fn record_request_metrics(labels: &RequestMetricLabels<'_>, duration_secs: f64) {
+    let cluster = labels.cluster.to_owned();
+    counter!(
+        HTTP_REQUESTS_TOTAL,
+        "method" => labels.method,
+        "status_class" => labels.status_class,
+        "route" => labels.route,
+        "cluster" => cluster.clone()
+    )
+    .increment(1);
+    histogram!(
+        HTTP_REQUEST_DURATION_SECONDS,
+        "method" => labels.method,
+        "status_class" => labels.status_class,
+        "route" => labels.route,
+        "cluster" => cluster
+    )
+    .record(duration_secs);
 }
