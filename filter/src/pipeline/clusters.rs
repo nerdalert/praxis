@@ -11,26 +11,43 @@ use praxis_core::config::FilterEntry;
 // YAML Cluster Extraction
 // -----------------------------------------------------------------------------
 
-/// Extract cluster names from router filter entries' YAML config.
+/// Extract cluster names from cluster-selecting filter entries' YAML config.
+///
+/// Covers `router` routes and `mcp_gateway` server definitions.
 pub(super) fn extract_router_clusters(entries: &[FilterEntry]) -> HashSet<String> {
     let mut clusters = HashSet::new();
     for entry in entries {
-        if entry.filter_type != "router" {
-            continue;
-        }
-        let Some(routes) = entry.config.get("routes") else {
-            continue;
-        };
-        let Some(routes) = routes.as_sequence() else {
-            continue;
-        };
-        for route in routes {
-            if let Some(cluster) = route.get("cluster").and_then(|v| v.as_str()) {
-                clusters.insert(cluster.to_owned());
-            }
+        match entry.filter_type.as_str() {
+            "router" => extract_router_route_clusters(&entry.config, &mut clusters),
+            "mcp_gateway" => extract_mcp_gateway_clusters(&entry.config, &mut clusters),
+            _ => {},
         }
     }
     clusters
+}
+
+/// Extract cluster names from router routes.
+fn extract_router_route_clusters(config: &serde_yaml::Value, clusters: &mut HashSet<String>) {
+    let Some(routes) = config.get("routes").and_then(|v| v.as_sequence()) else {
+        return;
+    };
+    for route in routes {
+        if let Some(cluster) = route.get("cluster").and_then(|v| v.as_str()) {
+            clusters.insert(cluster.to_owned());
+        }
+    }
+}
+
+/// Extract cluster names from `mcp_gateway` server definitions.
+fn extract_mcp_gateway_clusters(config: &serde_yaml::Value, clusters: &mut HashSet<String>) {
+    let Some(servers) = config.get("servers").and_then(|v| v.as_sequence()) else {
+        return;
+    };
+    for server in servers {
+        if let Some(cluster) = server.get("cluster").and_then(|v| v.as_str()) {
+            clusters.insert(cluster.to_owned());
+        }
+    }
 }
 
 /// Extract cluster names from `load_balancer` filter entries' YAML config.
@@ -82,6 +99,18 @@ mod tests {
         assert_eq!(clusters.len(), 2, "should extract two clusters");
         assert!(clusters.contains("web"), "should contain 'web'");
         assert!(clusters.contains("api"), "should contain 'api'");
+    }
+
+    #[test]
+    fn extracts_mcp_gateway_clusters() {
+        let entries = vec![make_entry(
+            "mcp_gateway",
+            "servers:\n  - name: weather\n    cluster: weather-mcp\n    tools: []\n  - name: calendar\n    cluster: calendar-mcp\n    tools: []",
+        )];
+        let clusters = extract_router_clusters(&entries);
+        assert_eq!(clusters.len(), 2, "should extract two gateway clusters");
+        assert!(clusters.contains("weather-mcp"), "should contain 'weather-mcp'");
+        assert!(clusters.contains("calendar-mcp"), "should contain 'calendar-mcp'");
     }
 
     #[test]

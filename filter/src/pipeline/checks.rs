@@ -22,16 +22,21 @@ const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 // Error Checks
 // -----------------------------------------------------------------------------
 
-/// LB without a preceding router.
+/// Filters that select a cluster for upstream routing.
+const CLUSTER_SELECTING_FILTERS: &[&str] = &["router", "mcp_gateway"];
+
+/// LB without a preceding cluster-selecting filter.
 #[allow(clippy::indexing_slicing, reason = "position() is within bounds")]
 pub(super) fn check_lb_without_router(names: &[&str], errors: &mut Vec<String>) {
     if let Some(lb_pos) = names.iter().position(|n| *n == "load_balancer") {
-        let has_router_before = names[..lb_pos].contains(&"router");
-        if !has_router_before {
+        let has_selector_before = names[..lb_pos]
+            .iter()
+            .any(|n| CLUSTER_SELECTING_FILTERS.contains(n));
+        if !has_selector_before {
             errors.push(
                 "load_balancer without a preceding router \
-                 filter; requests will fail with \
-                 'no cluster selected'"
+                 or cluster-selecting filter; requests will \
+                 fail with 'no cluster selected'"
                     .to_owned(),
             );
         }
@@ -260,6 +265,17 @@ mod tests {
         let mut errors = Vec::new();
         check_lb_without_router(&names, &mut errors);
         assert!(errors.is_empty(), "router before LB should produce no errors");
+    }
+
+    #[test]
+    fn lb_with_mcp_gateway_no_error() {
+        let names = vec!["mcp_gateway", "load_balancer"];
+        let mut errors = Vec::new();
+        check_lb_without_router(&names, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "mcp_gateway before LB should produce no errors"
+        );
     }
 
     #[test]

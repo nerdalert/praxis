@@ -77,6 +77,7 @@ pub(super) enum PreReadError {
 /// is stored in `ctx.pre_read_body` for later forwarding by
 /// `request_body_filter`.
 #[allow(
+    clippy::cognitive_complexity,
     clippy::too_many_lines,
     unused_assignments,
     reason = "buffer management orchestration"
@@ -143,6 +144,7 @@ pub(super) async fn pre_read_body(
 
         ctx.request_body_bytes = filter_ctx.request_body_bytes;
         ctx.cluster = filter_ctx.cluster;
+        ctx.rewritten_path = filter_ctx.rewritten_path;
         ctx.upstream = filter_ctx.upstream;
         ctx.filter_metadata = filter_ctx.filter_metadata;
         all_extra_headers.extend(filter_ctx.extra_request_headers);
@@ -153,6 +155,13 @@ pub(super) async fn pre_read_body(
                 if !released {
                     debug!("StreamBuffer released during pre-read");
                     released = true;
+                    // Capture the (possibly mutated) body. A ReadWrite
+                    // filter may have replaced the body content. Store
+                    // it now so the EOS iteration does not overwrite it
+                    // with None.
+                    if body.is_some() {
+                        eos_body = body.take();
+                    }
                 }
             },
             Ok(FilterAction::Reject(rejection)) => {
@@ -162,13 +171,24 @@ pub(super) async fn pre_read_body(
         }
 
         if end_of_stream {
-            eos_body = body;
+            // Only overwrite eos_body if it was not already captured
+            // during Release above.
+            if eos_body.is_none() {
+                eos_body = body;
+            }
             break;
         }
     }
 
     tracing::debug!("storing pre-read body for forwarding by request_body_filter");
     let forwarded = eos_body.unwrap_or_else(|| buffer.freeze());
+
+    // When a ReadWrite filter mutated the body, record the new
+    // length so upstream_request_filter can update Content-Length.
+    if caps.any_request_body_writer {
+        ctx.mutated_request_body_len = Some(forwarded.len());
+    }
+
     if forwarded.is_empty() {
         ctx.pre_read_body = Some(VecDeque::new());
     } else {

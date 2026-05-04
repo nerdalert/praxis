@@ -108,12 +108,15 @@ impl FilterRegistry {
 /// Register all built-in HTTP filter factories.
 #[allow(clippy::too_many_lines, reason = "one line per filter, will grow")]
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
+    use crate::agentic::mcp_gateway::McpGatewayFilter;
     use crate::builtins::{
-        AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
-        ForwardedHeadersFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter, PathRewriteFilter,
-        RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
+        A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
+        ForwardedHeadersFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter, McpFilter,
+        PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter,
+        UrlRewriteFilter,
     };
 
+    register_http(factories, "a2a", A2aFilter::from_config);
     register_http(factories, "access_log", AccessLogFilter::from_config);
     register_http(factories, "circuit_breaker", CircuitBreakerFilter::from_config);
     register_http(factories, "compression", CompressionFilter::from_config);
@@ -138,6 +141,8 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
+    register_http(factories, "mcp", McpFilter::from_config);
+    register_http(factories, "mcp_gateway", McpGatewayFilter::from_config);
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
@@ -205,6 +210,7 @@ mod tests {
         let mut names = registry.available_filters();
         names.sort();
 
+        assert!(names.contains(&"a2a"), "a2a should be registered");
         assert!(names.contains(&"access_log"), "access_log should be registered");
         assert!(
             names.contains(&"circuit_breaker"),
@@ -246,6 +252,8 @@ mod tests {
             "json_body_field should be registered"
         );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
+        assert!(names.contains(&"mcp"), "mcp should be registered");
+        assert!(names.contains(&"mcp_gateway"), "mcp_gateway should be registered");
         #[cfg(feature = "ai-inference")]
         assert!(
             names.contains(&"model_to_header"),

@@ -60,6 +60,12 @@ pub struct PingoraRequestCtx {
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
     pub filter_metadata: std::collections::HashMap<String, String>,
 
+    /// Length of the mutated request body when a `ReadWrite` filter
+    /// modified the body during `StreamBuffer` pre-read. Used by
+    /// `upstream_request_filter` to update `Content-Length` before
+    /// forwarding.
+    pub mutated_request_body_len: Option<usize>,
+
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
     /// selection) so that body-based routing can influence `upstream_peer`.
@@ -257,6 +263,7 @@ impl Default for PingoraRequestCtx {
             cluster: None,
             connection_upgraded: false,
             filter_metadata: std::collections::HashMap::new(),
+            mutated_request_body_len: None,
             pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,

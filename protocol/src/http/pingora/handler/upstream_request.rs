@@ -108,6 +108,16 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
     Ok(())
 }
 
+/// Update `Content-Length` when a `ReadWrite` body filter mutated
+/// the request body during `StreamBuffer` pre-read.
+pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &PingoraRequestCtx) {
+    let Some(new_len) = ctx.mutated_request_body_len else {
+        return;
+    };
+
+    let _result = req.insert_header(http::header::CONTENT_LENGTH, new_len.to_string());
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------

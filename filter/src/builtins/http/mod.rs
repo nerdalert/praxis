@@ -12,7 +12,7 @@ mod transformation;
 
 pub use ai::ModelToHeaderFilter;
 pub use observability::{AccessLogFilter, RequestIdFilter};
-pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter};
+pub use payload_processing::{A2aFilter, CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter, McpFilter};
 pub use security::{
     CorsFilter, CredentialInjectionFilter, ForwardedHeadersFilter, GuardrailsAction, GuardrailsFilter, IpAclFilter,
 };

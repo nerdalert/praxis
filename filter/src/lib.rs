@@ -7,6 +7,7 @@
 //! Filter pipeline engine for Praxis.
 
 mod actions;
+mod agentic;
 mod any_filter;
 mod body;
 #[allow(unreachable_pub, reason = "internal pub items re-exported selectively")]

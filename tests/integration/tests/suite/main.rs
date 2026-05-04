@@ -34,6 +34,7 @@
     reason = "test code"
 )]
 
+mod a2a;
 mod adversarial;
 mod body;
 mod body_pipeline;
@@ -49,6 +50,8 @@ mod health_check;
 mod ip_acl;
 mod json_body_field;
 mod json_rpc;
+mod mcp;
+mod mcp_gateway;
 mod path_rewrite;
 mod payload_processing;
 mod per_listener_pipeline;
