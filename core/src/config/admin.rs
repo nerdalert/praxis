@@ -24,7 +24,7 @@ use serde::Deserialize;
 /// assert_eq!(admin.address.as_deref(), Some("127.0.0.1:9901"));
 /// assert!(admin.verbose);
 /// ```
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     /// Admin endpoint bind address.

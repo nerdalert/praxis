@@ -34,6 +34,24 @@ Exits `0` on success (no output). Exits non-zero and
 prints an error to stderr on failure. Does not bind
 listener ports or enter the server runtime.
 
+## Dumping Effective Configuration
+
+Use `--dump` (or `-T`) to validate and dump the
+effective parsed configuration as YAML to stdout. The
+output includes the effective parsed config (with
+defaults applied) plus resolved top-level listener
+chains.
+
+```sh
+praxis --dump --config praxis.yaml
+praxis -T -c praxis.yaml
+```
+
+Exits `0` on valid config, writing YAML to stdout.
+Exits non-zero and writes errors to stderr on failure.
+Does not start the proxy or bind listeners. `--dump`
+and `--validate` are mutually exclusive.
+
 ## Dynamic Configuration Reload
 
 Praxis watches the config file for changes and

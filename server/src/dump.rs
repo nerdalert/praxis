@@ -1,0 +1,371 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Praxis Contributors
+
+//! `--dump` output: serializable effective configuration with resolved top-level listener chains.
+
+use std::{collections::HashMap, io::Write as _};
+
+use praxis_core::config::{Config, FailureMode};
+use serde::Serialize;
+
+// -----------------------------------------------------------------------------
+// Dump Model
+// -----------------------------------------------------------------------------
+
+/// Top-level dump output written to stdout as YAML.
+#[derive(Serialize)]
+pub(crate) struct EffectiveConfigDump<'a> {
+    /// Where the configuration was loaded from.
+    pub config_source: String,
+
+    /// The fully parsed configuration (with defaults applied).
+    pub configuration: &'a Config,
+
+    /// Resolved top-level listener chains, preserving config order.
+    pub resolved_listeners: Vec<ResolvedListenerDump>,
+}
+
+/// A single listener with its resolved chain and filter information.
+#[derive(Serialize)]
+pub(crate) struct ResolvedListenerDump {
+    /// Listener name from configuration.
+    pub name: String,
+
+    /// Named chains referenced by this listener, in config order.
+    pub chains: Vec<String>,
+
+    /// Flattened filters across all chains, in execution order.
+    pub filters: Vec<ResolvedFilterDump>,
+}
+
+/// A single resolved filter entry with its position metadata.
+#[derive(Serialize)]
+pub(crate) struct ResolvedFilterDump {
+    /// Name of the chain this filter belongs to.
+    pub chain: String,
+
+    /// Zero-based index of this filter within its chain.
+    pub chain_index: usize,
+
+    /// Zero-based index of this filter in the overall pipeline.
+    pub pipeline_index: usize,
+
+    /// Filter type name (e.g. `"router"`, `"load_balancer"`).
+    pub filter: String,
+
+    /// Optional user-assigned name for this filter entry.
+    pub name: Option<String>,
+
+    /// Per-filter failure behaviour.
+    pub failure_mode: FailureMode,
+}
+
+// -----------------------------------------------------------------------------
+// Build + Write
+// -----------------------------------------------------------------------------
+
+/// Build the dump model from a validated configuration.
+///
+/// # Errors
+///
+/// Returns an error if a listener references a chain not present in the config
+/// (should not happen after validation).
+pub(crate) fn build_dump<'a>(
+    config: &'a Config,
+    config_source: &str,
+) -> Result<EffectiveConfigDump<'a>, Box<dyn std::error::Error + Send + Sync>> {
+    let chains: HashMap<&str, &[_]> = config
+        .filter_chains
+        .iter()
+        .map(|c| (c.name.as_str(), c.filters.as_slice()))
+        .collect();
+
+    Ok(EffectiveConfigDump {
+        config_source: config_source.to_owned(),
+        configuration: config,
+        resolved_listeners: build_resolved_listeners(config, &chains)?,
+    })
+}
+
+/// Resolve all listeners into their dump representations.
+fn build_resolved_listeners(
+    config: &Config,
+    chains: &HashMap<&str, &[praxis_core::config::FilterEntry]>,
+) -> Result<Vec<ResolvedListenerDump>, Box<dyn std::error::Error + Send + Sync>> {
+    config
+        .listeners
+        .iter()
+        .map(|listener| build_resolved_listener(listener, chains))
+        .collect()
+}
+
+/// Resolve a single listener's chains into a flat filter list.
+fn build_resolved_listener(
+    listener: &praxis_core::config::Listener,
+    chains: &HashMap<&str, &[praxis_core::config::FilterEntry]>,
+) -> Result<ResolvedListenerDump, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(ResolvedListenerDump {
+        name: listener.name.clone(),
+        chains: listener.filter_chains.clone(),
+        filters: build_resolved_filters(&listener.filter_chains, chains)?,
+    })
+}
+
+/// Flatten chain references into an ordered list of resolved filters.
+fn build_resolved_filters(
+    chain_names: &[String],
+    chains: &HashMap<&str, &[praxis_core::config::FilterEntry]>,
+) -> Result<Vec<ResolvedFilterDump>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut filters = Vec::new();
+    let mut pipeline_index = 0;
+
+    for chain_name in chain_names {
+        let chain_filters = chains
+            .get(chain_name.as_str())
+            .ok_or_else(|| format!("unknown chain '{chain_name}' in validated config"))?;
+        for (chain_index, entry) in chain_filters.iter().enumerate() {
+            filters.push(ResolvedFilterDump {
+                chain: chain_name.clone(),
+                chain_index,
+                pipeline_index,
+                filter: entry.filter_type.clone(),
+                name: entry.name.clone(),
+                failure_mode: entry.failure_mode,
+            });
+            pipeline_index += 1;
+        }
+    }
+
+    Ok(filters)
+}
+
+/// Serialize the dump to YAML and write it to stdout.
+///
+/// # Errors
+///
+/// Returns an error if YAML serialization or stdout write fails.
+pub(crate) fn write_dump(dump: &EffectiveConfigDump<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let yaml = serde_yaml::to_string(dump)?;
+    std::io::stdout().lock().write_all(yaml.as_bytes())?;
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use praxis_core::config::{Config, FailureMode};
+
+    use super::*;
+
+    const ORDERED_CHAINS_YAML: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [first, second]
+filter_chains:
+  - name: first
+    filters:
+      - filter: request_id
+  - name: second
+    filters:
+      - filter: access_log
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+"#;
+
+    const REPRESENTATIVE_CONFIG_YAML: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: branch_target
+    filters:
+      - filter: request_id
+  - name: main
+    filters:
+      - filter: request_id
+        name: mark
+        conditions:
+          - when:
+              path_prefix: /api
+              methods: [GET, POST]
+        branch_chains:
+          - name: audit_branch
+            on_result:
+              filter: mark
+              result: hit
+            chains:
+              - branch_target
+              - name: inline_audit
+                filters:
+                  - filter: access_log
+            rejoin: next
+      - filter: access_log
+        response_conditions:
+          - unless:
+              status: [500]
+      - filter: static_response
+        status: 204
+"#;
+
+    #[test]
+    fn dump_defaults_appear_under_configuration() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters: []
+"#,
+        )
+        .unwrap();
+
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let yaml = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            yaml.contains("shutdown_timeout_secs: 30"),
+            "defaults should appear: {yaml}"
+        );
+        assert!(
+            yaml.contains("config_source: test.yaml"),
+            "config_source should appear: {yaml}"
+        );
+    }
+
+    #[test]
+    fn resolved_filters_preserve_chain_order() {
+        let config = Config::from_yaml(ORDERED_CHAINS_YAML).unwrap();
+
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let filters = &dump.resolved_listeners[0].filters;
+        assert_eq!(filters.len(), 3);
+        assert_filter(&filters[0], "first", 0, 0, "request_id");
+        assert_filter(&filters[1], "second", 0, 1, "access_log");
+        assert_filter(&filters[2], "second", 1, 2, "router");
+    }
+
+    /// Assert a resolved filter's chain, indices, and type name.
+    fn assert_filter(f: &ResolvedFilterDump, chain: &str, chain_idx: usize, pipeline_idx: usize, filter: &str) {
+        assert_eq!(f.chain, chain, "chain mismatch for filter {filter}");
+        assert_eq!(f.chain_index, chain_idx, "chain_index mismatch for filter {filter}");
+        assert_eq!(
+            f.pipeline_index, pipeline_idx,
+            "pipeline_index mismatch for filter {filter}"
+        );
+        assert_eq!(f.filter, filter, "filter type mismatch");
+    }
+
+    #[test]
+    fn representative_config_roundtrips_through_yaml_serialization() {
+        let config = Config::from_yaml(REPRESENTATIVE_CONFIG_YAML).unwrap();
+        let serialized = serde_yaml::to_string(&config).unwrap();
+
+        assert!(
+            serialized.contains("when:"),
+            "request conditions should serialize as maps"
+        );
+        assert!(
+            serialized.contains("unless:"),
+            "response conditions should serialize as maps"
+        );
+        assert!(
+            !serialized.contains("!when"),
+            "request conditions should not serialize as tags"
+        );
+        assert!(
+            !serialized.contains("!unless"),
+            "response conditions should not serialize as tags"
+        );
+
+        let reparsed = Config::from_yaml(&serialized).unwrap();
+        assert_eq!(reparsed.listeners.len(), config.listeners.len());
+        assert_eq!(reparsed.filter_chains.len(), config.filter_chains.len());
+    }
+
+    #[test]
+    fn empty_listener_chains_produce_empty_filter_list() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters: []
+"#,
+        )
+        .unwrap();
+
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let listener = &dump.resolved_listeners[0];
+        assert!(listener.filters.is_empty(), "empty chain should produce no filters");
+        assert_eq!(listener.chains, vec!["main"]);
+    }
+
+    #[test]
+    fn failure_mode_serializes_lowercase() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: access_log
+        failure_mode: open
+      - filter: router
+        routes: []
+"#,
+        )
+        .unwrap();
+
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        assert_eq!(dump.resolved_listeners[0].filters[0].failure_mode, FailureMode::Open);
+        assert_eq!(dump.resolved_listeners[0].filters[1].failure_mode, FailureMode::Closed);
+
+        let yaml = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            yaml.contains("failure_mode: open"),
+            "open should serialize lowercase: {yaml}"
+        );
+        assert!(
+            yaml.contains("failure_mode: closed"),
+            "closed should serialize lowercase: {yaml}"
+        );
+    }
+
+    #[test]
+    fn filter_name_included_when_set() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        name: routing
+        routes: []
+"#,
+        )
+        .unwrap();
+
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        assert_eq!(dump.resolved_listeners[0].filters[0].name.as_deref(), Some("routing"));
+    }
+}

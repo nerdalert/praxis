@@ -28,7 +28,7 @@ use serde::Deserialize;
 /// assert_eq!(cfg.threads, 4);
 /// assert!(cfg.work_stealing);
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     /// Number of worker threads per service.
