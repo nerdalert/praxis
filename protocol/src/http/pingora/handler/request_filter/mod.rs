@@ -51,6 +51,11 @@ pub(in crate::http) async fn execute(
         return Ok(true);
     }
 
+    if let Some(rejection) = reject_reserved_internal_headers(session) {
+        send_rejection(session, rejection).await;
+        return Ok(true);
+    }
+
     if let Some(handled) = validation::handle_max_forwards(session).await {
         return Ok(handled);
     }
@@ -175,6 +180,27 @@ async fn run_pipeline(
         Ok(FilterAction::Reject(rejection)) => Ok((FilterAction::Reject(rejection), Vec::new())),
         Err(e) => Err(e),
     }
+}
+
+/// Reject client-supplied reserved internal headers before special handling
+/// or filter execution can observe them.
+fn reject_reserved_internal_headers(session: &Session) -> Option<Rejection> {
+    let reserved_count = session
+        .req_header()
+        .headers
+        .keys()
+        .filter(|name| super::reserved_headers::is_reserved_internal_header(name))
+        .count();
+
+    if reserved_count == 0 {
+        return None;
+    }
+
+    warn!(
+        count = reserved_count,
+        "rejecting request with client-supplied reserved internal headers"
+    );
+    Some(Rejection::status(400))
 }
 
 // -----------------------------------------------------------------------------

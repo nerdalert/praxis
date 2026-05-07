@@ -6,7 +6,7 @@
 use praxis_core::config::Config;
 use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext};
 use praxis_test_utils::{
-    free_port, http_send, parse_body, parse_header, simple_proxy_yaml, start_backend_with_shutdown,
+    free_port, http_send, parse_body, parse_header, parse_status, simple_proxy_yaml, start_backend_with_shutdown,
     start_header_echo_backend_with_shutdown, start_hop_by_hop_response_backend, start_proxy, start_proxy_with_registry,
 };
 
@@ -242,7 +242,7 @@ fn hop_by_hop_response_preserves_end_to_end_headers() {
 }
 
 #[test]
-fn filter_injected_request_headers_do_not_leak_into_response() {
+fn filter_injected_headers_do_not_leak_to_client_or_reserved_upstream() {
     let backend_guard = start_header_echo_backend_with_shutdown();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
@@ -298,8 +298,8 @@ filter_chains:
         "injected header X-Internal-Praxis should reach upstream: {body}"
     );
     assert!(
-        body_lower.contains("x-praxis-secret"),
-        "injected header X-Praxis-Secret should reach upstream: {body}"
+        !body_lower.contains("x-praxis-secret"),
+        "x-praxis-* headers should be stripped before upstream even when filter-injected: {body}"
     );
 }
 
@@ -320,7 +320,7 @@ fn conflicting_content_length_rejected() {
          \r\n"
     );
     let raw = http_send(proxy.addr(), &request);
-    let status = praxis_test_utils::parse_status(&raw);
+    let status = parse_status(&raw);
 
     assert_eq!(
         status, 400,
@@ -332,10 +332,11 @@ fn conflicting_content_length_rejected() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-/// A filter that injects internal headers via `extra_request_headers`.
+/// A filter that injects request headers via `extra_request_headers`.
 ///
-/// Used to verify that filter-injected request headers do not
-/// leak into client responses.
+/// Used to verify that filter-injected request headers do not leak into
+/// client responses, and that reserved internal prefixes are stripped
+/// before upstream forwarding.
 struct InjectInternalFilter;
 
 #[async_trait::async_trait]
@@ -353,4 +354,304 @@ impl HttpFilter for InjectInternalFilter {
             .push((std::borrow::Cow::Borrowed("X-Praxis-Secret"), "do-not-leak".to_owned()));
         Ok(FilterAction::Continue)
     }
+}
+
+// -----------------------------------------------------------------------------
+// Reserved Internal Header Hygiene — Acceptance Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn body_derived_internal_header_routes_request() {
+    let tools_call_guard = start_backend_with_shutdown("tools-call-backend");
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: json_rpc
+        max_body_bytes: 65536
+        headers:
+          method: x-praxis-mcp-method
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            headers:
+              x-praxis-mcp-method: "tools/call"
+            cluster: "tools-call"
+          - path_prefix: "/"
+            cluster: "default"
+      - filter: load_balancer
+        clusters:
+          - name: "tools-call"
+            endpoints:
+              - "127.0.0.1:{}"
+          - name: "default"
+            endpoints:
+              - "127.0.0.1:{}"
+"#,
+        tools_call_guard.port(),
+        default_guard.port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#;
+    let request = format!(
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {body}",
+        body.len(),
+    );
+
+    let raw = http_send(proxy.addr(), &request);
+    let response_body = parse_body(&raw);
+
+    assert_eq!(
+        response_body, "tools-call-backend",
+        "router should use body-derived tools/call header: {response_body}"
+    );
+}
+
+#[test]
+fn spoofed_internal_header_rejected_before_routing() {
+    let tools_call_guard = start_backend_with_shutdown("tools-call-backend");
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: json_rpc
+        max_body_bytes: 65536
+        headers:
+          method: x-praxis-mcp-method
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            headers:
+              x-praxis-mcp-method: "tools/call"
+            cluster: "tools-call"
+          - path_prefix: "/"
+            cluster: "default"
+      - filter: load_balancer
+        clusters:
+          - name: "tools-call"
+            endpoints:
+              - "127.0.0.1:{}"
+          - name: "default"
+            endpoints:
+              - "127.0.0.1:{}"
+"#,
+        tools_call_guard.port(),
+        default_guard.port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#;
+    let request = format!(
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         X-Praxis-Mcp-Method: initialize\r\n\
+         \r\n\
+         {body}",
+        body.len(),
+    );
+
+    let raw = http_send(proxy.addr(), &request);
+    let status = parse_status(&raw);
+
+    assert_eq!(
+        status, 400,
+        "client-supplied x-praxis-* internal headers should be rejected before routing: {raw}"
+    );
+}
+
+#[test]
+fn filter_generated_internal_header_does_not_reach_backend() {
+    let backend_guard = start_header_echo_backend_with_shutdown();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: json_rpc
+        max_body_bytes: 65536
+        headers:
+          method: x-praxis-mcp-method
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:{}"
+"#,
+        backend_guard.port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#;
+    let request = format!(
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {body}",
+        body.len(),
+    );
+
+    let raw = http_send(proxy.addr(), &request);
+    let echoed = parse_body(&raw);
+    let echoed_lower = echoed.to_lowercase();
+
+    assert!(
+        !echoed_lower.contains("x-praxis-mcp-method"),
+        "filter-generated x-praxis-mcp-method should be stripped before upstream: {echoed}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Reserved Internal Header Hygiene — Prefix Rejection Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn reserved_x_praxis_headers_rejected_from_client() {
+    let backend_guard = start_header_echo_backend_with_shutdown();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let request = format!(
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         X-Praxis-Mcp-Method: spoofed\r\n\
+         X-Praxis-Mcp-Name: spoofed-tool\r\n\
+         X-Praxis-A2a-Method: spoofed-a2a\r\n\
+         X-Safe-Header: should-remain\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(
+        parse_status(&raw),
+        400,
+        "x-praxis-* headers supplied by clients should be rejected: {raw}"
+    );
+}
+
+#[test]
+fn reserved_x_mcp_headers_rejected_from_client() {
+    let backend_guard = start_header_echo_backend_with_shutdown();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let request = format!(
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         X-Mcp-Servername: evil-server\r\n\
+         X-Mcp-Toolname: evil-tool\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(
+        parse_status(&raw),
+        400,
+        "x-mcp-* headers supplied by clients should be rejected: {raw}"
+    );
+}
+
+#[test]
+fn reserved_x_a2a_headers_rejected_from_client() {
+    let backend_guard = start_header_echo_backend_with_shutdown();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let request = format!(
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         X-A2a-Method: spoofed\r\n\
+         X-A2a-Family: spoofed\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(
+        parse_status(&raw),
+        400,
+        "x-a2a-* headers supplied by clients should be rejected: {raw}"
+    );
+}
+
+#[test]
+fn standard_mcp_protocol_headers_preserved() {
+    let backend_guard = start_header_echo_backend_with_shutdown();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let request = format!(
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         MCP-Session-Id: session-123\r\n\
+         Mcp-Method: tools/call\r\n\
+         Mcp-Name: get_weather\r\n\
+         MCP-Protocol-Version: 2025-03-26\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+    let body = parse_body(&raw);
+    let body_lower = body.to_lowercase();
+
+    assert!(
+        body_lower.contains("mcp-session-id: session-123"),
+        "MCP-Session-Id should be preserved: {body}"
+    );
+    assert!(
+        body_lower.contains("mcp-method: tools/call"),
+        "Mcp-Method should be preserved: {body}"
+    );
+    assert!(
+        body_lower.contains("mcp-name: get_weather"),
+        "Mcp-Name should be preserved: {body}"
+    );
+    assert!(
+        body_lower.contains("mcp-protocol-version: 2025-03-26"),
+        "MCP-Protocol-Version should be preserved: {body}"
+    );
 }
