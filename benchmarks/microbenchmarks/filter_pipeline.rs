@@ -17,7 +17,7 @@ use std::hint::black_box;
 
 use common::{bench_runtime, make_ctx, make_request};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use praxis_core::config::Route;
+use praxis_core::config::{PathMatch, Route};
 use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry, HttpFilter, RouterFilter};
 
 // -----------------------------------------------------------------------------
@@ -54,13 +54,17 @@ fn bench_pipeline_execute_request(c: &mut Criterion) {
 
     let routes = vec![
         Route {
-            path_prefix: "/api/".into(),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/api/".to_owned(),
+            },
             host: None,
             headers: None,
             cluster: "api".into(),
         },
         Route {
-            path_prefix: "/".into(),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
             host: None,
             headers: None,
             cluster: "default".into(),

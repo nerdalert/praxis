@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use http::{HeaderMap, HeaderValue};
-use praxis_core::config::Route;
+use praxis_core::config::{PathMatch, Route};
 
 use super::{
     ResolvedRoute, RouterFilter,
@@ -20,32 +20,14 @@ use crate::{FilterAction, filter::HttpFilter};
 
 #[test]
 fn match_root() {
-    let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: None,
-        headers: None,
-        cluster: "default".into(),
-    }]);
+    let router = make_router(vec![prefix_route("/", "default")]);
     let route = router.match_route("/anything", None, &HeaderMap::new()).unwrap();
     assert_eq!(&*route.cluster, "default", "root prefix should match any path");
 }
 
 #[test]
 fn longest_prefix_wins() {
-    let router = make_router(vec![
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
-        Route {
-            path_prefix: "/api/".into(),
-            host: None,
-            headers: None,
-            cluster: "api".into(),
-        },
-    ]);
+    let router = make_router(vec![prefix_route("/", "default"), prefix_route("/api/", "api")]);
 
     let route = router.match_route("/api/users", None, &HeaderMap::new()).unwrap();
     assert_eq!(&*route.cluster, "api", "longer /api/ prefix should win");
@@ -58,17 +40,14 @@ fn longest_prefix_wins() {
 fn host_filtering() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
-            host: Some("api.example.com".into()),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
+            host: Some("api.example.com".to_owned()),
             headers: None,
             cluster: "api".into(),
         },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
+        prefix_route("/", "default"),
     ]);
 
     let route = router
@@ -91,8 +70,10 @@ fn host_filtering() {
 #[test]
 fn host_with_port() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("api.example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("api.example.com".to_owned()),
         headers: None,
         cluster: "api".into(),
     }]);
@@ -108,12 +89,7 @@ fn host_with_port() {
 
 #[test]
 fn no_match() {
-    let router = make_router(vec![Route {
-        path_prefix: "/api/".into(),
-        host: None,
-        headers: None,
-        cluster: "api".into(),
-    }]);
+    let router = make_router(vec![prefix_route("/api/", "api")]);
     assert!(
         router.match_route("/other", None, &HeaderMap::new()).is_none(),
         "non-matching prefix should return None"
@@ -123,8 +99,10 @@ fn no_match() {
 #[test]
 fn no_match_wrong_host() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("api.example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("api.example.com".to_owned()),
         headers: None,
         cluster: "api".into(),
     }]);
@@ -163,12 +141,7 @@ fn from_config_empty_routes_key_missing() {
 
 #[tokio::test]
 async fn on_request_sets_cluster_on_match() {
-    let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: None,
-        headers: None,
-        cluster: "default".into(),
-    }]);
+    let router = make_router(vec![prefix_route("/", "default")]);
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let action = router.on_request(&mut ctx).await.unwrap();
@@ -185,12 +158,7 @@ async fn on_request_sets_cluster_on_match() {
 
 #[tokio::test]
 async fn on_request_rejects_on_no_match() {
-    let router = make_router(vec![Route {
-        path_prefix: "/api/".into(),
-        host: None,
-        headers: None,
-        cluster: "api".into(),
-    }]);
+    let router = make_router(vec![prefix_route("/api/", "api")]);
     let req = crate::test_utils::make_request(http::Method::GET, "/other");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let action = router.on_request(&mut ctx).await.unwrap();
@@ -205,17 +173,14 @@ async fn on_request_rejects_on_no_match() {
 async fn on_request_combined_host_and_path() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
-            host: Some("api.example.com".into()),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
+            host: Some("api.example.com".to_owned()),
             headers: None,
             cluster: "api".into(),
         },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
+        prefix_route("/", "default"),
     ]);
 
     let mut req = crate::test_utils::make_request(http::Method::GET, "/v1/users");
@@ -241,9 +206,11 @@ async fn on_request_combined_host_and_path() {
 #[test]
 fn route_matches_by_header() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
         host: None,
-        headers: Some(HashMap::from([("x-model".into(), "claude-sonnet-4-5".into())])),
+        headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
         cluster: "claude_sonnet".into(),
     }]);
 
@@ -259,9 +226,11 @@ fn route_matches_by_header() {
 #[test]
 fn route_skips_mismatched_header() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
         host: None,
-        headers: Some(HashMap::from([("x-model".into(), "claude-sonnet-4-5".into())])),
+        headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
         cluster: "claude_sonnet".into(),
     }]);
 
@@ -277,17 +246,14 @@ fn route_skips_mismatched_header() {
 fn route_with_headers_wins_over_plain() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
             host: None,
-            headers: Some(HashMap::from([("x-model".into(), "claude-sonnet-4-5".into())])),
+            headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
             cluster: "claude_sonnet".into(),
         },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
+        prefix_route("/", "default"),
     ]);
 
     let mut hdrs = HeaderMap::new();
@@ -303,17 +269,14 @@ fn route_with_headers_wins_over_plain() {
 fn route_without_headers_used_as_fallback() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
             host: None,
-            headers: Some(HashMap::from([("x-model".into(), "claude-sonnet-4-5".into())])),
+            headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
             cluster: "claude_sonnet".into(),
         },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
+        prefix_route("/", "default"),
     ]);
 
     let mut hdrs = HeaderMap::new();
@@ -329,17 +292,14 @@ fn route_without_headers_used_as_fallback() {
 async fn host_falls_back_to_uri_authority() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
-            host: Some("api.example.com".into()),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
+            host: Some("api.example.com".to_owned()),
             headers: None,
             cluster: "api".into(),
         },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
+        prefix_route("/", "default"),
     ]);
 
     let req = crate::context::Request {
@@ -359,9 +319,11 @@ async fn host_falls_back_to_uri_authority() {
 #[test]
 fn multi_value_header_matches_any() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
         host: None,
-        headers: Some(HashMap::from([("x-model".into(), "claude-sonnet-4-5".into())])),
+        headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
         cluster: "claude_sonnet".into(),
     }]);
 
@@ -378,8 +340,10 @@ fn multi_value_header_matches_any() {
 #[test]
 fn ipv6_host_with_port() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("[::1]".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("[::1]".to_owned()),
         headers: None,
         cluster: "ipv6".into(),
     }]);
@@ -391,8 +355,10 @@ fn ipv6_host_with_port() {
 #[test]
 fn ipv6_host_without_port() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("[::1]".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("[::1]".to_owned()),
         headers: None,
         cluster: "ipv6".into(),
     }]);
@@ -414,17 +380,14 @@ fn empty_route_table() {
 fn route_with_host_and_headers() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
-            host: Some("api.example.com".into()),
-            headers: Some(HashMap::from([("x-version".into(), "v2".into())])),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
+            host: Some("api.example.com".to_owned()),
+            headers: Some(HashMap::from([("x-version".to_owned(), "v2".to_owned())])),
             cluster: "api-v2".into(),
         },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
+        prefix_route("/", "default"),
     ]);
 
     let mut hdrs = HeaderMap::new();
@@ -440,15 +403,19 @@ fn route_with_host_and_headers() {
 fn same_prefix_same_constraints_first_wins() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
             host: None,
-            headers: Some(HashMap::from([("x-a".into(), "1".into())])),
+            headers: Some(HashMap::from([("x-a".to_owned(), "1".to_owned())])),
             cluster: "first".into(),
         },
         Route {
-            path_prefix: "/".into(),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
             host: None,
-            headers: Some(HashMap::from([("x-b".into(), "2".into())])),
+            headers: Some(HashMap::from([("x-b".to_owned(), "2".to_owned())])),
             cluster: "second".into(),
         },
     ]);
@@ -466,7 +433,9 @@ fn same_prefix_same_constraints_first_wins() {
 #[test]
 fn empty_headers_map_matches_everything() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
         host: None,
         headers: Some(HashMap::new()),
         cluster: "vacuous".into(),
@@ -479,8 +448,10 @@ fn empty_headers_map_matches_everything() {
 #[tokio::test]
 async fn on_request_strips_port_from_host_header() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("example.com".to_owned()),
         headers: None,
         cluster: "example".into(),
     }]);
@@ -502,12 +473,7 @@ async fn on_request_strips_port_from_host_header() {
 
 #[test]
 fn route_matches_request_path_only_hit() {
-    let route = Route {
-        path_prefix: "/api/".into(),
-        host: None,
-        headers: None,
-        cluster: "api".into(),
-    };
+    let route = prefix_route("/api/", "api");
     let resolved = ResolvedRoute {
         route,
         wildcard_suffix: None,
@@ -520,12 +486,7 @@ fn route_matches_request_path_only_hit() {
 
 #[test]
 fn route_matches_request_path_miss() {
-    let route = Route {
-        path_prefix: "/api/".into(),
-        host: None,
-        headers: None,
-        cluster: "api".into(),
-    };
+    let route = prefix_route("/api/", "api");
     let resolved = ResolvedRoute {
         route,
         wildcard_suffix: None,
@@ -539,8 +500,10 @@ fn route_matches_request_path_miss() {
 #[test]
 fn route_matches_request_host_hit() {
     let route = Route {
-        path_prefix: "/".into(),
-        host: Some("example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("example.com".to_owned()),
         headers: None,
         cluster: "ex".into(),
     };
@@ -557,8 +520,10 @@ fn route_matches_request_host_hit() {
 #[test]
 fn route_matches_request_host_miss() {
     let route = Route {
-        path_prefix: "/".into(),
-        host: Some("example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("example.com".to_owned()),
         headers: None,
         cluster: "ex".into(),
     };
@@ -575,8 +540,10 @@ fn route_matches_request_host_miss() {
 #[test]
 fn route_matches_request_host_miss_when_no_host() {
     let route = Route {
-        path_prefix: "/".into(),
-        host: Some("example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("example.com".to_owned()),
         headers: None,
         cluster: "ex".into(),
     };
@@ -593,9 +560,11 @@ fn route_matches_request_host_miss_when_no_host() {
 #[test]
 fn route_matches_request_header_hit() {
     let route = Route {
-        path_prefix: "/".into(),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
         host: None,
-        headers: Some(HashMap::from([("x-key".into(), "val".into())])),
+        headers: Some(HashMap::from([("x-key".to_owned(), "val".to_owned())])),
         cluster: "h".into(),
     };
     let resolved = ResolvedRoute {
@@ -613,9 +582,11 @@ fn route_matches_request_header_hit() {
 #[test]
 fn route_matches_request_header_miss() {
     let route = Route {
-        path_prefix: "/".into(),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
         host: None,
-        headers: Some(HashMap::from([("x-key".into(), "val".into())])),
+        headers: Some(HashMap::from([("x-key".to_owned(), "val".to_owned())])),
         cluster: "h".into(),
     };
     let resolved = ResolvedRoute {
@@ -633,9 +604,11 @@ fn route_matches_request_header_miss() {
 #[test]
 fn route_matches_request_compound() {
     let route = Route {
-        path_prefix: "/api/".into(),
-        host: Some("example.com".into()),
-        headers: Some(HashMap::from([("x-ver".into(), "2".into())])),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/api/".to_owned(),
+        },
+        host: Some("example.com".to_owned()),
+        headers: Some(HashMap::from([("x-ver".to_owned(), "2".to_owned())])),
         cluster: "c".into(),
     };
     let resolved = ResolvedRoute {
@@ -660,22 +633,19 @@ fn route_matches_request_compound() {
 
 #[test]
 fn update_best_match_prefers_more_constraints_at_same_prefix() {
-    let route_a = Route {
-        path_prefix: "/".into(),
-        host: None,
-        headers: None,
-        cluster: "a".into(),
-    };
+    let route_a = prefix_route("/", "a");
     let route_b = Route {
-        path_prefix: "/".into(),
-        host: Some("example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("example.com".to_owned()),
         headers: None,
         cluster: "b".into(),
     };
     let best = update_best_match(None, &route_a);
     let best = update_best_match(best, &route_b);
     assert_eq!(
-        &*best.unwrap().2.cluster,
+        &*best.unwrap().1.cluster,
         "b",
         "route with more constraints should win at same prefix length"
     );
@@ -683,41 +653,28 @@ fn update_best_match_prefers_more_constraints_at_same_prefix() {
 
 #[test]
 fn update_best_match_prefers_longer_prefix() {
-    let short = Route {
-        path_prefix: "/".into(),
-        host: None,
-        headers: None,
-        cluster: "short".into(),
-    };
-    let long = Route {
-        path_prefix: "/api/".into(),
-        host: None,
-        headers: None,
-        cluster: "long".into(),
-    };
+    let short = prefix_route("/", "short");
+    let long = prefix_route("/api/", "long");
     let best = update_best_match(None, &short);
     let best = update_best_match(best, &long);
-    assert_eq!(&*best.unwrap().2.cluster, "long", "route with longer prefix should win");
+    assert_eq!(&*best.unwrap().1.cluster, "long", "route with longer prefix should win");
 }
 
 #[test]
 fn update_best_match_keeps_current_when_dominated() {
     let first = Route {
-        path_prefix: "/api/".into(),
-        host: Some("example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/api/".to_owned(),
+        },
+        host: Some("example.com".to_owned()),
         headers: None,
         cluster: "first".into(),
     };
-    let second = Route {
-        path_prefix: "/".into(),
-        host: None,
-        headers: None,
-        cluster: "second".into(),
-    };
+    let second = prefix_route("/", "second");
     let best = update_best_match(None, &first);
     let best = update_best_match(best, &second);
     assert_eq!(
-        &*best.unwrap().2.cluster,
+        &*best.unwrap().1.cluster,
         "first",
         "dominated route should not replace current best"
     );
@@ -725,19 +682,9 @@ fn update_best_match_keeps_current_when_dominated() {
 
 #[test]
 fn should_stop_early_true_when_prefix_shorter_than_best() {
-    let best_route = Route {
-        path_prefix: "/api/v2/".into(),
-        host: None,
-        headers: None,
-        cluster: "best".into(),
-    };
-    let shorter = Route {
-        path_prefix: "/api/".into(),
-        host: None,
-        headers: None,
-        cluster: "shorter".into(),
-    };
-    let best = Some((best_route.path_prefix.len(), 0, &best_route));
+    let best_route = prefix_route("/api/v2/", "best");
+    let shorter = prefix_route("/api/", "shorter");
+    let best = Some(((false, best_route.path_match.len(), 0), &best_route));
     assert!(
         should_stop_early(best, &shorter),
         "should stop when current route prefix is shorter than best"
@@ -746,19 +693,9 @@ fn should_stop_early_true_when_prefix_shorter_than_best() {
 
 #[test]
 fn should_stop_early_false_when_prefix_equal_to_best() {
-    let best_route = Route {
-        path_prefix: "/api/".into(),
-        host: None,
-        headers: None,
-        cluster: "best".into(),
-    };
-    let same = Route {
-        path_prefix: "/api/".into(),
-        host: None,
-        headers: None,
-        cluster: "same".into(),
-    };
-    let best = Some((best_route.path_prefix.len(), 0, &best_route));
+    let best_route = prefix_route("/api/", "best");
+    let same = prefix_route("/api/", "same");
+    let best = Some(((false, best_route.path_match.len(), 0), &best_route));
     assert!(
         !should_stop_early(best, &same),
         "should not stop when prefix lengths are equal"
@@ -767,12 +704,7 @@ fn should_stop_early_false_when_prefix_equal_to_best() {
 
 #[test]
 fn should_stop_early_false_when_no_best() {
-    let route = Route {
-        path_prefix: "/".into(),
-        host: None,
-        headers: None,
-        cluster: "any".into(),
-    };
+    let route = prefix_route("/", "any");
     assert!(
         !should_stop_early(None, &route),
         "should not stop when there is no current best"
@@ -782,7 +714,9 @@ fn should_stop_early_false_when_no_best() {
 #[test]
 fn non_segment_boundary_prefix_rejected() {
     let err = RouterFilter::new(vec![Route {
-        path_prefix: "/api".into(),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/api".to_owned(),
+        },
         host: None,
         headers: None,
         cluster: "api".into(),
@@ -797,8 +731,10 @@ fn non_segment_boundary_prefix_rejected() {
 #[test]
 fn wildcard_host_matches_subdomain() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("*.example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
     }]);
@@ -815,8 +751,10 @@ fn wildcard_host_matches_subdomain() {
 #[test]
 fn wildcard_host_does_not_match_bare_domain() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("*.example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
     }]);
@@ -832,8 +770,10 @@ fn wildcard_host_does_not_match_bare_domain() {
 #[test]
 fn wildcard_host_does_not_match_multi_level_subdomain() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("*.example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
     }]);
@@ -849,8 +789,10 @@ fn wildcard_host_does_not_match_multi_level_subdomain() {
 #[test]
 fn wildcard_host_with_port() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("*.example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
     }]);
@@ -867,8 +809,10 @@ fn wildcard_host_with_port() {
 #[test]
 fn wildcard_host_case_insensitive() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("*.Example.COM".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("*.Example.COM".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
     }]);
@@ -886,17 +830,14 @@ fn wildcard_host_case_insensitive() {
 fn wildcard_host_with_fallback() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
-            host: Some("*.example.com".into()),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
+            host: Some("*.example.com".to_owned()),
             headers: None,
             cluster: "wildcard".into(),
         },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
+        prefix_route("/", "default"),
     ]);
 
     let route = router
@@ -918,14 +859,18 @@ fn wildcard_host_with_fallback() {
 fn exact_host_wins_over_wildcard_same_constraints() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
-            host: Some("api.example.com".into()),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
+            host: Some("api.example.com".to_owned()),
             headers: None,
             cluster: "exact".into(),
         },
         Route {
-            path_prefix: "/".into(),
-            host: Some("*.example.com".into()),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
+            host: Some("*.example.com".to_owned()),
             headers: None,
             cluster: "wildcard".into(),
         },
@@ -943,8 +888,10 @@ fn exact_host_wins_over_wildcard_same_constraints() {
 #[test]
 fn wildcard_host_does_not_match_empty_subdomain() {
     let router = make_router(vec![Route {
-        path_prefix: "/".into(),
-        host: Some("*.example.com".into()),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
     }]);
@@ -961,17 +908,14 @@ fn wildcard_host_does_not_match_empty_subdomain() {
 async fn on_request_wildcard_host_via_host_header() {
     let router = make_router(vec![
         Route {
-            path_prefix: "/".into(),
-            host: Some("*.example.com".into()),
+            path_match: PathMatch::Prefix {
+                path_prefix: "/".to_owned(),
+            },
+            host: Some("*.example.com".to_owned()),
             headers: None,
             cluster: "wildcard".into(),
         },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
+        prefix_route("/", "default"),
     ]);
 
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -987,20 +931,7 @@ async fn on_request_wildcard_host_via_host_header() {
 
 #[tokio::test]
 async fn on_request_uses_original_path_when_rewritten_path_is_none() {
-    let router = make_router(vec![
-        Route {
-            path_prefix: "/api/".into(),
-            host: None,
-            headers: None,
-            cluster: "api".into(),
-        },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
-    ]);
+    let router = make_router(vec![prefix_route("/api/", "api"), prefix_route("/", "default")]);
     let req = crate::test_utils::make_request(http::Method::GET, "/api/users");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let action = router.on_request(&mut ctx).await.unwrap();
@@ -1018,18 +949,8 @@ async fn on_request_uses_original_path_when_rewritten_path_is_none() {
 #[tokio::test]
 async fn on_request_uses_rewritten_path_when_set() {
     let router = make_router(vec![
-        Route {
-            path_prefix: "/internal/".into(),
-            host: None,
-            headers: None,
-            cluster: "internal".into(),
-        },
-        Route {
-            path_prefix: "/".into(),
-            host: None,
-            headers: None,
-            cluster: "default".into(),
-        },
+        prefix_route("/internal/", "internal"),
+        prefix_route("/", "default"),
     ]);
     let req = crate::test_utils::make_request(http::Method::GET, "/api/v1/data");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1048,12 +969,7 @@ async fn on_request_uses_rewritten_path_when_set() {
 
 #[tokio::test]
 async fn on_request_rewritten_path_no_match_still_rejects() {
-    let router = make_router(vec![Route {
-        path_prefix: "/api/".into(),
-        host: None,
-        headers: None,
-        cluster: "api".into(),
-    }]);
+    let router = make_router(vec![prefix_route("/api/", "api")]);
     let req = crate::test_utils::make_request(http::Method::GET, "/api/users");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.rewritten_path = Some("/unknown/path".to_owned());
@@ -1068,10 +984,231 @@ async fn on_request_rewritten_path_no_match_still_rejects() {
     );
 }
 
+#[test]
+fn exact_path_matches_only_exact() {
+    let router = make_router(vec![exact_route("/one", "exact"), prefix_route("/", "fallback")]);
+    assert_eq!(
+        &*router.match_route("/one", None, &HeaderMap::new()).unwrap().cluster,
+        "exact",
+        "/one should match exact route"
+    );
+    assert_eq!(
+        &*router.match_route("/", None, &HeaderMap::new()).unwrap().cluster,
+        "fallback",
+        "/ should match fallback"
+    );
+    assert_eq!(
+        &*router.match_route("/one/sub", None, &HeaderMap::new()).unwrap().cluster,
+        "fallback",
+        "/one/sub should NOT match exact /one"
+    );
+    assert_eq!(
+        &*router.match_route("/one/", None, &HeaderMap::new()).unwrap().cluster,
+        "fallback",
+        "/one/ should NOT match exact /one"
+    );
+    assert_eq!(
+        &*router.match_route("/ONE", None, &HeaderMap::new()).unwrap().cluster,
+        "fallback",
+        "/ONE should NOT match exact /one (case-sensitive)"
+    );
+}
+
+#[test]
+fn exact_path_dominates_prefix() {
+    let router = make_router(vec![
+        exact_route("/api", "exact"),
+        prefix_route("/api/", "prefix"),
+        prefix_route("/", "root"),
+    ]);
+    assert_eq!(
+        &*router.match_route("/api", None, &HeaderMap::new()).unwrap().cluster,
+        "exact",
+        "exact /api should win over prefix /api/"
+    );
+    assert_eq!(
+        &*router.match_route("/api/v1", None, &HeaderMap::new()).unwrap().cluster,
+        "prefix",
+        "/api/v1 should match prefix /api/"
+    );
+    assert_eq!(
+        &*router.match_route("/other", None, &HeaderMap::new()).unwrap().cluster,
+        "root",
+        "/other should match root /"
+    );
+}
+
+#[test]
+fn exact_path_with_host_constraint() {
+    let router = make_router(vec![
+        Route {
+            path_match: PathMatch::Exact {
+                path: "/health".to_owned(),
+            },
+            host: Some("api.example.com".to_owned()),
+            headers: None,
+            cluster: "api-health".into(),
+        },
+        exact_route("/health", "any-health"),
+    ]);
+    assert_eq!(
+        &*router
+            .match_route("/health", Some("api.example.com"), &HeaderMap::new())
+            .unwrap()
+            .cluster,
+        "api-health",
+        "host-constrained exact should win"
+    );
+    assert_eq!(
+        &*router
+            .match_route("/health", Some("other.example.com"), &HeaderMap::new())
+            .unwrap()
+            .cluster,
+        "any-health",
+        "unconstrained exact should match other hosts"
+    );
+    assert_eq!(
+        &*router.match_route("/health", None, &HeaderMap::new()).unwrap().cluster,
+        "any-health",
+        "unconstrained exact should match no host"
+    );
+}
+
+#[test]
+fn exact_path_with_headers() {
+    let mut headers_constraint = HashMap::new();
+    headers_constraint.insert("x-version".to_owned(), "v2".to_owned());
+    let router = make_router(vec![
+        Route {
+            path_match: PathMatch::Exact {
+                path: "/api".to_owned(),
+            },
+            host: None,
+            headers: Some(headers_constraint),
+            cluster: "v2".into(),
+        },
+        exact_route("/api", "default"),
+    ]);
+    let mut req_headers = HeaderMap::new();
+    req_headers.insert("x-version", "v2".parse().unwrap());
+    assert_eq!(
+        &*router.match_route("/api", None, &req_headers).unwrap().cluster,
+        "v2",
+        "exact with matching headers should win"
+    );
+    assert_eq!(
+        &*router.match_route("/api", None, &HeaderMap::new()).unwrap().cluster,
+        "default",
+        "exact without matching headers should fall back"
+    );
+}
+
+#[test]
+fn exact_path_no_trailing_slash_validation() {
+    let router = RouterFilter::new(vec![exact_route("/one", "a"), exact_route("/two", "b")]);
+    assert!(router.is_ok(), "exact paths should not require trailing slash");
+}
+
+#[test]
+fn exact_path_empty_prefix_accepted() {
+    let router = RouterFilter::new(vec![exact_route("/exact", "a")]);
+    assert!(router.is_ok(), "exact path should be accepted");
+}
+
+#[test]
+fn multiple_exact_paths() {
+    let router = make_router(vec![
+        exact_route("/one", "c1"),
+        exact_route("/two", "c2"),
+        exact_route("/three", "c3"),
+    ]);
+    assert_eq!(
+        &*router.match_route("/one", None, &HeaderMap::new()).unwrap().cluster,
+        "c1"
+    );
+    assert_eq!(
+        &*router.match_route("/two", None, &HeaderMap::new()).unwrap().cluster,
+        "c2"
+    );
+    assert_eq!(
+        &*router.match_route("/three", None, &HeaderMap::new()).unwrap().cluster,
+        "c3"
+    );
+    assert!(
+        router.match_route("/four", None, &HeaderMap::new()).is_none(),
+        "/four should match nothing"
+    );
+}
+
+#[test]
+fn exact_path_no_match_returns_none() {
+    let router = make_router(vec![exact_route("/only-this", "a")]);
+    assert!(router.match_route("/something-else", None, &HeaderMap::new()).is_none());
+    assert!(router.match_route("/only-this/sub", None, &HeaderMap::new()).is_none());
+    assert!(router.match_route("/", None, &HeaderMap::new()).is_none());
+}
+
+#[test]
+fn mixed_exact_and_prefix_ordering() {
+    let router = make_router(vec![
+        exact_route("/api/v1/users", "exact-users"),
+        prefix_route("/api/v1/", "prefix-v1"),
+        prefix_route("/api/", "prefix-api"),
+        prefix_route("/", "root"),
+    ]);
+    assert_eq!(
+        &*router
+            .match_route("/api/v1/users", None, &HeaderMap::new())
+            .unwrap()
+            .cluster,
+        "exact-users"
+    );
+    assert_eq!(
+        &*router
+            .match_route("/api/v1/posts", None, &HeaderMap::new())
+            .unwrap()
+            .cluster,
+        "prefix-v1"
+    );
+    assert_eq!(
+        &*router
+            .match_route("/api/v2/other", None, &HeaderMap::new())
+            .unwrap()
+            .cluster,
+        "prefix-api"
+    );
+    assert_eq!(
+        &*router.match_route("/other", None, &HeaderMap::new()).unwrap().cluster,
+        "root"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
 fn make_router(routes: Vec<Route>) -> RouterFilter {
     RouterFilter::new(routes).expect("test routes should be valid")
+}
+
+/// Build a simple prefix route with no host or header constraints.
+fn prefix_route(prefix: &str, cluster: &str) -> Route {
+    Route {
+        path_match: PathMatch::Prefix {
+            path_prefix: prefix.to_owned(),
+        },
+        host: None,
+        headers: None,
+        cluster: cluster.into(),
+    }
+}
+
+/// Build a simple exact-path route with no host or header constraints.
+fn exact_route(path: &str, cluster: &str) -> Route {
+    Route {
+        path_match: PathMatch::Exact { path: path.to_owned() },
+        host: None,
+        headers: None,
+        cluster: cluster.into(),
+    }
 }

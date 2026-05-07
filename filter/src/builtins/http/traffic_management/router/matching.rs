@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use http::HeaderMap;
-use praxis_core::config::Route;
+use praxis_core::config::{PathMatch, Route};
 
 use super::ResolvedRoute;
 
@@ -22,8 +22,17 @@ pub(super) fn route_matches_request(
     req_headers: &HeaderMap,
 ) -> bool {
     let route = &resolved.route;
-    if !path.starts_with(&route.path_prefix) {
-        return false;
+    match &route.path_match {
+        PathMatch::Exact { path: exact } => {
+            if path != exact {
+                return false;
+            }
+        },
+        PathMatch::Prefix { path_prefix } => {
+            if !path.starts_with(path_prefix.as_str()) {
+                return false;
+            }
+        },
     }
     let host_ok = match &route.host {
         Some(h) => host.is_some_and(|req_host| {
@@ -36,23 +45,34 @@ pub(super) fn route_matches_request(
 }
 
 /// Update the best match if the current route has more constraints.
-pub(super) fn update_best_match<'a>(
-    best: Option<(usize, usize, &'a Route)>,
-    route: &'a Route,
-) -> Option<(usize, usize, &'a Route)> {
-    let prefix_len = route.path_prefix.len();
+/// Match specificity: `(is_exact, path_len, constraint_count)`.
+pub(super) type Specificity = (bool, usize, usize);
+
+/// Computes the specificity of a route for comparison.
+fn route_specificity(route: &Route) -> Specificity {
+    let is_exact = route.path_match.is_exact();
+    let path_len = route.path_match.len();
     let constraints = usize::from(route.host.is_some()) + route.headers.as_ref().map_or(0, HashMap::len);
-    let dominated = best.is_some_and(|(bp, bc, _)| (prefix_len, constraints) <= (bp, bc));
-    if dominated {
-        best
-    } else {
-        Some((prefix_len, constraints, route))
-    }
+    (is_exact, path_len, constraints)
+}
+
+/// Update the best match if the current route has higher specificity.
+///
+/// Exact matches dominate prefix matches. Among the same type, longer
+/// paths win. Among equal-length paths, more constraints win.
+pub(super) fn update_best_match<'a>(
+    best: Option<(Specificity, &'a Route)>,
+    route: &'a Route,
+) -> Option<(Specificity, &'a Route)> {
+    let spec = route_specificity(route);
+    let dominated = best.is_some_and(|(bs, _)| spec <= bs);
+    if dominated { best } else { Some((spec, route)) }
 }
 
 /// Return `true` if shorter prefixes cannot improve on the current best.
-pub(super) fn should_stop_early(best: Option<(usize, usize, &Route)>, route: &Route) -> bool {
-    best.is_some_and(|(bp, ..)| route.path_prefix.len() < bp)
+pub(super) fn should_stop_early(best: Option<(Specificity, &Route)>, route: &Route) -> bool {
+    let route_len = route.path_match.len();
+    best.is_some_and(|((_, bp, _), _)| route_len < bp)
 }
 
 // -----------------------------------------------------------------------------
@@ -63,7 +83,8 @@ pub(super) fn should_stop_early(best: Option<(usize, usize, &Route)>, route: &Ro
 ///
 /// When `wildcard_suffix` is `Some`, the pattern is a wildcard
 /// (e.g. `*.example.com`) and `wildcard_suffix` holds the
-/// pre-lowercased suffix (`.example.com`). Zero allocations.
+/// pre-lowercased suffix (`.example.com`). `None` for exact hosts
+/// or routes without a host constraint.
 fn host_matches(pattern: &str, wildcard_suffix: Option<&str>, host: &str) -> bool {
     if let Some(suffix) = wildcard_suffix {
         if host.len() <= suffix.len() {

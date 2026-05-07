@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use http::HeaderMap;
-use praxis_core::config::Route;
+use praxis_core::config::{PathMatch, Route};
 use tracing::{debug, trace};
 
 use self::{
@@ -97,18 +97,22 @@ impl RouterFilter {
     /// does not end with `'/'`.
     ///
     /// ```
-    /// use praxis_core::config::Route;
+    /// use praxis_core::config::{PathMatch, Route};
     /// use praxis_filter::RouterFilter;
     ///
     /// let router = RouterFilter::new(vec![
     ///     Route {
-    ///         path_prefix: "/".into(),
+    ///         path_match: PathMatch::Prefix {
+    ///             path_prefix: "/".to_owned(),
+    ///         },
     ///         host: None,
     ///         headers: None,
     ///         cluster: "default".into(),
     ///     },
     ///     Route {
-    ///         path_prefix: "/api/".into(),
+    ///         path_match: PathMatch::Prefix {
+    ///             path_prefix: "/api/".to_owned(),
+    ///         },
     ///         host: None,
     ///         headers: None,
     ///         cluster: "api".into(),
@@ -118,11 +122,13 @@ impl RouterFilter {
     /// ```
     ///
     /// ```
-    /// use praxis_core::config::Route;
+    /// use praxis_core::config::{PathMatch, Route};
     /// use praxis_filter::RouterFilter;
     ///
     /// let err = RouterFilter::new(vec![Route {
-    ///     path_prefix: "/api".into(),
+    ///     path_match: PathMatch::Prefix {
+    ///         path_prefix: "/api".to_owned(),
+    ///     },
     ///     host: None,
     ///     headers: None,
     ///     cluster: "api".into(),
@@ -137,17 +143,8 @@ impl RouterFilter {
     /// [`FilterError`]: crate::FilterError
     pub fn new(routes: Vec<Route>) -> Result<Self, FilterError> {
         let mut routes = routes;
-        routes.sort_by_key(|b| std::cmp::Reverse(b.path_prefix.len()));
-        for route in &routes {
-            if route.path_prefix != "/" && !route.path_prefix.ends_with('/') {
-                return Err(format!(
-                    "router: path_prefix '{}' for cluster '{}' must end with '/' \
-                     to ensure segment-bounded matching",
-                    route.path_prefix, route.cluster,
-                )
-                .into());
-            }
-        }
+        sort_routes(&mut routes);
+        validate_prefixes(&routes)?;
         let resolved: Vec<ResolvedRoute> = routes
             .into_iter()
             .map(|route| {
@@ -179,7 +176,7 @@ impl RouterFilter {
     /// When multiple routes share the same prefix length, the route with
     /// more constraints (host presence + header count) wins.
     fn match_route(&self, path: &str, host: Option<&str>, req_headers: &HeaderMap) -> Option<&Route> {
-        let mut best: Option<(usize, usize, &Route)> = None;
+        let mut best: Option<(matching::Specificity, &Route)> = None;
 
         for resolved in &self.routes {
             let route = &resolved.route;
@@ -192,8 +189,37 @@ impl RouterFilter {
             }
         }
 
-        best.map(|(_, _, r)| r)
+        best.map(|(_, r)| r)
     }
+}
+
+/// Sorts routes by specificity: exact paths first, then longest prefix.
+fn sort_routes(routes: &mut [Route]) {
+    routes.sort_by(|a, b| {
+        b.path_match.len().cmp(&a.path_match.len()).then_with(|| {
+            let a_exact = u8::from(a.path_match.is_exact());
+            let b_exact = u8::from(b.path_match.is_exact());
+            b_exact.cmp(&a_exact)
+        })
+    });
+}
+
+/// Validates that prefix-only routes have segment-bounded prefixes.
+fn validate_prefixes(routes: &[Route]) -> Result<(), FilterError> {
+    for route in routes {
+        if let PathMatch::Prefix { path_prefix } = &route.path_match
+            && path_prefix != "/"
+            && !path_prefix.ends_with('/')
+        {
+            return Err(format!(
+                "router: path_prefix '{path_prefix}' for cluster '{}' must end with '/' \
+                 to ensure segment-bounded matching",
+                route.cluster,
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]

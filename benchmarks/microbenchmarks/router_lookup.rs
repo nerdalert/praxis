@@ -17,7 +17,7 @@ use std::hint::black_box;
 
 use common::{bench_runtime, make_ctx, make_request};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use praxis_core::config::Route;
+use praxis_core::config::{PathMatch, Route};
 use praxis_filter::{HttpFilter, RouterFilter};
 
 // -----------------------------------------------------------------------------
@@ -86,7 +86,9 @@ fn bench_router_lookup(c: &mut Criterion) {
 fn make_routes(n: usize) -> Vec<Route> {
     let mut routes: Vec<Route> = (0..n)
         .map(|i| Route {
-            path_prefix: format!("/svc-{i}/"),
+            path_match: PathMatch::Prefix {
+                path_prefix: format!("/svc-{i}/"),
+            },
             host: None,
             headers: None,
             cluster: format!("cluster-{i}").into(),
@@ -94,7 +96,9 @@ fn make_routes(n: usize) -> Vec<Route> {
         .collect();
 
     routes.push(Route {
-        path_prefix: "/".into(),
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
         host: None,
         headers: None,
         cluster: "fallback".into(),
