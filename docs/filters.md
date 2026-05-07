@@ -496,6 +496,15 @@ A filter can have both `conditions` (request phase) and
 For detailed configuration of each built-in filter, see
 [configuration.md](configuration.md).
 
+### Security Filter Restrictions
+
+Security-critical filters (`ip_acl`, `forwarded_headers`)
+reject `failure_mode: open` by default. Open failure mode
+on these filters means runtime errors would bypass security
+enforcement. To override this check, set
+`insecure_options.allow_open_security_filters: true`, which
+demotes the error to a warning.
+
 ### Rewrite and Routing Interaction
 
 Both `path_rewrite` and `url_rewrite` set

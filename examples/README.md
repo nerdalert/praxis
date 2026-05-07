@@ -113,6 +113,7 @@ page.
 | [composed-chains.yaml](configs/pipeline/composed-chains.yaml) | Multiple named chains composed per listener |
 | [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | when/unless conditions on request and response phase |
 | [branch-chains.yaml](configs/pipeline/branch-chains.yaml) | All branch chain scenarios in one config (six patterns) |
+| [failure-mode.yaml](configs/pipeline/failure-mode.yaml) | Failure mode behavior (open continues, closed rejects on error) |
 
 ### AI / Inference
 
