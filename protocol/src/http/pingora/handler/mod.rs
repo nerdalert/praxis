@@ -12,7 +12,7 @@ use praxis_filter::{CompressionConfig, FilterPipeline};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
-use super::context::PingoraRequestCtx;
+use super::{context::PingoraRequestCtx, metrics};
 
 /// Shared hop-by-hop header stripping logic.
 mod hop_by_hop;
@@ -211,6 +211,41 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
     }
 }
 
+/// Emit Prometheus metrics for a completed HTTP request.
+///
+/// No-op when the Prometheus recorder has not been installed.
+fn emit_request_metrics(session: &Session, ctx: &PingoraRequestCtx) {
+    if !metrics::is_recorder_installed() {
+        return;
+    }
+
+    let status_code = session.response_written().map_or(0, |resp| resp.status.as_u16());
+    let status_class = metrics::status_class(status_code);
+
+    let request_method = session.req_header().method.as_str();
+    let raw_method = if request_method.is_empty() {
+        ctx.request_snapshot.as_ref().map_or("UNKNOWN", |r| r.method.as_str())
+    } else {
+        request_method
+    };
+    let method = metrics::method_label(raw_method);
+
+    let cluster = ctx.metrics_cluster.as_ref().map_or_else(
+        || ::metrics::SharedString::const_str("none"),
+        |cluster| ::metrics::SharedString::from(Arc::clone(cluster)),
+    );
+
+    let labels = metrics::RequestMetricLabels {
+        method,
+        status_class,
+        route: "unknown",
+        cluster,
+    };
+
+    let duration_secs = ctx.request_start.elapsed().as_secs_f64();
+    metrics::record_request_metrics(labels, duration_secs);
+}
+
 /// Record a passive health observation for the selected upstream endpoint.
 ///
 /// Called from the `logging` hook on every completed request. Determines
@@ -220,7 +255,8 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
 /// No-op when no upstream was selected, no health registry is available,
 /// or passive checking is not configured for the cluster.
 fn record_passive_health(pipeline: &FilterPipeline, error: Option<&pingora_core::Error>, ctx: &PingoraRequestCtx) {
-    let Some(ref cluster_name) = ctx.cluster else {
+    let cluster_name = ctx.cluster.as_ref().or(ctx.metrics_cluster.as_ref());
+    let Some(cluster_name) = cluster_name else {
         return;
     };
     let Some(idx) = ctx.selected_endpoint_index else {
@@ -516,8 +552,26 @@ mod tests {
     fn passive_health_missing_cluster_is_noop() {
         let (pipeline, mut ctx) = make_passive_scenario(Some(1), Some(1));
         ctx.cluster = None;
+        ctx.metrics_cluster = None;
         let error = make_error();
         record_passive_health(&pipeline, Some(&error), &ctx);
+    }
+
+    #[test]
+    fn passive_health_falls_back_to_metrics_cluster() {
+        let (pipeline, mut ctx) = make_passive_scenario(Some(2), Some(1));
+        ctx.cluster = None;
+        ctx.metrics_cluster = Some(Arc::from("test-cluster"));
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+        record_passive_health(&pipeline, Some(&error), &ctx);
+
+        let registry = pipeline.health_registry().unwrap();
+        let entry = registry.get("test-cluster").unwrap();
+        assert!(
+            !entry.endpoints()[0].is_healthy(),
+            "fallback to metrics_cluster should still record passive health"
+        );
     }
 
     #[test]
