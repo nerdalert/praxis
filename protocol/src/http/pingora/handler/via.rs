@@ -33,9 +33,13 @@ fn version_token(version: Version) -> &'static str {
     match version {
         Version::HTTP_09 => "0.9",
         Version::HTTP_10 => "1.0",
+        Version::HTTP_11 => "1.1",
         Version::HTTP_2 => "2.0",
         Version::HTTP_3 => "3.0",
-        _ => "1.1",
+        _ => {
+            tracing::warn!(?version, "unknown HTTP version in Via header, defaulting to 1.1");
+            "1.1"
+        },
     }
 }
 
