@@ -2125,6 +2125,8 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
+ "serde",
+ "serde_yaml",
  "tempfile",
  "tikv-jemallocator",
  "tokio",

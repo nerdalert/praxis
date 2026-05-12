@@ -66,7 +66,7 @@ pub use validate::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING};
 /// .unwrap();
 /// assert_eq!(config.listeners[0].address, "127.0.0.1:8080");
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Admin endpoint settings (address and verbosity).

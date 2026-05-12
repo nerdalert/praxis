@@ -59,3 +59,26 @@ macro_rules! impl_condition_deserialize {
 }
 
 pub(crate) use impl_condition_deserialize;
+
+/// Generates a `Serialize` impl for a when/unless condition enum.
+///
+/// Produces a one-entry map (`when: <match>` or `unless: <match>`)
+/// that round-trips through the custom [`impl_condition_deserialize`]
+/// deserializer.
+macro_rules! impl_condition_serialize {
+    ($cond:ident, $match_:ty) => {
+        impl serde::Serialize for $cond {
+            fn serialize<S: serde::ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeMap as _;
+                let mut map = serializer.serialize_map(Some(1))?;
+                match self {
+                    $cond::When(m) => map.serialize_entry("when", m)?,
+                    $cond::Unless(m) => map.serialize_entry("unless", m)?,
+                }
+                map.end()
+            }
+        }
+    };
+}
+
+pub(crate) use impl_condition_serialize;

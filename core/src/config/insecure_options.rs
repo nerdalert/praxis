@@ -43,7 +43,7 @@ use serde::Deserialize;
 /// assert!(!opts.allow_unbounded_body);
 /// ```
 #[allow(clippy::struct_excessive_bools, reason = "security override flags")]
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InsecureOptions {
     /// Allow security-critical filters to use `failure_mode: open`,
