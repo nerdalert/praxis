@@ -51,7 +51,8 @@ tls:
 
 Multiple certificates on a single listener enable
 SNI-based selection. Entries with `server_names` match
-those hostnames. Mark exactly one entry with
+those hostnames; wildcard entries like `*.example.com`
+match single-level subdomains. Mark exactly one entry with
 `default: true` to serve as the fallback for unmatched
 SNI. An entry without `server_names` that is not marked
 `default: true` is rejected as ambiguous. If no entry
@@ -76,7 +77,8 @@ Multi-cert SNI configs auto-disable hot-reload.
   Multi-cert SNI configs are automatically excluded.
 - If the new certificate fails to parse, the proxy logs
   a warning and continues serving the previous valid
-  certificate.
+  certificate. Consecutive failures trigger exponential
+  backoff (up to 60s) to avoid log spam.
 
 **Debounce behavior:** filesystem events are debounced by
 500ms to handle atomic rename patterns used by Kubernetes

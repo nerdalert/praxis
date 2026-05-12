@@ -98,7 +98,7 @@ impl CircuitBreaker {
                     CircuitState::Open
                 }
             },
-            CircuitState::HalfOpen => CircuitState::HalfOpen,
+            CircuitState::HalfOpen => CircuitState::Open,
         }
     }
 

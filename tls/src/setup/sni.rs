@@ -24,6 +24,10 @@ use crate::{CertKeyPair, TlsError};
 /// all others receive the certificate marked `default: true`. If
 /// no entry is marked `default: true`, unmatched SNI is rejected.
 ///
+/// Wildcard entries like `*.example.com` match single-level
+/// subdomains (e.g. `app.example.com` matches but
+/// `a.b.example.com` does not).
+///
 /// ```ignore
 /// let resolver = SniCertResolver { certs, default };
 /// // rustls calls resolver.resolve(client_hello) during handshake
@@ -31,8 +35,14 @@ use crate::{CertKeyPair, TlsError};
 ///
 /// [`CertifiedKey`]: rustls::sign::CertifiedKey
 pub(crate) struct SniCertResolver {
-    /// Hostname-to-certificate mapping.
+    /// Hostname-to-certificate mapping (exact matches).
     certs: HashMap<String, Arc<CertifiedKey>>,
+
+    /// Wildcard subdomain suffix to certificate mapping.
+    ///
+    /// For `*.example.com`, stores `(".example.com", cert)`.
+    /// Only single-level subdomains match.
+    wildcard_certs: Vec<(String, Arc<CertifiedKey>)>,
 
     /// Fallback certificate when SNI does not match any entry.
     default: Option<Arc<CertifiedKey>>,
@@ -40,20 +50,27 @@ pub(crate) struct SniCertResolver {
 
 impl std::fmt::Debug for SniCertResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let wildcards: Vec<&str> = self.wildcard_certs.iter().map(|(s, _)| s.as_str()).collect();
         f.debug_struct("SniCertResolver")
             .field("hostnames", &self.certs.keys().collect::<Vec<_>>())
+            .field("wildcards", &wildcards)
             .finish()
     }
 }
 
 #[cfg(test)]
 impl SniCertResolver {
-    /// Number of hostname-to-certificate mappings.
+    /// Number of exact hostname-to-certificate mappings.
     fn hostname_count(&self) -> usize {
         self.certs.len()
     }
 
-    /// Whether the resolver contains a mapping for `hostname`.
+    /// Number of wildcard suffix mappings.
+    fn wildcard_count(&self) -> usize {
+        self.wildcard_certs.len()
+    }
+
+    /// Whether the resolver contains an exact mapping for `hostname`.
     fn has_hostname(&self, hostname: &str) -> bool {
         self.certs.contains_key(hostname)
     }
@@ -66,10 +83,25 @@ impl SniCertResolver {
 
 impl ResolvesServerCert for SniCertResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let sni = client_hello.server_name();
-        sni.and_then(|name| self.certs.get(&name.to_ascii_lowercase()))
-            .cloned()
-            .or_else(|| self.default.as_ref().map(Arc::clone))
+        let Some(sni) = client_hello.server_name() else {
+            return self.default.as_ref().map(Arc::clone);
+        };
+        let lower = sni.to_ascii_lowercase();
+
+        if let Some(cert) = self.certs.get(&lower) {
+            return Some(Arc::clone(cert));
+        }
+
+        for (suffix, cert) in &self.wildcard_certs {
+            if lower.ends_with(suffix.as_str())
+                && lower.len() > suffix.len()
+                && !lower[..lower.len() - suffix.len()].contains('.')
+            {
+                return Some(Arc::clone(cert));
+            }
+        }
+
+        self.default.as_ref().map(Arc::clone)
     }
 }
 
@@ -80,35 +112,64 @@ impl ResolvesServerCert for SniCertResolver {
 /// (the resolver returns `None`).
 pub(super) fn build_sni_resolver(certificates: &[CertKeyPair]) -> Result<SniCertResolver, TlsError> {
     let mut certs = HashMap::new();
+    let mut wildcard_certs = Vec::new();
     let mut default: Option<Arc<CertifiedKey>> = None;
 
     for pair in certificates {
-        let certified = loader::load_certified_key(pair)?;
-        let certified = Arc::new(certified);
+        let certified = Arc::new(loader::load_certified_key(pair)?);
 
         if pair.default {
             default = Some(Arc::clone(&certified));
         }
 
-        for name in &pair.server_names {
-            let lower = name.to_ascii_lowercase();
-            if certs.contains_key(&lower) {
-                return Err(TlsError::FileLoadError {
-                    path: pair.cert_path.clone(),
-                    detail: format!("duplicate server_name '{lower}'; each hostname may only appear once"),
-                });
-            }
-            certs.insert(lower, Arc::clone(&certified));
-        }
+        register_server_names(pair, &certified, &mut certs, &mut wildcard_certs)?;
     }
 
     tracing::info!(
-        hostnames = certs.len(),
+        exact = certs.len(),
+        wildcards = wildcard_certs.len(),
         has_default = default.is_some(),
         "SNI certificate resolver configured"
     );
 
-    Ok(SniCertResolver { certs, default })
+    Ok(SniCertResolver {
+        certs,
+        wildcard_certs,
+        default,
+    })
+}
+
+/// Register server names from a certificate pair into the resolver maps.
+fn register_server_names(
+    pair: &CertKeyPair,
+    certified: &Arc<CertifiedKey>,
+    certs: &mut HashMap<String, Arc<CertifiedKey>>,
+    wildcard_certs: &mut Vec<(String, Arc<CertifiedKey>)>,
+) -> Result<(), TlsError> {
+    for name in &pair.server_names {
+        let lower = name.to_ascii_lowercase();
+
+        if let Some(suffix) = lower.strip_prefix("*.") {
+            wildcard_certs.push((format!(".{suffix}"), Arc::clone(certified)));
+        } else {
+            use std::collections::hash_map::Entry;
+            match certs.entry(lower) {
+                Entry::Occupied(e) => {
+                    return Err(TlsError::FileLoadError {
+                        path: pair.cert_path.clone(),
+                        detail: format!(
+                            "duplicate server_name '{}'; each hostname may only appear once",
+                            e.key()
+                        ),
+                    });
+                },
+                Entry::Vacant(e) => {
+                    e.insert(Arc::clone(certified));
+                },
+            }
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -237,6 +298,21 @@ mod tests {
             resolver.has_hostname("api.example.com"),
             "resolver should contain api.example.com"
         );
+    }
+
+    #[test]
+    fn sni_resolver_wildcard_stored_separately() {
+        let certs = gen_test_certs();
+        let certificates = vec![CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: vec!["*.example.com".to_owned()],
+        }];
+
+        let resolver = build_sni_resolver(&certificates).expect("wildcard SNI should build");
+        assert_eq!(resolver.hostname_count(), 0, "wildcard should not be in exact map");
+        assert_eq!(resolver.wildcard_count(), 1, "wildcard should be in wildcard list");
     }
 
     #[test]

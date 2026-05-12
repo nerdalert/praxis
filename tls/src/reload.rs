@@ -102,6 +102,9 @@ impl std::fmt::Debug for ReloadableCertResolver {
 }
 
 impl ResolvesServerCert for ReloadableCertResolver {
+    // SNI is intentionally ignored: this resolver is used only for
+    // single-cert listeners (validation rejects hot_reload with
+    // multiple certs). The one stored cert serves all hostnames.
     fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(self.current.load_full())
     }

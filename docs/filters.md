@@ -35,6 +35,7 @@ calls each filter in order on requests and in reverse on responses.
 **HTTP filters** receive an `HttpFilterContext` containing:
 
 - `client_addr`: downstream IP (from the TCP connection)
+- `downstream_tls`: whether the client connection uses TLS
 - `health_registry`: endpoint health state
 - `request`: method, URI, and headers
 - `response_header`: response status and headers (**only in response phase**)
@@ -482,7 +483,7 @@ A filter can have both `conditions` (request phase) and
 | `tcp_access_log` | Observability | TCP | Structured JSON connection logging |
 | `forwarded_headers` | Security | HTTP | `trusted_proxies` (CIDR list) |
 | `guardrails` | Security | HTTP | Reject requests matching header/body string or regex rules |
-| `ip_acl` | Security | HTTP | `allow` / `deny` (CIDR lists); 403 on denial |
+| `ip_acl` | Security | HTTP | `allow` or `deny` (CIDR lists, mutually exclusive); 403 on denial |
 | `credential_injection` | Security | HTTP | Per-cluster API key injection with client credential stripping |
 | `json_body_field` | Payload Processing | HTTP | Extract a JSON body field and promote to header |
 | `json_rpc` | Payload Processing | HTTP | Parse JSON-RPC 2.0 envelopes and extract method/id/kind for routing |

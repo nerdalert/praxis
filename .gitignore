@@ -33,3 +33,4 @@ coverage/
 # Docs are markdown only
 docs/**/
 !docs/
+!docs/proposals/

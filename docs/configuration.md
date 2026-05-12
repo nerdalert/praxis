@@ -34,6 +34,24 @@ Exits `0` on success (no output). Exits non-zero and
 prints an error to stderr on failure. Does not bind
 listener ports or enter the server runtime.
 
+## Dumping Effective Configuration
+
+Use `--dump` (or `-T`) to validate and dump the
+effective parsed configuration as YAML to stdout. The
+output includes the effective parsed config (with
+defaults applied) plus resolved top-level listener
+chains.
+
+```sh
+praxis --dump --config praxis.yaml
+praxis -T -c praxis.yaml
+```
+
+Exits `0` on valid config, writing YAML to stdout.
+Exits non-zero and writes errors to stderr on failure.
+Does not start the proxy or bind listeners. `--dump`
+and `--validate` are mutually exclusive.
+
 ## Dynamic Configuration Reload
 
 Praxis watches the config file for changes and
@@ -540,13 +558,12 @@ Allow or deny requests by source IP/CIDR:
 - filter: ip_acl
   allow:
     - "10.0.0.0/8"
-  deny:
-    - "0.0.0.0/0"
 ```
 
-When `allow` is set, only matching IPs are permitted.
-`allow` takes precedence over `deny`. Denied requests
-receive a `403 Forbidden` response.
+Use either `allow` or `deny`, not both (mutually
+exclusive). When `allow` is set, only matching IPs are
+permitted (implicit deny-all). Denied requests receive
+a `403 Forbidden` response.
 
 ### Credential Injection
 
@@ -674,7 +691,7 @@ circuit closes. See [circuit-breaker.yaml].
 
 Rejects requests matching string or regex rules against
 headers and/or body content. Rejected requests receive
-401 Unauthorized.
+403 Forbidden.
 
 ```yaml
 - filter: guardrails

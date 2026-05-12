@@ -17,6 +17,9 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod commands;
+mod dump;
+
 use clap::Parser;
 use tracing::info;
 
@@ -31,6 +34,10 @@ struct Cli {
     /// Path to the YAML configuration file.
     #[arg(short = 'c', long = "config")]
     config: Option<String>,
+
+    /// Dump effective configuration as YAML and exit.
+    #[arg(short = 'T', long = "dump", conflicts_with = "validate")]
+    dump: bool,
 
     /// Validate configuration and exit.
     #[arg(short = 't', long = "validate")]
@@ -48,8 +55,16 @@ fn main() {
     let explicit = cli.config.or_else(|| std::env::var("PRAXIS_CONFIG").ok());
 
     if cli.validate {
-        if let Err(e) = run_validate(explicit.as_deref()) {
+        if let Err(e) = commands::load_and_validate_for_cli(explicit.as_deref()) {
             eprintln!("invalid configuration: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if cli.dump {
+        if let Err(e) = commands::run_dump(explicit.as_deref()) {
+            eprintln!("dump failed: {e}");
             std::process::exit(1);
         }
         return;
@@ -62,28 +77,6 @@ fn main() {
     praxis::run_server(config, config_path)
 }
 
-/// Load and fully validate configuration without starting the server.
-fn run_validate(explicit: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config = praxis::load_config(explicit)?;
-    validate_config(&config)?;
-    Ok(())
-}
-
-/// Validate a parsed configuration by building filter pipelines.
-///
-/// Runs the same validation checks used during server startup:
-/// log override validation (validates `runtime.log_overrides`),
-/// filter factory instantiation, chain expansion, ordering checks,
-/// and body-limit application.
-fn validate_config(config: &praxis_core::config::Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    praxis_core::logging::validate_log_overrides(config)?;
-    let registry = praxis_filter::FilterRegistry::with_builtins();
-    let health_registry = praxis_core::health::build_health_registry(&config.clusters);
-    let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    praxis::resolve_pipelines(config, &registry, &health_registry, &kv_stores)?;
-    Ok(())
-}
-
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -93,7 +86,11 @@ fn validate_config(config: &praxis_core::config::Config) -> Result<(), Box<dyn s
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, validate_config};
+    use super::Cli;
+
+    // -------------------------------------------------------------------------
+    // --validate CLI parsing
+    // -------------------------------------------------------------------------
 
     #[test]
     fn cli_validate_short_flag() {
@@ -119,36 +116,42 @@ mod tests {
     fn cli_default_no_validate() {
         let cli = Cli::parse_from(["praxis"]);
         assert!(!cli.validate, "validate should default to false");
+        assert!(!cli.dump, "dump should default to false");
+    }
+
+    // -------------------------------------------------------------------------
+    // --dump CLI parsing
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn cli_dump_short_flag() {
+        let cli = Cli::parse_from(["praxis", "-T"]);
+        assert!(cli.dump, "-T should set dump to true");
+        assert!(!cli.validate, "validate should remain false");
     }
 
     #[test]
-    fn validate_config_catches_invalid_log_overrides() {
-        let config = praxis_core::config::Config::from_yaml(
-            r#"
-runtime:
-  log_overrides:
-    "invalid module": "info"
-    "praxis_core": "invalid_level"
-listeners:
-  - name: web
-    address: "127.0.0.1:8080"
-    filter_chains: [main]
-filter_chains:
-  - name: main
-    filters: []
-"#,
-        )
-        .unwrap();
-        let result = validate_config(&config);
-        assert!(result.is_err(), "invalid log overrides should fail validation");
-        let err = result.err().unwrap().to_string();
-        assert!(
-            err.contains("invalid module path 'invalid module'"),
-            "error should mention invalid module path: {err}"
-        );
-        assert!(
-            err.contains("invalid level 'invalid_level'"),
-            "error should mention invalid level: {err}"
-        );
+    fn cli_dump_long_flag() {
+        let cli = Cli::parse_from(["praxis", "--dump"]);
+        assert!(cli.dump, "--dump should set dump to true");
+    }
+
+    #[test]
+    fn cli_dump_with_config() {
+        let cli = Cli::parse_from(["praxis", "-T", "-c", "custom.yaml"]);
+        assert!(cli.dump, "-T should set dump to true");
+        assert_eq!(cli.config.as_deref(), Some("custom.yaml"), "-c should set config path");
+    }
+
+    #[test]
+    fn cli_dump_conflicts_with_validate() {
+        let result = Cli::try_parse_from(["praxis", "--dump", "--validate"]);
+        assert!(result.is_err(), "--dump and --validate should conflict");
+    }
+
+    #[test]
+    fn cli_dump_short_conflicts_with_validate_short() {
+        let result = Cli::try_parse_from(["praxis", "-T", "-t"]);
+        assert!(result.is_err(), "-T and -t should conflict");
     }
 }

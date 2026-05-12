@@ -16,7 +16,7 @@ use super::{Condition, ResponseCondition};
 /// Per-filter failure behaviour.
 ///
 /// Controls what happens when a filter returns an error during execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailureMode {
     /// The request is aborted on filter error (default, current behaviour).
@@ -48,7 +48,7 @@ pub enum FailureMode {
 /// assert_eq!(chain.name, "observability");
 /// assert_eq!(chain.filters.len(), 2);
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilterChainConfig {
     /// Unique name for this filter chain.
@@ -81,7 +81,7 @@ pub struct FilterChainConfig {
 /// assert!(entry.conditions.is_empty());
 /// assert!(entry.name.is_none());
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct FilterEntry {
     /// Filter type name (e.g. `"router"`, `"load_balancer"`, or a custom name).
     #[serde(rename = "filter")]

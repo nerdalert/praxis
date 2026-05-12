@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use super::impl_condition_deserialize;
+use super::{impl_condition_deserialize, impl_condition_serialize};
 
 // -----------------------------------------------------------------------------
 // ResponseCondition
@@ -40,6 +40,7 @@ pub enum ResponseCondition {
 }
 
 impl_condition_deserialize!(ResponseCondition, ResponseConditionMatch, "response condition");
+impl_condition_serialize!(ResponseCondition, ResponseConditionMatch);
 
 // -----------------------------------------------------------------------------
 // ResponseConditionMatch
@@ -60,7 +61,7 @@ impl_condition_deserialize!(ResponseCondition, ResponseConditionMatch, "response
 /// .unwrap();
 /// assert_eq!(m.status.as_ref().unwrap(), &[200, 201]);
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseConditionMatch {
     /// Response status code must be one of these.

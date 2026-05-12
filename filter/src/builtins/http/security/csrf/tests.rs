@@ -99,6 +99,78 @@ trusted_origins: ["https://foo.*.com"]
 }
 
 #[test]
+fn from_config_rejects_wildcard_mixed_with_other_origins() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+trusted_origins: ["*", "https://example.com"]
+"#,
+    )
+    .unwrap();
+    let err = CsrfFilter::from_config(&yaml).err().unwrap();
+    assert!(
+        err.to_string().contains("cannot be mixed"),
+        "wildcard mixed with other origins should fail: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_scheme_wildcard() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+trusted_origins: ["*://example.com"]
+"#,
+    )
+    .unwrap();
+    let err = CsrfFilter::from_config(&yaml).err().unwrap();
+    assert!(
+        err.to_string().contains("scheme wildcard"),
+        "scheme wildcard should fail: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_multiple_wildcards() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+trusted_origins: ["https://*.*.example.com"]
+"#,
+    )
+    .unwrap();
+    let err = CsrfFilter::from_config(&yaml).err().unwrap();
+    assert!(
+        err.to_string().contains("multiple wildcards"),
+        "multiple wildcards should fail: {err}"
+    );
+}
+
+#[test]
+fn websocket_scheme_normalized_to_https() {
+    let origins = build_trusted_origins(&["https://example.com".to_owned()]);
+    assert!(
+        origins.is_trusted("wss://example.com"),
+        "wss:// origin should match https:// trusted origin"
+    );
+}
+
+#[test]
+fn websocket_scheme_normalized_to_http() {
+    let origins = build_trusted_origins(&["http://example.com".to_owned()]);
+    assert!(
+        origins.is_trusted("ws://example.com"),
+        "ws:// origin should match http:// trusted origin"
+    );
+}
+
+#[test]
+fn websocket_scheme_with_default_port_normalized() {
+    let origins = build_trusted_origins(&["https://example.com".to_owned()]);
+    assert!(
+        origins.is_trusted("wss://example.com:443"),
+        "wss:// with :443 should match https:// trusted origin"
+    );
+}
+
+#[test]
 fn from_config_rejects_empty_safe_methods() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"

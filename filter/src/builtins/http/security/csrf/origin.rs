@@ -141,27 +141,36 @@ fn extract_origin_from_url(url: &str) -> Option<String> {
 
 /// Normalize an origin for comparison per [RFC 6454].
 ///
-/// Lowercases scheme and host ([RFC 6454 Section 6.1]) and
+/// Lowercases scheme and host ([RFC 6454 Section 6.1]),
+/// maps `WebSocket` schemes to their HTTP equivalents
+/// (`ws://` to `http://`, `wss://` to `https://`), and
 /// strips the default port for the scheme so that
-/// `https://example.com:443` and `https://example.com` compare
-/// equal ([RFC 6454 Section 4]).
+/// `https://example.com:443` and `https://example.com`
+/// compare equal ([RFC 6454 Section 4]).
 ///
 /// [RFC 6454]: https://datatracker.ietf.org/doc/html/rfc6454
 /// [RFC 6454 Section 4]: https://datatracker.ietf.org/doc/html/rfc6454#section-4
 /// [RFC 6454 Section 6.1]: https://datatracker.ietf.org/doc/html/rfc6454#section-6.1
 fn normalize_origin(origin: &str) -> String {
     let lowered = origin.to_ascii_lowercase();
-    if let Some(stripped) = lowered.strip_prefix("https://")
+    let normalized = if let Some(rest) = lowered.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = lowered.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        lowered
+    };
+    if let Some(stripped) = normalized.strip_prefix("https://")
         && let Some(without_port) = stripped.strip_suffix(":443")
     {
         return format!("https://{without_port}");
     }
-    if let Some(stripped) = lowered.strip_prefix("http://")
+    if let Some(stripped) = normalized.strip_prefix("http://")
         && let Some(without_port) = stripped.strip_suffix(":80")
     {
         return format!("http://{without_port}");
     }
-    lowered
+    normalized
 }
 
 // -----------------------------------------------------------------------------

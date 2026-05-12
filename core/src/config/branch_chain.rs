@@ -37,7 +37,8 @@ use super::chain_ref::ChainRef;
 /// assert!(branch.on_result.is_some());
 /// assert_eq!(branch.rejoin, "terminal");
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BranchChainConfig {
     /// Globally unique name for this branch.
     pub name: String,
@@ -97,7 +98,8 @@ fn default_rejoin() -> String {
 /// assert_eq!(cond.key, "status");
 /// assert_eq!(cond.value, "hit");
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BranchCondition {
     /// Name of the filter whose results to inspect.
     pub filter: String,

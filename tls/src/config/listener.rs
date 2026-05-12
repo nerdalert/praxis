@@ -58,9 +58,11 @@ pub struct ListenerTls {
 
     /// Certificate hot-reload via filesystem watching.
     ///
-    /// Enabled by default. Set to `false` to disable. Certificate
+    /// Defaults to enabled for single-cert listeners (`None` is
+    /// treated as `true`). Set to `false` to disable. Certificate
     /// and key files are monitored for changes and reloaded without
-    /// restarting the proxy. Requires exactly one certificate entry.
+    /// restarting the proxy. Multi-cert (SNI) listeners always
+    /// disable hot-reload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hot_reload: Option<bool>,
 

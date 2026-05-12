@@ -49,17 +49,19 @@ ambiguous configuration:
 - Use `min_version: "1.3"` in TLS configuration.
   TLS 1.2 can be used if required, but TLS 1.0 and 1.1
   are deprecated and Praxis will not negotiate them.
-- Rotate certificates before expiration. Praxis reads
-  certificates at startup; restart or reload to pick
-  up new certs.
+- Rotate certificates before expiration. Single-cert
+  listeners hot-reload certificates automatically
+  (see [tls.md](tls.md)). Multi-cert listeners require
+  a restart.
 - Use separate certificate entries with `server_names`
   for multi-domain deployments (SNI routing).
 
 ## Access Control
 
 - **IP ACLs**: Use the `ip_acl` filter to restrict
-  access by source IP. Prefer allowlists over
-  denylists for sensitive endpoints.
+  access by source IP. Use either `allow` or `deny`,
+  not both (mutually exclusive). An allow-list
+  implicitly denies all non-matching IPs.
 - **Rate Limiting**: Configure `rate_limit` filters
   to bound request volume per client or globally.
   Tune limits based on expected traffic patterns.

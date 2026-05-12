@@ -31,6 +31,9 @@ use crate::{CertKeyPair, setup::loader};
 /// Debounce window for filesystem events.
 const DEBOUNCE_MS: u64 = 500;
 
+/// Maximum backoff delay on consecutive reload failures.
+const MAX_BACKOFF_MS: u64 = 60_000;
+
 // -----------------------------------------------------------------------------
 // CertWatcher
 // -----------------------------------------------------------------------------
@@ -110,12 +113,23 @@ async fn watch_loop(
         "certificate file watcher started"
     );
 
+    let mut backoff_ms = DEBOUNCE_MS;
+
     loop {
         tokio::select! {
             Some(()) = rx.recv() => {
-                tracing::debug!("filesystem change detected, debouncing");
-                drain_and_debounce(&mut rx).await;
-                reload_cert(&current, &pair);
+                tracing::debug!(debounce_ms = backoff_ms, "filesystem change detected, debouncing");
+                drain_and_debounce(&mut rx, backoff_ms).await;
+
+                if reload_cert(&current, &pair) {
+                    backoff_ms = DEBOUNCE_MS;
+                } else {
+                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                    tracing::warn!(
+                        next_backoff_ms = backoff_ms,
+                        "reload failed, increasing backoff"
+                    );
+                }
             }
             result = shutdown.changed() => {
                 if result.is_ok() && *shutdown.borrow() {
@@ -152,15 +166,18 @@ fn setup_watcher(tx: mpsc::Sender<()>, cert_dir: &Path, key_dir: &Path) -> Resul
 
 /// Drain pending events and sleep for the debounce window.
 ///
-/// Shutdown is not serviced during the debounce sleep, so graceful
-/// shutdown may be delayed up to `DEBOUNCE_MS` (acceptable latency).
-async fn drain_and_debounce(rx: &mut mpsc::Receiver<()>) {
-    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
+/// `delay_ms` increases on consecutive failures (backoff) and
+/// resets on success. Shutdown is not serviced during the sleep,
+/// so graceful shutdown may be delayed up to `delay_ms`.
+async fn drain_and_debounce(rx: &mut mpsc::Receiver<()>, delay_ms: u64) {
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     while rx.try_recv().is_ok() {}
 }
 
 /// Attempt to reload the certificate, logging success or failure.
-fn reload_cert(current: &Arc<ArcSwap<CertifiedKey>>, pair: &CertKeyPair) {
+///
+/// Returns `true` on success, `false` on failure.
+fn reload_cert(current: &Arc<ArcSwap<CertifiedKey>>, pair: &CertKeyPair) -> bool {
     match loader::load_certified_key(pair) {
         Ok(certified) => {
             current.store(Arc::new(certified));
@@ -168,6 +185,7 @@ fn reload_cert(current: &Arc<ArcSwap<CertifiedKey>>, pair: &CertKeyPair) {
                 cert_path = %pair.cert_path,
                 "TLS certificate hot-reloaded successfully"
             );
+            true
         },
         Err(e) => {
             tracing::warn!(
@@ -175,6 +193,7 @@ fn reload_cert(current: &Arc<ArcSwap<CertifiedKey>>, pair: &CertKeyPair) {
                 error = %e,
                 "TLS certificate reload failed, keeping previous certificate"
             );
+            false
         },
     }
 }

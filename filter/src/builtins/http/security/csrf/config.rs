@@ -85,6 +85,11 @@ pub(super) fn validate_config(cfg: &CsrfConfig) -> Result<(), crate::FilterError
 
 /// Validate that each origin contains a scheme separator.
 fn validate_origins(origins: &[String]) -> Result<(), crate::FilterError> {
+    let has_bare_wildcard = origins.iter().any(|o| o == "*");
+    if has_bare_wildcard && origins.len() > 1 {
+        return Err("csrf: wildcard \"*\" in trusted_origins cannot be mixed with other origins".into());
+    }
+
     for origin in origins {
         if origin == "*" {
             continue;
@@ -92,14 +97,22 @@ fn validate_origins(origins: &[String]) -> Result<(), crate::FilterError> {
         if !origin.contains("://") {
             return Err(format!("csrf: origin \"{origin}\" must include scheme (e.g. https://example.com)").into());
         }
-        if let Some(host) = origin.split_once("://").map(|(_, h)| h)
-            && host.contains('*')
-            && !host.starts_with("*.")
-        {
-            return Err(format!(
-                "csrf: wildcard in origin \"{origin}\" must be at the start of the host (e.g. https://*.example.com)"
-            )
-            .into());
+        if let Some((scheme, host)) = origin.split_once("://") {
+            if scheme == "*" {
+                return Err(format!("csrf: scheme wildcard in origin \"{origin}\" is not supported").into());
+            }
+            if host.contains('*') {
+                if !host.starts_with("*.") {
+                    return Err(format!(
+                        "csrf: wildcard in origin \"{origin}\" must be at the start of the host \
+                         (e.g. https://*.example.com)"
+                    )
+                    .into());
+                }
+                if host.get(2..).is_some_and(|rest| rest.contains('*')) {
+                    return Err(format!("csrf: origin \"{origin}\" contains multiple wildcards").into());
+                }
+            }
         }
     }
 
