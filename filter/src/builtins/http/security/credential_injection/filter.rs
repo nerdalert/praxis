@@ -155,12 +155,12 @@ impl HttpFilter for CredentialInjectionFilter {
             tracing::debug!(
                 cluster = %cluster,
                 header = %cred.header,
-                "stripping client-provided credential header"
+                "stripping client-provided credential header before injection"
             );
-            ctx.extra_request_headers
-                .push((Cow::Owned(cred.header.clone()), String::new()));
         }
 
+        // insert_header replaces all existing values for the key,
+        // so the inject implicitly strips client-provided values.
         tracing::debug!(
             cluster = %cluster,
             header = %cred.header,

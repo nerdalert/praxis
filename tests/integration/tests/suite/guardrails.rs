@@ -25,12 +25,8 @@ fn header_contains_blocks_matching_request() {
         proxy.addr(),
         "GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: bad-bot/1.0\r\nConnection: close\r\n\r\n",
     );
-    assert_eq!(parse_status(&raw), 401, "bad-bot User-Agent should be blocked");
-    assert_eq!(
-        parse_body(&raw),
-        "Unauthorized",
-        "rejection body should be 'Unauthorized'"
-    );
+    assert_eq!(parse_status(&raw), 403, "bad-bot User-Agent should be blocked");
+    assert_eq!(parse_body(&raw), "Forbidden", "rejection body should be 'Forbidden'");
 }
 
 #[test]
@@ -64,7 +60,7 @@ fn body_contains_blocks_matching_content() {
             payload.len()
         ),
     );
-    assert_eq!(parse_status(&raw), 401, "body containing DROP TABLE should be blocked");
+    assert_eq!(parse_status(&raw), 403, "body containing DROP TABLE should be blocked");
 }
 
 #[test]
@@ -100,7 +96,7 @@ fn header_pattern_blocks_regex_match() {
         proxy.addr(),
         "GET / HTTP/1.1\r\nHost: localhost\r\nX-Script: <script>alert(1)</script>\r\nConnection: close\r\n\r\n",
     );
-    assert_eq!(parse_status(&raw), 401, "script tag pattern should be blocked");
+    assert_eq!(parse_status(&raw), 403, "script tag pattern should be blocked");
 }
 
 #[test]
@@ -165,7 +161,7 @@ fn multiple_rules_any_match_rejects() {
     );
     assert_eq!(
         parse_status(&raw),
-        401,
+        403,
         "X-Evil header with 'evilmonkey' should be blocked"
     );
 }
@@ -181,7 +177,7 @@ fn negated_header_rejects_missing_header() {
 
     let (status, _) = http_get(proxy.addr(), "/", None);
     assert_eq!(
-        status, 401,
+        status, 403,
         "missing X-Authorized header should be rejected by negated rule"
     );
 }
@@ -201,7 +197,7 @@ fn negated_header_rejects_non_matching_value() {
     );
     assert_eq!(
         parse_status(&raw),
-        401,
+        403,
         "X-Authorized without 'trusted' should be rejected by negated rule"
     );
 }
@@ -250,7 +246,7 @@ fn negated_body_rejects_non_matching_content() {
     );
     assert_eq!(
         parse_status(&raw),
-        401,
+        403,
         "body not matching JSON pattern should be rejected by negated rule"
     );
 }
@@ -312,7 +308,7 @@ fn mixed_positive_and_negated_rules() {
     );
     assert_eq!(
         parse_status(&raw),
-        401,
+        403,
         "positive body rule should still reject even with valid header"
     );
 
@@ -326,7 +322,7 @@ fn mixed_positive_and_negated_rules() {
     );
     assert_eq!(
         parse_status(&raw),
-        401,
+        403,
         "missing X-Authorized header should be rejected even with clean body"
     );
 }

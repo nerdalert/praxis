@@ -136,11 +136,14 @@ clusters:
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case("Authorization"))
         .collect();
-    assert_eq!(auth_headers.len(), 2, "should have strip (empty) + inject entries");
-    assert_eq!(auth_headers[0].1, "", "first entry should be empty (strip)");
     assert_eq!(
-        auth_headers[1].1, "server-secret",
-        "second entry should be the injected credential"
+        auth_headers.len(),
+        1,
+        "should have single inject entry (insert_header replaces client value)"
+    );
+    assert_eq!(
+        auth_headers[0].1, "server-secret",
+        "entry should be the injected credential"
     );
 }
 
@@ -318,22 +321,19 @@ clusters:
 
     let _action = f.on_request(&mut ctx).await.unwrap();
 
-    let strip_entries: Vec<_> = ctx
+    let auth_headers: Vec<_> = ctx
         .extra_request_headers
         .iter()
-        .filter(|(k, v)| k.eq_ignore_ascii_case("Authorization") && v.is_empty())
+        .filter(|(k, _)| k.eq_ignore_ascii_case("Authorization"))
         .collect();
     assert_eq!(
-        strip_entries.len(),
+        auth_headers.len(),
         1,
-        "should strip client header even when client sends lowercase 'authorization'"
+        "should have single inject entry regardless of client header casing"
     );
-
-    let injected = find_header(&ctx.extra_request_headers, "Authorization");
     assert_eq!(
-        injected,
-        Some("server-secret"),
-        "server credential should still be injected after stripping"
+        auth_headers[0].1, "server-secret",
+        "injected credential should replace client-provided header via insert_header"
     );
 }
 

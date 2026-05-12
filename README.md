@@ -32,9 +32,10 @@ with the following documentation first:
 - [Conventions](docs/conventions.md)
 - [Development](docs/development.md)
 - [Benchmarks](docs/benchmarks.md)
+- [Proposals](docs/proposals.md)
 
-For larger changes and proposals open a [discussion] with a detailed
-description of what the change is so it can be discussed.
+For larger changes, open a [discussion] and follow the
+[proposal process](docs/proposals.md).
 
 [Issues]:https://github.com/praxis-proxy/praxis/issues/new
 [pull requests]:https://github.com/praxis-proxy/praxis/compare

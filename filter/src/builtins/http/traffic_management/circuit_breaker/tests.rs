@@ -94,6 +94,46 @@ fn half_open_failure_transitions_to_open() {
 }
 
 #[test]
+fn half_open_allows_only_one_probe() {
+    let cb = CircuitBreaker::new(1, 0);
+    cb.record_failure();
+    assert_eq!(cb.state(), CircuitState::Open, "should be open after failure");
+
+    let first = cb.check();
+    assert_eq!(first, CircuitState::HalfOpen, "first check should get HalfOpen (probe)");
+
+    let second = cb.check();
+    assert_eq!(
+        second,
+        CircuitState::Open,
+        "second check should get Open (reject) while probe is in flight"
+    );
+
+    let third = cb.check();
+    assert_eq!(
+        third,
+        CircuitState::Open,
+        "subsequent checks should continue returning Open"
+    );
+}
+
+#[test]
+fn half_open_resets_after_successful_probe() {
+    let cb = CircuitBreaker::new(1, 0);
+    cb.record_failure();
+
+    let probe = cb.check();
+    assert_eq!(probe, CircuitState::HalfOpen, "first caller gets the probe");
+    assert_eq!(cb.check(), CircuitState::Open, "second caller is rejected");
+
+    cb.record_success();
+    assert_eq!(cb.state(), CircuitState::Closed, "success closes the circuit");
+
+    let after = cb.check();
+    assert_eq!(after, CircuitState::Closed, "circuit is fully closed again");
+}
+
+#[test]
 fn multiple_successes_in_closed_keep_closed() {
     let cb = CircuitBreaker::new(3, 30);
     for _ in 0..10 {
@@ -387,6 +427,24 @@ async fn on_response_records_499_as_success() {
     assert!(
         matches!(action, FilterAction::Continue),
         "499 should be recorded as success, circuit should stay closed"
+    );
+}
+
+#[tokio::test]
+async fn on_response_no_header_records_failure() {
+    let filter = make_filter(1, 9999);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("backend"));
+    drop(filter.on_response(&mut ctx).await.unwrap());
+
+    let mut ctx2 = crate::test_utils::make_filter_context(&req);
+    ctx2.cluster = Some(Arc::from("backend"));
+    let action = filter.on_request(&mut ctx2).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 503),
+        "missing response header (connection failure) should trip the circuit"
     );
 }
 

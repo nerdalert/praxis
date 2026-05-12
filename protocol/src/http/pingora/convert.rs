@@ -81,7 +81,11 @@ pub(crate) fn response_header_from_pingora(upstream: &mut pingora_http::Response
 /// ```
 ///
 /// [`Rejection`]: praxis_filter::Rejection
-#[allow(clippy::expect_used, reason = "status codes are valid")]
+#[allow(
+    clippy::expect_used,
+    clippy::cognitive_complexity,
+    reason = "status codes are valid; error handling branches"
+)]
 pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) {
     debug!(status = rejection.status, "sending rejection response");
 
@@ -100,10 +104,15 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
         let _insert = header.insert_header("content-length", body.len().to_string());
     }
 
-    let _write = session.write_response_header(Box::new(header), !has_body).await;
+    if let Err(e) = session.write_response_header(Box::new(header), !has_body).await {
+        debug!(error = %e, "failed to write rejection response header");
+        return;
+    }
 
-    if let Some(body) = rejection.body {
-        let _write = session.write_response_body(Some(body), true).await;
+    if let Some(body) = rejection.body
+        && let Err(e) = session.write_response_body(Some(body), true).await
+    {
+        debug!(error = %e, "failed to write rejection response body");
     }
 }
 

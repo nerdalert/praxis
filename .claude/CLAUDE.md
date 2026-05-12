@@ -44,7 +44,7 @@ server -> protocol -> filter -> core -> tls
 - **core**: configuration (YAML/serde), error types, health state, server runtime
 - **filter**: `HttpFilter` and `TcpFilter` traits, pipeline engine, all built-in filters
 - **protocol**: `Protocol` trait, HTTP and TCP/TLS backends
-- **tls**: TLS configuration types, SNI parsing
+- **tls**: TLS configuration types, SNI resolution (including wildcards), cert hot-reload
 
 ## Conventions
 

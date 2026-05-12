@@ -558,13 +558,12 @@ Allow or deny requests by source IP/CIDR:
 - filter: ip_acl
   allow:
     - "10.0.0.0/8"
-  deny:
-    - "0.0.0.0/0"
 ```
 
-When `allow` is set, only matching IPs are permitted.
-`allow` takes precedence over `deny`. Denied requests
-receive a `403 Forbidden` response.
+Use either `allow` or `deny`, not both (mutually
+exclusive). When `allow` is set, only matching IPs are
+permitted (implicit deny-all). Denied requests receive
+a `403 Forbidden` response.
 
 ### Credential Injection
 
@@ -692,7 +691,7 @@ circuit closes. See [circuit-breaker.yaml].
 
 Rejects requests matching string or regex rules against
 headers and/or body content. Rejected requests receive
-401 Unauthorized.
+403 Forbidden.
 
 ```yaml
 - filter: guardrails

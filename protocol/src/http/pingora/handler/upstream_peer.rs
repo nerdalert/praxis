@@ -5,7 +5,7 @@
 //!
 //! [`Upstream`]: praxis_core::connectivity::Upstream
 
-use std::{net::ToSocketAddrs, sync::Arc};
+use std::sync::Arc;
 
 use pingora_core::{Result, upstreams::peer::HttpPeer};
 use praxis_core::connectivity::Upstream;
@@ -21,7 +21,7 @@ use super::super::{context::PingoraRequestCtx, convert::apply_connection_options
 /// On the first call, moves the upstream from `ctx.upstream` into
 /// `ctx.upstream_for_retry` and borrows it. On retries, borrows the
 /// saved copy directly. No clone is performed.
-pub(super) fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
+pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
     if ctx.upstream_for_retry.is_none() {
         ctx.upstream_for_retry = ctx.upstream.take();
     }
@@ -34,7 +34,7 @@ pub(super) fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
         )
     })?;
 
-    build_peer(upstream)
+    build_peer(upstream).await
 }
 
 /// Parse the upstream address and build an [`HttpPeer`] with TLS/SNI config.
@@ -48,8 +48,8 @@ pub(super) fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
-fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
-    let addr: std::net::SocketAddr = resolve_address(&upstream.address)?;
+async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
+    let addr: std::net::SocketAddr = resolve_address(&upstream.address).await?;
 
     let tls_enabled = upstream.tls.is_some();
     let sni = upstream
@@ -133,35 +133,41 @@ fn derive_sni(address: &str) -> String {
 
 /// Resolve an upstream address to a [`SocketAddr`].
 ///
-/// Tries direct [`SocketAddr`] parsing first. If that fails (e.g. the
-/// address contains a hostname like `api.openai.com:443`), falls back
-/// to [`ToSocketAddrs`] which performs DNS resolution.
+/// Tries direct [`SocketAddr`] parsing first (no allocation, no I/O).
+/// If that fails (e.g. the address contains a hostname like
+/// `api.openai.com:443`), falls back to DNS resolution via
+/// [`spawn_blocking`] so the async runtime is not blocked.
 ///
 /// When DNS returns multiple records, prefers IPv4 addresses to avoid
 /// connectivity issues in dual-stack environments where IPv6 may be
 /// unreachable.
 ///
-/// Note: DNS resolution is synchronous and runs on the request path.
-/// A future iteration may move resolution to config/load-balancer
-/// time or integrate an async cached resolver.
-///
 /// [`SocketAddr`]: std::net::SocketAddr
-/// [`ToSocketAddrs`]: std::net::ToSocketAddrs
-fn resolve_address(address: &str) -> Result<std::net::SocketAddr> {
+/// [`spawn_blocking`]: tokio::task::spawn_blocking
+async fn resolve_address(address: &str) -> Result<std::net::SocketAddr> {
     if let Ok(addr) = address.parse::<std::net::SocketAddr>() {
         return Ok(addr);
     }
 
-    let addrs: Vec<std::net::SocketAddr> = address
-        .to_socket_addrs()
-        .map_err(|e| {
-            tracing::warn!(address, error = %e, "failed to resolve upstream address");
-            pingora_core::Error::explain(
-                pingora_core::ErrorType::InternalError,
-                format!("upstream address resolution failed for '{address}': {e}"),
-            )
-        })?
-        .collect();
+    let owned = address.to_owned();
+    let addrs = tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        owned.to_socket_addrs().map(Iterator::collect::<Vec<_>>)
+    })
+    .await
+    .map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("DNS resolution task panicked for '{address}': {e}"),
+        )
+    })?
+    .map_err(|e| {
+        tracing::warn!(address, error = %e, "failed to resolve upstream address");
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("upstream address resolution failed for '{address}': {e}"),
+        )
+    })?;
 
     select_preferred_address(&addrs, address)
 }
@@ -205,16 +211,16 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn valid_address_builds_peer() {
+    #[tokio::test]
+    async fn valid_address_builds_peer() {
         assert!(
-            build_peer(&make_upstream("127.0.0.1:8080")).is_ok(),
+            build_peer(&make_upstream("127.0.0.1:8080")).await.is_ok(),
             "valid address should build peer"
         );
     }
 
-    #[test]
-    fn build_peer_with_tls_enabled() {
+    #[tokio::test]
+    async fn build_peer_with_tls_enabled() {
         let tls = ClusterTls {
             sni: Some("api.example.com".to_owned()),
             ..ClusterTls::default()
@@ -224,7 +230,7 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
-        let peer = build_peer(&upstream).expect("should build TLS peer");
+        let peer = build_peer(&upstream).await.expect("should build TLS peer");
         assert!(!peer.sni.is_empty(), "TLS peer should have a non-empty SNI");
         assert_eq!(peer.sni, "api.example.com", "peer SNI should match configured value");
     }
@@ -244,19 +250,19 @@ mod tests {
         assert_eq!(sni, "", "SNI should be empty for IP address");
     }
 
-    #[test]
-    fn build_peer_without_tls() {
+    #[tokio::test]
+    async fn build_peer_without_tls() {
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8080"),
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         };
-        let peer = build_peer(&upstream).expect("should build plain peer");
+        let peer = build_peer(&upstream).await.expect("should build plain peer");
         assert_eq!(peer.sni, "", "plain peer should have empty SNI");
     }
 
-    #[test]
-    fn build_peer_with_tls_verify_disabled() {
+    #[tokio::test]
+    async fn build_peer_with_tls_verify_disabled() {
         let tls = ClusterTls {
             sni: Some("self-signed.local".to_owned()),
             verify: false,
@@ -267,7 +273,9 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
-        let peer = build_peer(&upstream).expect("should build peer with verification disabled");
+        let peer = build_peer(&upstream)
+            .await
+            .expect("should build peer with verification disabled");
         assert!(
             !peer.options.verify_cert,
             "verify_cert should be false when verify is disabled"
@@ -278,8 +286,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_peer_with_tls_verify_enabled() {
+    #[tokio::test]
+    async fn build_peer_with_tls_verify_enabled() {
         let tls = ClusterTls {
             sni: Some("api.example.com".to_owned()),
             ..ClusterTls::default()
@@ -289,7 +297,9 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
-        let peer = build_peer(&upstream).expect("should build peer with verification enabled");
+        let peer = build_peer(&upstream)
+            .await
+            .expect("should build peer with verification enabled");
         assert!(
             peer.options.verify_cert,
             "verify_cert should be true (default) when verify is enabled"
@@ -300,38 +310,42 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_address_parses_socket_addr() {
-        let addr = resolve_address("127.0.0.1:8080").expect("socket addr should parse");
+    #[tokio::test]
+    async fn resolve_address_parses_socket_addr() {
+        let addr = resolve_address("127.0.0.1:8080")
+            .await
+            .expect("socket addr should parse");
         assert_eq!(addr.port(), 8080, "port should match");
     }
 
-    #[test]
-    fn resolve_address_resolves_localhost() {
+    #[tokio::test]
+    async fn resolve_address_resolves_localhost() {
         if !localhost_resolution_available() {
             eprintln!("skipping: localhost did not resolve in this environment");
             return;
         }
-        let addr = resolve_address("localhost:8080").expect("localhost should resolve");
+        let addr = resolve_address("localhost:8080")
+            .await
+            .expect("localhost should resolve");
         assert_eq!(addr.port(), 8080, "port should match");
     }
 
-    #[test]
-    fn resolve_address_fails_for_no_port() {
+    #[tokio::test]
+    async fn resolve_address_fails_for_no_port() {
         assert!(
-            resolve_address("127.0.0.1").is_err(),
+            resolve_address("127.0.0.1").await.is_err(),
             "address without port should return error"
         );
     }
 
-    #[test]
-    fn hostname_address_builds_peer() {
+    #[tokio::test]
+    async fn hostname_address_builds_peer() {
         if !localhost_resolution_available() {
             eprintln!("skipping: localhost did not resolve in this environment");
             return;
         }
         assert!(
-            build_peer(&make_upstream("localhost:8080")).is_ok(),
+            build_peer(&make_upstream("localhost:8080")).await.is_ok(),
             "hostname address should build peer via DNS resolution"
         );
     }
@@ -362,27 +376,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn invalid_address_returns_error() {
+    #[tokio::test]
+    async fn invalid_address_returns_error() {
         assert!(
-            build_peer(&make_upstream("invalid host:8080")).is_err(),
+            build_peer(&make_upstream("invalid host:8080")).await.is_err(),
             "syntactically invalid address should return error"
         );
     }
 
-    #[test]
-    fn missing_port_returns_error() {
+    #[tokio::test]
+    async fn missing_port_returns_error() {
         assert!(
-            build_peer(&make_upstream("127.0.0.1")).is_err(),
+            build_peer(&make_upstream("127.0.0.1")).await.is_err(),
             "address without port should return error"
         );
     }
 
-    #[test]
-    fn execute_first_call_moves_upstream_to_retry() {
+    #[tokio::test]
+    async fn execute_first_call_moves_upstream_to_retry() {
         let mut ctx = PingoraRequestCtx::default();
         ctx.upstream = Some(make_upstream("127.0.0.1:8080"));
-        let result = execute(&mut ctx);
+        let result = execute(&mut ctx).await;
         assert!(result.is_ok(), "first execute should succeed");
         assert!(ctx.upstream.is_none(), "upstream should be consumed");
         assert!(ctx.upstream_for_retry.is_some(), "should save for retry");
@@ -393,12 +407,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execute_retry_reuses_saved_upstream() {
+    #[tokio::test]
+    async fn execute_retry_reuses_saved_upstream() {
         let mut ctx = PingoraRequestCtx::default();
         ctx.upstream = None;
         ctx.upstream_for_retry = Some(make_upstream("127.0.0.1:9090"));
-        let result = execute(&mut ctx);
+        let result = execute(&mut ctx).await;
         assert!(result.is_ok(), "retry execute should succeed");
         assert!(
             ctx.upstream_for_retry.is_some(),
@@ -406,12 +420,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execute_no_upstream_no_retry_returns_error() {
+    #[tokio::test]
+    async fn execute_no_upstream_no_retry_returns_error() {
         let mut ctx = PingoraRequestCtx::default();
         ctx.upstream = None;
         ctx.upstream_for_retry = None;
-        let result = execute(&mut ctx);
+        let result = execute(&mut ctx).await;
         assert!(result.is_err(), "execute with no upstream should return error");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("no upstream selected"), "unexpected error message: {err}");
@@ -421,20 +435,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execute_no_upstream_error_includes_cluster_name() {
+    #[tokio::test]
+    async fn execute_no_upstream_error_includes_cluster_name() {
         let mut ctx = PingoraRequestCtx::default();
         ctx.cluster = Some(Arc::from("my-api"));
         ctx.upstream = None;
         ctx.upstream_for_retry = None;
-        let result = execute(&mut ctx);
+        let result = execute(&mut ctx).await;
         assert!(result.is_err(), "execute with no upstream should return error");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("my-api"), "error should include cluster name: {err}");
     }
 
-    #[test]
-    fn build_peer_with_cached_ca() {
+    #[tokio::test]
+    async fn build_peer_with_cached_ca() {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
@@ -450,7 +464,7 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
-        let peer = build_peer(&upstream).expect("should build peer with cached CA");
+        let peer = build_peer(&upstream).await.expect("should build peer with cached CA");
         assert!(peer.options.ca.is_some(), "peer should have custom CA set from cache");
     }
 
@@ -481,6 +495,7 @@ mod tests {
 
     /// Check whether `localhost` DNS resolution is available in this environment.
     fn localhost_resolution_available() -> bool {
+        use std::net::ToSocketAddrs;
         "localhost:8080"
             .to_socket_addrs()
             .is_ok_and(|mut addrs| addrs.next().is_some())

@@ -60,8 +60,8 @@ async fn header_contains_rejects_match() {
 
     let action = f.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 401),
-        "matching header should reject with 401"
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "matching header should reject with 403"
     );
 }
 
@@ -88,8 +88,8 @@ async fn header_pattern_rejects_match() {
 
     let action = f.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 401),
-        "matching header regex should reject with 401"
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "matching header regex should reject with 403"
     );
 }
 
@@ -115,8 +115,8 @@ async fn body_contains_rejects_match() {
     let mut body = Some(Bytes::from_static(b"SELECT 1; DROP TABLE users;"));
     let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 401),
-        "matching body content should reject with 401"
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "matching body content should reject with 403"
     );
 }
 
@@ -143,8 +143,8 @@ async fn body_pattern_rejects_match() {
     let mut body = Some(Bytes::from_static(b"drop  table users"));
     let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 401),
-        "matching body regex should reject with 401"
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "matching body regex should reject with 403"
     );
 }
 
@@ -171,7 +171,7 @@ async fn multiple_rules_first_match_rejects() {
 
     let action = f.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 401),
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
         "any matching rule should trigger rejection"
     );
 }
@@ -186,11 +186,11 @@ async fn rejection_includes_body() {
     let action = f.on_request(&mut ctx).await.unwrap();
     match action {
         FilterAction::Reject(r) => {
-            assert_eq!(r.status, 401, "rejection status should be 401");
+            assert_eq!(r.status, 403, "rejection status should be 403");
             assert_eq!(
                 r.body.as_deref(),
-                Some(b"Unauthorized".as_slice()),
-                "rejection body should be 'Unauthorized'"
+                Some(b"Forbidden".as_slice()),
+                "rejection body should be 'Forbidden'"
             );
         },
         _ => panic!("expected rejection"),
@@ -206,7 +206,7 @@ async fn negated_header_rejects_when_not_matching() {
 
     let action = f.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 401),
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
         "negated rule should reject when header does not contain expected value"
     );
 }
@@ -233,7 +233,7 @@ async fn negated_header_rejects_when_header_missing() {
 
     let action = f.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 401),
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
         "negated rule should reject when header is absent"
     );
 }
@@ -247,7 +247,7 @@ async fn negated_body_rejects_when_not_matching() {
     let mut body = Some(Bytes::from_static(b"some random content"));
     let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 401),
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
         "negated body rule should reject when content does not match"
     );
 }
@@ -275,7 +275,7 @@ async fn negated_body_pattern_rejects_non_json() {
     let mut body = Some(Bytes::from_static(b"not json at all"));
     let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 401),
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
         "negated pattern should reject body not matching expected shape"
     );
 }

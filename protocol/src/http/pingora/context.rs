@@ -46,6 +46,14 @@ pub struct PingoraRequestCtx {
     /// Name of the cluster selected by the router filter.
     pub cluster: Option<Arc<str>>,
 
+    /// Whether the downstream connection uses TLS.
+    ///
+    /// Derived from the Pingora session's SSL digest during
+    /// `request_filter`. Used by the forwarded headers filter
+    /// to set `X-Forwarded-Proto` correctly for HTTP/1.1
+    /// connections where the URI lacks a scheme.
+    pub downstream_tls: bool,
+
     /// Whether the connection was upgraded via 101 Switching Protocols.
     ///
     /// Set during `response_filter` when the upstream returns 101.
@@ -164,6 +172,7 @@ macro_rules! filter_context {
             branch_iterations: std::collections::HashMap::new(),
             client_addr: $ctx.client_addr,
             cluster: $ctx.cluster.take(),
+            downstream_tls: $ctx.downstream_tls,
             executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
             filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
@@ -262,6 +271,7 @@ impl Default for PingoraRequestCtx {
             client_http_version: None,
             cluster: None,
             connection_upgraded: false,
+            downstream_tls: false,
             filter_metadata: std::collections::HashMap::new(),
             metrics_cluster: None,
             pre_read_body: None,

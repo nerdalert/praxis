@@ -191,12 +191,18 @@ impl HttpFilter for ForwardedHeadersFilter {
         let xff = if self.is_trusted(&client_ip)
             && let Some(existing) = ctx.request.headers.get("x-forwarded-for")
         {
-            let existing = existing.to_str().unwrap_or("");
-            let mut val = String::with_capacity(existing.len() + 2 + 45);
-            val.push_str(existing);
-            val.push_str(", ");
-            let _ok = write!(val, "{client_ip}");
-            val
+            if let Ok(existing) = existing.to_str() {
+                let mut val = String::with_capacity(existing.len() + 2 + 45);
+                val.push_str(existing);
+                val.push_str(", ");
+                let _ok = write!(val, "{client_ip}");
+                val
+            } else {
+                tracing::warn!("existing X-Forwarded-For contains non-UTF-8 bytes; overwriting");
+                let mut val = String::with_capacity(45);
+                let _ok = write!(val, "{client_ip}");
+                val
+            }
         } else {
             let mut val = String::with_capacity(45);
             let _ok = write!(val, "{client_ip}");
@@ -204,8 +210,8 @@ impl HttpFilter for ForwardedHeadersFilter {
         };
         ctx.extra_request_headers.push((Cow::Borrowed("X-Forwarded-For"), xff));
 
-        tracing::debug!("setting X-Forwarded-Proto from request scheme");
-        let proto = ctx.request.uri.scheme_str().unwrap_or("http");
+        let proto = if ctx.downstream_tls { "https" } else { "http" };
+        tracing::debug!(proto, "setting X-Forwarded-Proto from connection state");
         ctx.extra_request_headers
             .push((Cow::Borrowed("X-Forwarded-Proto"), proto.into()));
 
@@ -522,6 +528,53 @@ trusted_proxies:
             format_for_param(&ip),
             "\"[2001:db8::1]\"",
             "IPv6 for-param must be quoted with brackets"
+        );
+    }
+
+    #[tokio::test]
+    async fn tls_connection_sets_proto_https() {
+        let f = make_filter(&[]);
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+        ctx.downstream_tls = true;
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let proto = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-Proto")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            proto,
+            Some("https"),
+            "TLS connection should set X-Forwarded-Proto to https"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_utf8_xff_overwrites_with_warning() {
+        let f = make_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            http::HeaderValue::from_bytes(b"\xff\xfe").unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("10.1.2.3".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let xff = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-For")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            xff,
+            Some("10.1.2.3"),
+            "non-UTF-8 XFF should be overwritten with just client IP"
         );
     }
 

@@ -187,3 +187,81 @@ jobs:
             echo "::error::Unsigned commits found: ${unsigned}"
             exit 1
           fi
+
+  # ----------------------------------------------------------------------------
+  # Proposal Check
+  # ----------------------------------------------------------------------------
+
+  proposal-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate proposal files
+        env:
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^conventions/bypass$'; then
+            echo "conventions/bypass label present — skipping proposal check"
+            exit 0
+          fi
+
+          proposal_files=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" --paginate \
+            --jq '[.[] | select(.filename | startswith("docs/proposals/")) | select(.filename | endswith(".md")) | select(.filename != "docs/proposals/template.md")]')
+
+          count=$(echo "$proposal_files" | jq 'length')
+          if [ "$count" -eq 0 ]; then
+            echo "No proposal files in this PR — skipping"
+            exit 0
+          fi
+
+          errors=""
+
+          while IFS= read -r file; do
+            status=$(echo "$proposal_files" | jq -r --arg f "$file" '.[] | select(.filename == $f) | .status')
+
+            content=$(gh api "repos/${{ github.repository }}/contents/${file}?ref=$HEAD_SHA" \
+              --jq '.content' | base64 -d)
+
+            frontmatter=$(echo "$content" | sed -n '/^---$/,/^---$/p' | sed '1d;$d')
+
+            discussion=$(echo "$frontmatter" | grep -E '^discussion:' | sed 's/^discussion:[[:space:]]*//')
+            if [ -z "$discussion" ]; then
+              errors="${errors}\n- \`${file}\`: missing \`discussion\` field in frontmatter"
+            fi
+
+            issue=$(echo "$frontmatter" | grep -E '^issue:' | sed 's/^issue:[[:space:]]*//')
+            if [ -z "$issue" ]; then
+              errors="${errors}\n- \`${file}\`: missing \`issue\` field in frontmatter"
+            fi
+
+            has_authors=$(echo "$frontmatter" | grep -E '^  - ' | head -1)
+            if [ -z "$has_authors" ]; then
+              errors="${errors}\n- \`${file}\`: missing or empty \`authors\` list in frontmatter"
+            fi
+
+            if [ "$status" = "added" ]; then
+              if echo "$content" | grep -qF '## How?'; then
+                errors="${errors}\n- \`${file}\`: new proposals must not include the \`## How?\` section in the first PR. Submit What? and Why? first; add How? in a follow-up."
+              fi
+            fi
+          done < <(echo "$proposal_files" | jq -r '.[].filename')
+
+          if [ -n "$errors" ]; then
+            marker="<!-- praxis:proposal-check -->"
+            already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              body="${marker}
+          ### Proposal validation failed
+
+          The following issues were found with proposal files in this PR:
+          $(echo -e "$errors")
+
+          See our [proposal process](docs/proposals.md) for requirements."
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+            fi
+            gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
+          fi

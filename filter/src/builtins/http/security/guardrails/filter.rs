@@ -131,7 +131,7 @@ impl GuardrailsFilter {
     /// Return the appropriate [`FilterAction`] when a rule matches.
     fn blocked_action(&self) -> FilterAction {
         match self.action {
-            GuardrailsAction::Reject => unauthorized(),
+            GuardrailsAction::Reject => forbidden(),
             GuardrailsAction::Flag => FilterAction::Continue,
         }
     }
@@ -262,6 +262,6 @@ fn write_result(ctx: &mut HttpFilterContext<'_>, status: &'static str) {
 }
 
 /// Rejection response for guardrails violations.
-fn unauthorized() -> FilterAction {
-    FilterAction::Reject(Rejection::status(401).with_body(b"Unauthorized".as_slice()))
+fn forbidden() -> FilterAction {
+    FilterAction::Reject(Rejection::status(403).with_body(b"Forbidden".as_slice()))
 }
