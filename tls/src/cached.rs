@@ -10,6 +10,8 @@
 
 use std::sync::Arc;
 
+use zeroize::Zeroizing;
+
 use crate::TlsError;
 
 // -----------------------------------------------------------------------------
@@ -72,6 +74,9 @@ impl CachedCaCerts {
 
 /// DER-encoded client certificate and private key loaded at config time.
 ///
+/// The private key is wrapped in [`Zeroizing`] so it is cleared
+/// from memory when the struct is dropped.
+///
 /// ```
 /// use praxis_tls::CachedClientCert;
 ///
@@ -79,19 +84,24 @@ impl CachedCaCerts {
 /// assert_eq!(cached.cert_der().len(), 1);
 /// assert_eq!(cached.key_der(), &[4, 5, 6]);
 /// ```
+///
+/// [`Zeroizing`]: zeroize::Zeroizing
 #[derive(Debug, Clone)]
 pub struct CachedClientCert {
     /// DER-encoded certificate chain.
     cert_der: Vec<Vec<u8>>,
 
-    /// DER-encoded private key.
-    key_der: Vec<u8>,
+    /// DER-encoded private key (zeroized on drop).
+    key_der: Zeroizing<Vec<u8>>,
 }
 
 impl CachedClientCert {
     /// Wrap pre-parsed DER certificate chain and private key.
     pub fn new(cert_der: Vec<Vec<u8>>, key_der: Vec<u8>) -> Self {
-        Self { cert_der, key_der }
+        Self {
+            cert_der,
+            key_der: Zeroizing::new(key_der),
+        }
     }
 
     /// Borrow the DER-encoded certificate chain.

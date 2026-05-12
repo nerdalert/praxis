@@ -75,6 +75,13 @@ pub(super) fn load_cert_and_key(
             detail: format!("failed to parse cert PEM: {e}"),
         })?;
 
+    if certs.is_empty() {
+        return Err(TlsError::FileLoadError {
+            path: pair.cert_path.clone(),
+            detail: "no certificates found in PEM file".to_owned(),
+        });
+    }
+
     let key = rustls_pemfile::private_key(&mut &key_pem[..])
         .map_err(|e| TlsError::FileLoadError {
             path: pair.key_path.clone(),
