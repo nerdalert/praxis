@@ -153,6 +153,10 @@ impl HttpFilter for McpFilter {
 
         let mcp_envelope = extract_mcp_envelope(&value, method_str, &ctx.request.headers);
 
+        if let Some(action) = reject_missing_required_selector(&mcp_envelope, &envelope, &self.config) {
+            return Ok(action);
+        }
+
         if let Err(action) = validate_mcp_headers(ctx, &mcp_envelope, &envelope, &self.config) {
             return Ok(action);
         }
@@ -221,6 +225,23 @@ fn handle_non_mcp(config: &McpConfig) -> Result<FilterAction, FilterError> {
     }
 }
 
+/// Selector-bearing methods cannot be trusted when the selector is absent or malformed.
+fn reject_missing_required_selector(
+    mcp: &McpEnvelope,
+    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+    config: &McpConfig,
+) -> Option<FilterAction> {
+    let requires = mcp.method.requires_name() || mcp.method.requires_uri();
+    if requires && mcp.name.is_none() {
+        match config.on_invalid {
+            InvalidMcpBehavior::Reject => Some(mcp_invalid_params_rejection(envelope)),
+            InvalidMcpBehavior::Continue => Some(FilterAction::Continue),
+        }
+    } else {
+        None
+    }
+}
+
 /// Validate `Mcp-Method` and `Mcp-Name` headers against body-derived values.
 ///
 /// When `missing: synthesize` is configured and a standard MCP header is
@@ -235,6 +256,14 @@ fn validate_mcp_headers(
 
     if let Some(name) = &mcp.name {
         validate_single_header(ctx, "mcp-name", name, envelope, config)?;
+    } else if ctx.request.headers.get("mcp-name").is_some() {
+        match config.header_validation.mismatch {
+            MismatchBehavior::Reject => {
+                warn!("client sent Mcp-Name header but body method has no name");
+                return Err(mcp_header_mismatch_rejection(envelope));
+            },
+            MismatchBehavior::Ignore => {},
+        }
     }
 
     Ok(())
@@ -292,9 +321,25 @@ fn validate_single_header(
     Ok(())
 }
 
+/// Build the JSON-RPC error -32602 (`InvalidParams`) rejection.
+fn mcp_invalid_params_rejection(
+    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+) -> FilterAction {
+    mcp_json_rpc_error_rejection(envelope, -32602, "InvalidParams")
+}
+
 /// Build the JSON-RPC error -32001 (`HeaderMismatch`) rejection.
 fn mcp_header_mismatch_rejection(
     envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+) -> FilterAction {
+    mcp_json_rpc_error_rejection(envelope, -32001, "HeaderMismatch")
+}
+
+/// MCP rejections preserve JSON-RPC IDs so clients can correlate errors.
+fn mcp_json_rpc_error_rejection(
+    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+    code: i32,
+    message: &str,
 ) -> FilterAction {
     use crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcIdKind;
 
@@ -304,7 +349,7 @@ fn mcp_header_mismatch_rejection(
         _ => "null".to_owned(),
     };
     let body = Bytes::from(format!(
-        r#"{{"jsonrpc":"2.0","error":{{"code":-32001,"message":"HeaderMismatch"}},"id":{id_json}}}"#,
+        r#"{{"jsonrpc":"2.0","error":{{"code":{code},"message":"{message}"}},"id":{id_json}}}"#,
     ));
     FilterAction::Reject(
         Rejection::status(400)

@@ -7,7 +7,7 @@ use std::{io::Write, net::TcpStream};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, parse_body, parse_status, start_backend_with_shutdown,
+    free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_echo_backend_with_shutdown,
     start_header_echo_backend_with_shutdown, start_proxy,
 };
 
@@ -34,6 +34,32 @@ fn mcp_tools_call_routes_by_name() {
         parse_body(&raw),
         "weather-backend",
         "tools/call with name=get_weather should route to weather cluster"
+    );
+}
+
+#[test]
+fn mcp_tools_call_params_forwarded_to_backend() {
+    let backend_guard = start_echo_backend_with_shutdown();
+    let proxy_port = free_port();
+
+    let yaml = mcp_default_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"Raleigh","units":"metric"}}}"#;
+    let request = json_post_with_mcp_headers("/mcp/", body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200);
+    let echoed_body = parse_body(&raw);
+    let parsed: serde_json::Value = serde_json::from_str(&echoed_body).unwrap();
+    assert_eq!(
+        parsed["params"]["name"], "get_weather",
+        "tools/call params.name should reach backend unchanged"
+    );
+    assert_eq!(
+        parsed["params"]["arguments"]["city"], "Raleigh",
+        "tools/call params.arguments should reach backend unchanged"
     );
 }
 
@@ -226,6 +252,93 @@ fn mcp_standard_headers_preserved_internal_stripped() {
 }
 
 // -----------------------------------------------------------------------------
+// Required Name Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn mcp_tools_call_missing_name_rejected() {
+    let backend_guard = start_backend_with_shutdown("backend");
+    let proxy_port = free_port();
+
+    let yaml = mcp_default_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}"#;
+    let request = json_post_with_mcp_headers("/mcp/", body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(
+        parse_status(&raw),
+        400,
+        "tools/call without params.name should be rejected"
+    );
+    assert_invalid_params_response(&raw, &serde_json::json!(1));
+}
+
+#[test]
+fn mcp_tools_call_missing_params_rejected() {
+    let backend_guard = start_backend_with_shutdown("backend");
+    let proxy_port = free_port();
+
+    let yaml = mcp_default_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#;
+    let request = json_post_with_mcp_headers("/mcp/", body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 400, "tools/call without params should be rejected");
+    assert_invalid_params_response(&raw, &serde_json::json!(1));
+}
+
+#[test]
+fn mcp_tools_call_non_string_name_rejected() {
+    let backend_guard = start_backend_with_shutdown("backend");
+    let proxy_port = free_port();
+
+    let yaml = mcp_default_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":"req\\1","method":"tools/call","params":{"name":42}}"#;
+    let request = json_post_with_mcp_headers("/mcp/", body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(
+        parse_status(&raw),
+        400,
+        "tools/call with non-string params.name should be rejected"
+    );
+    assert_invalid_params_response(&raw, &serde_json::json!("req\\1"));
+}
+
+// -----------------------------------------------------------------------------
+// Spurious Header Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn mcp_spurious_name_header_for_nameless_method_rejected() {
+    let backend_guard = start_backend_with_shutdown("backend");
+    let proxy_port = free_port();
+
+    let yaml = mcp_default_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let request = json_post_with_mcp_headers("/mcp/", body, &[("Mcp-Method", "tools/list"), ("Mcp-Name", "evil")]);
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(
+        parse_status(&raw),
+        400,
+        "spurious Mcp-Name on nameless method should be rejected in default mode"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Fragmented / Oversized Body Tests
 // -----------------------------------------------------------------------------
 
@@ -316,6 +429,19 @@ fn json_post_with_mcp_headers(path: &str, body: &str, headers: &[(&str, &str)]) 
          {body}",
         body.len(),
     )
+}
+
+fn assert_invalid_params_response(raw: &str, expected_id: &serde_json::Value) {
+    let response_body = parse_body(raw);
+    let parsed: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+
+    assert_eq!(parsed["jsonrpc"], "2.0", "response should be JSON-RPC 2.0");
+    assert_eq!(parsed["error"]["code"], -32602, "error code should be InvalidParams");
+    assert_eq!(
+        parsed["error"]["message"], "InvalidParams",
+        "error message should identify InvalidParams"
+    );
+    assert_eq!(&parsed["id"], expected_id, "response id should match request id");
 }
 
 fn mcp_routing_yaml(proxy_port: u16, weather_port: u16, default_port: u16) -> String {

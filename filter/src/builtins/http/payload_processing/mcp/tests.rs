@@ -608,8 +608,157 @@ async fn synthesize_injects_standard_mcp_headers() {
 }
 
 // -----------------------------------------------------------------------------
+// Required Name/URI Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn tools_call_missing_name_rejected() {
+    let filter = make_default_filter();
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert_invalid_params_rejection(&action, &serde_json::json!(1));
+}
+
+#[tokio::test]
+async fn tools_call_missing_params_rejected() {
+    let filter = make_default_filter();
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert_invalid_params_rejection(&action, &serde_json::json!(1));
+}
+
+#[tokio::test]
+async fn tools_call_non_string_name_rejected() {
+    let filter = make_default_filter();
+    let body_str = r#"{"jsonrpc":"2.0","id":"req\"1","method":"tools/call","params":{"name":42}}"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert_invalid_params_rejection(&action, &serde_json::json!("req\"1"));
+}
+
+#[tokio::test]
+async fn prompts_get_missing_name_rejected() {
+    let filter = make_default_filter();
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{}}"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "prompts/get without params.name should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn resources_read_missing_uri_rejected() {
+    let filter = make_default_filter();
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{}}"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "resources/read without params.uri should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn tools_call_missing_name_continues_when_on_invalid_continue() {
+    let filter = make_filter(r#"{"on_invalid": "continue"}"#);
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "tools/call without name should continue without metadata when on_invalid: continue"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Spurious Header Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn spurious_mcp_name_on_nameless_method_rejected() {
+    let filter = make_default_filter();
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let req = make_mcp_request(&[("mcp-name", "evil")]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "spurious Mcp-Name on nameless method should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn spurious_mcp_name_ignored_when_mismatch_ignore() {
+    let filter = make_filter(r#"{"header_validation": {"mismatch": "ignore"}}"#);
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let req = make_mcp_request(&[("mcp-name", "evil")]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "spurious Mcp-Name should be ignored when mismatch: ignore"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+fn assert_invalid_params_rejection(action: &FilterAction, expected_id: &serde_json::Value) {
+    let FilterAction::Reject(rejection) = action else {
+        panic!("expected InvalidParams rejection, got {action:?}");
+    };
+    assert_eq!(rejection.status, 400, "InvalidParams rejection should use HTTP 400");
+
+    let body = rejection
+        .body
+        .as_ref()
+        .expect("InvalidParams rejection should include a JSON-RPC body");
+    let parsed: serde_json::Value =
+        serde_json::from_slice(body.as_ref()).expect("InvalidParams body should parse as JSON");
+
+    assert_eq!(parsed["jsonrpc"], "2.0", "InvalidParams body should be JSON-RPC 2.0");
+    assert_eq!(parsed["error"]["code"], -32602, "error code should be InvalidParams");
+    assert_eq!(
+        parsed["error"]["message"], "InvalidParams",
+        "error message should identify InvalidParams"
+    );
+    assert_eq!(&parsed["id"], expected_id, "response id should match request id");
+}
 
 fn make_default_filter() -> McpFilter {
     make_filter("{}")
