@@ -106,23 +106,17 @@ pub(super) async fn pre_read_body(
         _ => return Ok(Vec::new()),
     };
 
-    // Enable retry buffering so Pingora's body forwarding loop can
-    // replay the consumed body via `get_retry_buffer()`. Without this,
-    // `is_body_done()` returns true after pre-read and Pingora never
-    // calls `request_body_filter`, leaving the pre-read body stranded.
-    //
-    // Pingora's retry buffer is capped at 64 KiB (`BODY_BUF_LIMIT`).
-    // The initial request body is forwarded correctly via
-    // `pre_read_body` in `request_body_filter`, but retries replay
-    // from the 64 KiB buffer. `handle_connect_failure` disables
-    // retries when `request_body_bytes` exceeds `RETRY_BODY_LIMIT`
-    // to prevent truncated retry payloads.
+    // Pingora only calls `request_body_filter` after pre-read when its
+    // body-forwarding path remains active. Initial forwarding uses
+    // Praxis-owned `pre_read_body`; actual retries still replay from
+    // Pingora's fixed retry buffer and are guarded in `handle_connect_failure`.
     session.downstream_session.enable_retry_buffering();
 
     let mut buffer = BodyBuffer::new(max_bytes);
     let mut all_extra_headers = Vec::new();
     let mut released = false;
     let mut eos_body = None;
+    let mut original_body_bytes: u64 = 0;
 
     loop {
         let chunk = session
@@ -133,6 +127,14 @@ pub(super) async fn pre_read_body(
 
         let end_of_stream = chunk.is_none();
         let mut body = chunk;
+
+        // Track original downstream bytes before the synthetic EOS
+        // body is created. This stays separate from the pipeline's
+        // accumulate_body_bytes so the retry guard sees the original
+        // size even when a ReadWrite filter shrinks or grows the body.
+        if let Some(ref b) = body {
+            original_body_bytes += b.len() as u64;
+        }
 
         if !released
             && let Some(ref b) = body
@@ -153,8 +155,8 @@ pub(super) async fn pre_read_body(
             .execute_http_request_body(&mut filter_ctx, &mut body, end_of_stream)
             .await;
 
-        ctx.request_body_bytes = filter_ctx.request_body_bytes;
         ctx.cluster = filter_ctx.cluster;
+        ctx.rewritten_path = filter_ctx.rewritten_path;
         ctx.upstream = filter_ctx.upstream;
         ctx.filter_metadata = filter_ctx.filter_metadata;
         all_extra_headers.extend(filter_ctx.extra_request_headers);
@@ -181,6 +183,15 @@ pub(super) async fn pre_read_body(
 
     tracing::debug!("storing pre-read body for forwarding by request_body_filter");
     let forwarded = eos_body.unwrap_or_else(|| buffer.freeze());
+
+    // The retry guard compares max(request_body_bytes, mutated_request_body_len)
+    // against Pingora's fixed retry buffer. Keeping the original downstream
+    // size here ensures a large original body still prevents retries even
+    // when a ReadWrite filter shrinks the forwarded payload.
+    ctx.request_body_bytes = original_body_bytes;
+    if caps.any_request_body_writer {
+        ctx.mutated_request_body_len = Some(forwarded.len());
+    }
     if forwarded.is_empty() {
         ctx.pre_read_body = Some(VecDeque::new());
     } else {

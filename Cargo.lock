@@ -2142,6 +2142,7 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-proto",
  "prost-wkt-types",
+ "rand 0.9.4",
  "regex",
  "serde",
  "serde_json",
@@ -2217,6 +2218,7 @@ version = "0.3.1"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "bytes",
  "futures",
  "h2",
  "http",

@@ -1,0 +1,361 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Praxis Contributors
+
+//! Configuration types for the MCP gateway filter.
+
+use serde::Deserialize;
+
+use crate::FilterError;
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Default maximum request body size for `StreamBuffer` mode (64 `KiB`).
+pub(super) const DEFAULT_MAX_BODY_BYTES: usize = 65_536; // 64 KiB
+
+// -----------------------------------------------------------------------------
+// InvalidToolPolicy
+// -----------------------------------------------------------------------------
+
+/// Behavior when a tool definition has an invalid schema.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum InvalidToolPolicy {
+    /// Reject the entire server config at load time.
+    #[default]
+    RejectServer,
+    /// Exclude the invalid tool from the exposed catalog, keeping
+    /// the rest of the server's tools.
+    FilterOut,
+}
+
+// -----------------------------------------------------------------------------
+// ToolConfig
+// -----------------------------------------------------------------------------
+
+/// Tool definition in static config.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ToolConfig {
+    /// Tool name on the backend.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Optional input schema. `schema` is accepted as a local shorthand.
+    #[serde(rename = "inputSchema", alias = "input_schema", alias = "schema")]
+    pub input_schema: Option<serde_json::Value>,
+    /// Optional tool annotations.
+    pub annotations: Option<serde_json::Value>,
+}
+
+// -----------------------------------------------------------------------------
+// McpServerConfig
+// -----------------------------------------------------------------------------
+
+/// MCP backend server configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct McpServerConfig {
+    /// Unique server name.
+    pub name: String,
+    /// Backend cluster name.
+    pub cluster: String,
+    /// Backend MCP path.
+    #[serde(default = "default_path")]
+    pub path: String,
+    /// Tool prefix for this server.
+    pub tool_prefix: Option<String>,
+    /// Statically defined tools.
+    #[serde(default)]
+    pub tools: Vec<ToolConfig>,
+}
+
+// -----------------------------------------------------------------------------
+// McpGatewayConfig
+// -----------------------------------------------------------------------------
+
+/// MCP gateway filter configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct McpGatewayConfig {
+    /// Public MCP path that this gateway listens on.
+    #[serde(default = "default_path")]
+    pub path: String,
+    /// Maximum body size in bytes.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
+    /// Behavior when a tool has an invalid schema.
+    #[serde(default)]
+    pub invalid_tool_policy: InvalidToolPolicy,
+    /// Backend server definitions.
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+// -----------------------------------------------------------------------------
+// CatalogTool
+// -----------------------------------------------------------------------------
+
+/// Entry in the pre-built tool catalog.
+#[derive(Debug, Clone)]
+#[allow(dead_code, reason = "fields used by follow-up tools/call routing")]
+pub(super) struct CatalogTool {
+    /// Exposed (prefixed) tool name visible to clients.
+    pub exposed_name: String,
+    /// Original tool name on the backend.
+    pub original_name: String,
+    /// Backend server name from config.
+    pub server_name: String,
+    /// Backend cluster name.
+    pub cluster: String,
+    /// Backend MCP endpoint path.
+    pub backend_path: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// MCP input schema.
+    pub input_schema: serde_json::Value,
+    /// Optional tool annotations.
+    pub annotations: Option<serde_json::Value>,
+}
+
+// -----------------------------------------------------------------------------
+// Defaults
+// -----------------------------------------------------------------------------
+
+/// Default MCP path.
+fn default_path() -> String {
+    "/mcp".to_owned()
+}
+
+/// Default max body bytes.
+fn default_max_body_bytes() -> usize {
+    DEFAULT_MAX_BODY_BYTES
+}
+
+// -----------------------------------------------------------------------------
+// Validation
+// -----------------------------------------------------------------------------
+
+/// Validate configuration and build the static tool catalog.
+pub(super) fn build_config(cfg: McpGatewayConfig) -> Result<(McpGatewayConfig, Vec<CatalogTool>), FilterError> {
+    if cfg.max_body_bytes == 0 {
+        return Err("mcp_gateway: max_body_bytes must be greater than 0".into());
+    }
+
+    validate_path("mcp_gateway", &cfg.path)?;
+    validate_unique_server_names(&cfg.servers)?;
+    validate_server_clusters(&cfg.servers)?;
+    validate_server_paths(&cfg.servers)?;
+    validate_tool_names(&cfg.servers)?;
+
+    let catalog = build_catalog(&cfg.servers, cfg.invalid_tool_policy)?;
+    validate_unique_exposed_names(&catalog)?;
+
+    Ok((cfg, catalog))
+}
+
+/// Validate that all server names are unique and non-empty.
+fn validate_unique_server_names(servers: &[McpServerConfig]) -> Result<(), FilterError> {
+    let mut seen = std::collections::HashSet::new();
+    for server in servers {
+        if server.name.is_empty() {
+            return Err("mcp_gateway: server name must not be empty".into());
+        }
+        if !seen.insert(&server.name) {
+            return Err(format!("mcp_gateway: duplicate server name: '{}'", server.name).into());
+        }
+    }
+    Ok(())
+}
+
+/// Validate that all cluster names are non-empty.
+fn validate_server_clusters(servers: &[McpServerConfig]) -> Result<(), FilterError> {
+    for server in servers {
+        if server.cluster.is_empty() {
+            return Err(format!("mcp_gateway: server '{}' cluster must not be empty", server.name).into());
+        }
+    }
+    Ok(())
+}
+
+/// Validate server backend paths against the constraints enforced
+/// by `apply_rewritten_path` at runtime.
+fn validate_server_paths(servers: &[McpServerConfig]) -> Result<(), FilterError> {
+    for server in servers {
+        validate_path(&format!("server '{}'", server.name), &server.path)?;
+    }
+    Ok(())
+}
+
+/// Shared path validator for both the public gateway path and backend
+/// server paths. Rejects scheme/authority, missing leading `/`, double
+/// leading `/`, traversal segments (including percent-encoded), and
+/// values that fail [`http::Uri`] parsing.
+fn validate_path(label: &str, path: &str) -> Result<(), FilterError> {
+    if path.contains("://") {
+        return Err(format!("mcp_gateway: {label} path must not contain a scheme/authority: '{path}'").into());
+    }
+    if !path.starts_with('/') {
+        return Err(format!("mcp_gateway: {label} path must start with /: '{path}'").into());
+    }
+    if path.starts_with("//") {
+        return Err(format!("mcp_gateway: {label} path must not start with //: '{path}'").into());
+    }
+
+    let uri: http::Uri = path
+        .parse()
+        .map_err(|e| FilterError::from(format!("mcp_gateway: {label} path is not a valid URI: '{path}': {e}")))?;
+
+    if uri.scheme().is_some() || uri.authority().is_some() {
+        return Err(format!("mcp_gateway: {label} path must not contain a scheme/authority: '{path}'").into());
+    }
+
+    if uri.query().is_some() {
+        return Err(format!("mcp_gateway: {label} path must not contain a query string: '{path}'").into());
+    }
+
+    if uri.path().split('/').any(is_traversal_segment) {
+        return Err(format!("mcp_gateway: {label} path contains '..' traversal: '{path}'").into());
+    }
+    Ok(())
+}
+
+/// Matches literal `..` and percent-encoded variants (`%2e%2e`, `.%2e`,
+/// `%2e.`). Mirrors the runtime check in `apply_rewritten_path` so bad
+/// backend paths fail at config load, not as runtime errors.
+#[allow(clippy::indexing_slicing, reason = "bounds checked by i + 2 < b.len()")]
+fn is_traversal_segment(seg: &str) -> bool {
+    if seg == ".." {
+        return true;
+    }
+    let mut dots = 0u8;
+    let mut i = 0;
+    let b = seg.as_bytes();
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && b[i + 1].eq_ignore_ascii_case(&b'2')
+            && b[i + 2].eq_ignore_ascii_case(&b'e')
+        {
+            dots += 1;
+            i += 3;
+        } else if b[i] == b'.' {
+            dots += 1;
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    dots == 2
+}
+
+/// Validate that all tool names are non-empty.
+fn validate_tool_names(servers: &[McpServerConfig]) -> Result<(), FilterError> {
+    for server in servers {
+        for tool in &server.tools {
+            if tool.name.is_empty() {
+                return Err(format!("mcp_gateway: server '{}' has a tool with an empty name", server.name).into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that no two tools produce the same exposed name after prefixing.
+fn validate_unique_exposed_names(catalog: &[CatalogTool]) -> Result<(), FilterError> {
+    let mut seen = std::collections::HashSet::new();
+    for tool in catalog {
+        if !seen.insert(&tool.exposed_name) {
+            return Err(format!("mcp_gateway: duplicate exposed tool name: '{}'", tool.exposed_name).into());
+        }
+    }
+    Ok(())
+}
+
+/// Build the static tool catalog from configured servers.
+fn build_catalog(servers: &[McpServerConfig], policy: InvalidToolPolicy) -> Result<Vec<CatalogTool>, FilterError> {
+    let mut catalog = Vec::new();
+    for server in servers {
+        for tool in &server.tools {
+            if let Err(reason) = validate_tool_schemas(tool) {
+                match policy {
+                    InvalidToolPolicy::RejectServer => {
+                        return Err(
+                            format!("mcp_gateway: server '{}' tool '{}' {reason}", server.name, tool.name,).into(),
+                        );
+                    },
+                    InvalidToolPolicy::FilterOut => {
+                        tracing::debug!(
+                            server = %server.name,
+                            tool = %tool.name,
+                            reason = %reason,
+                            "excluding tool with non-object schema"
+                        );
+                        continue;
+                    },
+                }
+            }
+
+            catalog.push(build_catalog_entry(server, tool));
+        }
+    }
+    Ok(catalog)
+}
+
+/// MCP tools accept object-shaped input parameters.
+fn validate_tool_schemas(tool: &ToolConfig) -> Result<(), String> {
+    if let Some(ref schema) = tool.input_schema {
+        validate_schema_object("inputSchema", schema)?;
+    }
+    Ok(())
+}
+
+/// Tool schemas without `type: object` confuse clients that validate calls.
+fn validate_schema_object(label: &str, schema: &serde_json::Value) -> Result<(), String> {
+    if !schema.is_object() {
+        return Err(format!("{label} must be a JSON object"));
+    }
+    if schema.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+        return Err(format!("{label}.type must be 'object'"));
+    }
+    if let Some(properties) = schema.get("properties")
+        && !properties.is_object()
+    {
+        return Err(format!("{label}.properties must be a JSON object"));
+    }
+    if let Some(required) = schema.get("required")
+        && !required
+            .as_array()
+            .is_some_and(|values| values.iter().all(serde_json::Value::is_string))
+    {
+        return Err(format!("{label}.required must be an array of strings"));
+    }
+    Ok(())
+}
+
+/// A missing configured schema means the tool declares no structured args.
+fn default_input_schema() -> serde_json::Value {
+    serde_json::json!({ "type": "object", "additionalProperties": false })
+}
+
+/// Routing fields stay with catalog entries so follow-up `tools/call`
+/// routing can select the backend without reparsing config.
+fn build_catalog_entry(server: &McpServerConfig, tool: &ToolConfig) -> CatalogTool {
+    let exposed_name = if let Some(ref prefix) = server.tool_prefix {
+        format!("{prefix}{}", tool.name)
+    } else {
+        tool.name.clone()
+    };
+
+    CatalogTool {
+        exposed_name,
+        original_name: tool.name.clone(),
+        server_name: server.name.clone(),
+        cluster: server.cluster.clone(),
+        backend_path: server.path.clone(),
+        description: tool.description.clone(),
+        input_schema: tool.input_schema.clone().unwrap_or_else(default_input_schema),
+        annotations: tool.annotations.clone(),
+    }
+}

@@ -166,6 +166,18 @@ pub(crate) fn strip_reserved_internal(req: &mut RequestHeader) {
     }
 }
 
+/// Repair request framing after `StreamBuffer` body mutation.
+///
+/// Pingora forwards upstream headers after `StreamBuffer` pre-read, so a
+/// body-mutating filter must update `Content-Length` before those headers
+/// are sent to the backend.
+pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &PingoraRequestCtx) {
+    let Some(new_len) = ctx.mutated_request_body_len else {
+        return;
+    };
+    let _result = req.insert_header(http::header::CONTENT_LENGTH, new_len.to_string());
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -756,6 +768,29 @@ mod tests {
             req.headers.get("connection").unwrap(),
             "Upgrade",
             "connection should be preserved for WebSocket upgrades"
+        );
+    }
+
+    #[test]
+    fn apply_mutated_content_length_updates_header() {
+        let mut req = make_request(&[("content-length", "1024")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.mutated_request_body_len = Some(512);
+        apply_mutated_content_length(&mut req, &ctx);
+        assert_eq!(
+            req.headers.get("content-length").and_then(|v| v.to_str().ok()),
+            Some("512")
+        );
+    }
+
+    #[test]
+    fn apply_mutated_content_length_noop_when_none() {
+        let mut req = make_request(&[("content-length", "1024")]);
+        let ctx = PingoraRequestCtx::default();
+        apply_mutated_content_length(&mut req, &ctx);
+        assert_eq!(
+            req.headers.get("content-length").and_then(|v| v.to_str().ok()),
+            Some("1024")
         );
     }
 
