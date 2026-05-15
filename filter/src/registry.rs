@@ -141,6 +141,11 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
     register_http(factories, "mcp", McpFilter::from_config);
+    register_http(
+        factories,
+        "mcp_gateway",
+        crate::agentic::mcp_gateway::McpGatewayFilter::from_config,
+    );
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
@@ -259,6 +264,7 @@ mod tests {
         );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
         assert!(names.contains(&"mcp"), "mcp should be registered");
+        assert!(names.contains(&"mcp_gateway"), "mcp_gateway should be registered");
         #[cfg(feature = "ai-inference")]
         assert!(
             names.contains(&"model_to_header"),
