@@ -495,6 +495,7 @@ A filter can have both `conditions` (request phase) and
 | `path_rewrite` | Transformation | HTTP | `strip_prefix`, `add_prefix`, or `replace` (regex) on request path |
 | `url_rewrite` | Transformation | HTTP | `operations[]`: `regex_replace`, `strip_query_params`, `add_query_params` |
 | `model_to_header` | AI / Inference | HTTP | Extract JSON "model" field and promote to X-Model header. Requires `ai-inference` feature. |
+| `prompt_enrich` | AI / Inference | HTTP | Inject messages into OpenAI-compatible chat completion request bodies. Requires `ai-inference` feature. |
 
 For detailed configuration of each built-in filter, see
 [configuration.md](configuration.md).

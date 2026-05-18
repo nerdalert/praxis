@@ -123,6 +123,7 @@ page.
 | ------ | ------------- |
 | [credential-injection.yaml](configs/ai/credential-injection.yaml) | Inject per-cluster API credentials and strip client tokens |
 | [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Route by model field in JSON body via X-Model header |
+| [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Inject system messages into chat completion requests |
 
 ### Branching
 

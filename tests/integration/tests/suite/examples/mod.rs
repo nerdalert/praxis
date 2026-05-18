@@ -30,6 +30,8 @@ mod multi_listener;
 mod path_based_routing;
 mod path_rewriting;
 mod payload_processing;
+#[cfg(feature = "ai-inference")]
+mod prompt_enrichment;
 mod protocols;
 mod redirect;
 mod round_robin;

@@ -5,14 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::FilterError;
-
-// -----------------------------------------------------------------------------
-// Body Constants
-// -----------------------------------------------------------------------------
-
-/// Default maximum request body size for `StreamBuffer` mode (10 MiB).
-pub(super) const DEFAULT_MAX_BODY_BYTES: usize = 10_485_760;
+use crate::{FilterError, body::DEFAULT_JSON_BODY_MAX_BYTES};
 
 // -----------------------------------------------------------------------------
 // JsonBodyFieldMapping
@@ -58,7 +51,7 @@ pub(super) struct JsonBodyFieldConfig {
 
 /// Default maximum body size (10 MiB).
 fn default_max_body_bytes() -> usize {
-    DEFAULT_MAX_BODY_BYTES
+    DEFAULT_JSON_BODY_MAX_BYTES
 }
 
 // -----------------------------------------------------------------------------

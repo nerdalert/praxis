@@ -24,6 +24,8 @@ mod tcp_filter;
 pub use actions::{FilterAction, Rejection};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
+#[cfg(feature = "ai-inference")]
+pub use builtins::PromptEnrichFilter;
 pub use builtins::{
     CircuitBreakerFilter, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction, GuardrailsFilter,
     LoadBalancerFilter, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind,

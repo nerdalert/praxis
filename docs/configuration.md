@@ -390,6 +390,7 @@ supports TCP-level filters too.
 | `path_rewrite` | Transformation | HTTP |
 | `url_rewrite` | Transformation | HTTP |
 | `model_to_header` | AI / Inference | HTTP (requires `ai-inference` feature) |
+| `prompt_enrich` | AI / Inference | HTTP (requires `ai-inference` feature) |
 
 ### Router
 
@@ -836,6 +837,41 @@ enabled by default. See [compression.yaml].
 | `content_types` | list | see above | MIME type prefixes that qualify |
 
 At least one algorithm must be enabled.
+
+### Prompt Enrich
+
+Injects statically configured messages into
+OpenAI-compatible chat completion request bodies. The
+filter parses the JSON body, splices configured messages
+into the `messages` array, re-serializes, and updates
+`Content-Length`. Requires the `ai-inference` feature.
+See [prompt-enrichment.yaml].
+
+[prompt-enrichment.yaml]: ../examples/configs/ai/prompt-enrichment.yaml
+
+```yaml
+- filter: prompt_enrich
+  prepend:
+    - role: system
+      content: "You are a helpful assistant."
+  append:
+    - role: user
+      content: "Cite your sources."
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `prepend` | list | `[]` | Messages inserted at the beginning of `messages` (system role only) |
+| `append` | list | `[]` | Messages added at the end of `messages` (system or user role) |
+| `on_invalid` | string | `"continue"` | `"continue"` passes non-JSON through; `"reject"` returns 400 |
+| `max_body_bytes` | integer | 10485760 | Maximum body size to buffer (10 MiB) |
+
+At least one of `prepend` or `append` must be non-empty.
+Each message has a `role` (system or user) and a
+non-empty `content` string. JSON is re-serialized, so
+byte-for-byte body identity is not preserved. In chains
+that also use `json_body_field` or `model_to_header`,
+place `prompt_enrich` first.
 
 ### Conditions
 
