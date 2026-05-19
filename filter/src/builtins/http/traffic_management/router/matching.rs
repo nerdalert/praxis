@@ -20,6 +20,7 @@ pub(super) fn route_matches_request(
     path: &str,
     host: Option<&str>,
     req_headers: &HeaderMap,
+    multi_level_subdomain: bool,
 ) -> bool {
     let route = &resolved.route;
     match &route.path_match {
@@ -37,7 +38,7 @@ pub(super) fn route_matches_request(
     let host_ok = match &route.host {
         Some(h) => host.is_some_and(|req_host| {
             let req_host = strip_port(req_host);
-            host_matches(h, resolved.wildcard_suffix.as_deref(), req_host)
+            host_matches(h, resolved.wildcard_suffix.as_deref(), req_host, multi_level_subdomain)
         }),
         None => true,
     };
@@ -85,7 +86,12 @@ pub(super) fn should_stop_early(best: Option<(Specificity, &Route)>, route: &Rou
 /// (e.g. `*.example.com`) and `wildcard_suffix` holds the
 /// pre-lowercased suffix (`.example.com`). `None` for exact hosts
 /// or routes without a host constraint.
-fn host_matches(pattern: &str, wildcard_suffix: Option<&str>, host: &str) -> bool {
+///
+/// By default, wildcards match single-level subdomains only
+/// (`*.example.com` matches `foo.example.com` but not
+/// `foo.bar.example.com`). When `multi_level` is `true`, wildcards
+/// use suffix matching at any depth.
+fn host_matches(pattern: &str, wildcard_suffix: Option<&str>, host: &str, multi_level: bool) -> bool {
     if let Some(suffix) = wildcard_suffix {
         if host.len() <= suffix.len() {
             return false;
@@ -95,7 +101,7 @@ fn host_matches(pattern: &str, wildcard_suffix: Option<&str>, host: &str) -> boo
             return false;
         }
         let subdomain = &host[..host.len() - suffix.len()];
-        !subdomain.is_empty() && !subdomain.contains('.')
+        !subdomain.is_empty() && (multi_level || !subdomain.contains('.'))
     } else {
         host.eq_ignore_ascii_case(pattern)
     }
