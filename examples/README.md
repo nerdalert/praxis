@@ -42,6 +42,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
+| [a2a-classifier-routing.yaml](configs/payload-processing/a2a-classifier-routing.yaml) | Route A2A requests by method, family, task ID, and streaming detection |
 | [ai-inference-body-based-routing.yaml](configs/payload-processing/ai-inference-body-based-routing.yaml) | Route LLM requests by model field in JSON body |
 | [json-rpc-routing.yaml](configs/payload-processing/json-rpc-routing.yaml) | Route JSON-RPC 2.0 requests by method for MCP and A2A protocols |
 | [mcp-classifier-routing.yaml](configs/payload-processing/mcp-classifier-routing.yaml) | Route MCP requests by body-derived method and tool name |
