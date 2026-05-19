@@ -481,7 +481,7 @@ fn route_matches_request_path_only_hit() {
         wildcard_suffix: None,
     };
     assert!(
-        route_matches_request(&resolved, "/api/users", None, &HeaderMap::new()),
+        route_matches_request(&resolved, "/api/users", None, &HeaderMap::new(), false),
         "path-only route should match when prefix matches"
     );
 }
@@ -495,7 +495,7 @@ fn route_matches_request_path_miss() {
         wildcard_suffix: None,
     };
     assert!(
-        !route_matches_request(&resolved, "/other", None, &HeaderMap::new()),
+        !route_matches_request(&resolved, "/other", None, &HeaderMap::new(), false),
         "path-only route should not match when prefix differs"
     );
 }
@@ -516,7 +516,7 @@ fn route_matches_request_host_hit() {
         wildcard_suffix: None,
     };
     assert!(
-        route_matches_request(&resolved, "/", Some("example.com"), &HeaderMap::new()),
+        route_matches_request(&resolved, "/", Some("example.com"), &HeaderMap::new(), false),
         "host-constrained route should match when host is equal"
     );
 }
@@ -537,7 +537,7 @@ fn route_matches_request_host_miss() {
         wildcard_suffix: None,
     };
     assert!(
-        !route_matches_request(&resolved, "/", Some("other.com"), &HeaderMap::new()),
+        !route_matches_request(&resolved, "/", Some("other.com"), &HeaderMap::new(), false),
         "host-constrained route should not match when host differs"
     );
 }
@@ -558,7 +558,7 @@ fn route_matches_request_host_miss_when_no_host() {
         wildcard_suffix: None,
     };
     assert!(
-        !route_matches_request(&resolved, "/", None, &HeaderMap::new()),
+        !route_matches_request(&resolved, "/", None, &HeaderMap::new(), false),
         "host-constrained route should not match when no host is provided"
     );
 }
@@ -581,7 +581,7 @@ fn route_matches_request_header_hit() {
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-key", HeaderValue::from_static("val"));
     assert!(
-        route_matches_request(&resolved, "/", None, &hdrs),
+        route_matches_request(&resolved, "/", None, &hdrs, false),
         "header-constrained route should match when header is present"
     );
 }
@@ -604,7 +604,7 @@ fn route_matches_request_header_miss() {
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-key", HeaderValue::from_static("wrong"));
     assert!(
-        !route_matches_request(&resolved, "/", None, &hdrs),
+        !route_matches_request(&resolved, "/", None, &hdrs, false),
         "header-constrained route should not match when header value differs"
     );
 }
@@ -627,15 +627,15 @@ fn route_matches_request_compound() {
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-ver", HeaderValue::from_static("2"));
     assert!(
-        route_matches_request(&resolved, "/api/data", Some("example.com"), &hdrs),
+        route_matches_request(&resolved, "/api/data", Some("example.com"), &hdrs, false),
         "compound route should match when path, host, and header all match"
     );
     assert!(
-        !route_matches_request(&resolved, "/api/data", Some("other.com"), &hdrs),
+        !route_matches_request(&resolved, "/api/data", Some("other.com"), &hdrs, false),
         "compound route should fail when host mismatches"
     );
     assert!(
-        !route_matches_request(&resolved, "/other", Some("example.com"), &hdrs),
+        !route_matches_request(&resolved, "/other", Some("example.com"), &hdrs, false),
         "compound route should fail when path mismatches"
     );
 }
@@ -777,7 +777,7 @@ fn wildcard_host_does_not_match_bare_domain() {
 }
 
 #[test]
-fn wildcard_host_does_not_match_multi_level_subdomain() {
+fn wildcard_host_rejects_multi_level_subdomain_by_default() {
     let router = make_router(vec![Route {
         path_match: PathMatch::Prefix {
             path_prefix: "/".to_owned(),
@@ -791,7 +791,27 @@ fn wildcard_host_does_not_match_multi_level_subdomain() {
         router
             .match_route("/", Some("a.b.example.com"), &HeaderMap::new())
             .is_none(),
-        "*.example.com should not match multi-level subdomain a.b.example.com"
+        "*.example.com should not match multi-level subdomain by default"
+    );
+}
+
+#[test]
+fn wildcard_host_matches_multi_level_with_flag() {
+    let router = make_router(vec![Route {
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some("*.example.com".to_owned()),
+        headers: None,
+        cluster: "wildcard".into(),
+    }])
+    .with_multi_level_subdomain_matching(true);
+
+    assert!(
+        router
+            .match_route("/", Some("a.b.example.com"), &HeaderMap::new())
+            .is_some(),
+        "*.example.com should match multi-level subdomain when flag is enabled"
     );
 }
 

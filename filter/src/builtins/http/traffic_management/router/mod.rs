@@ -90,6 +90,9 @@ pub struct RouterFilter {
     #[allow(dead_code, reason = "alias config is validated before header promotion is wired")]
     json_alias_header: HeaderName,
 
+    /// Enable multi-level subdomain matching for wildcard hosts.
+    multi_level_subdomain_matching: bool,
+
     /// Ordered route table with pre-computed wildcard suffixes.
     routes: Vec<ResolvedRoute>,
 }
@@ -198,8 +201,20 @@ impl RouterFilter {
             has_json_alias_routes,
             json_alias_max_body_bytes,
             json_alias_header,
+            multi_level_subdomain_matching: false,
             routes: resolved,
         })
+    }
+
+    /// Enable multi-level subdomain matching for wildcard hosts.
+    ///
+    /// By default, `*.example.com` matches only `foo.example.com`.
+    /// When enabled, it also matches `foo.bar.example.com` (suffix
+    /// match), as required by Gateway API.
+    #[must_use]
+    pub fn with_multi_level_subdomain_matching(mut self, enabled: bool) -> Self {
+        self.multi_level_subdomain_matching = enabled;
+        self
     }
 
     /// Create a router from parsed YAML config.
@@ -211,11 +226,9 @@ impl RouterFilter {
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: RouterConfig = crate::parse_filter_config("router", config)?;
-        Ok(Box::new(Self::with_alias_options(
-            cfg.routes,
-            &cfg.json_alias_header,
-            cfg.json_alias_max_body_bytes,
-        )?))
+        let router = Self::with_alias_options(cfg.routes, &cfg.json_alias_header, cfg.json_alias_max_body_bytes)?
+            .with_multi_level_subdomain_matching(cfg.multi_level_subdomain_matching);
+        Ok(Box::new(router))
     }
 
     /// Find the best matching route for the given path, host, and headers.
@@ -227,7 +240,7 @@ impl RouterFilter {
 
         for resolved in &self.routes {
             let route = &resolved.route;
-            if !route_matches_request(resolved, path, host, req_headers) {
+            if !route_matches_request(resolved, path, host, req_headers, self.multi_level_subdomain_matching) {
                 continue;
             }
             best = update_best_match(best, route);
