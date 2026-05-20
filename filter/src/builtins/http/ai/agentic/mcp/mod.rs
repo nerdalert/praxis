@@ -29,12 +29,10 @@ use self::{
     config::{InvalidMcpBehavior, McpConfig, MismatchBehavior, MissingHeaderBehavior, build_config},
     envelope::{McpEnvelope, extract_mcp_envelope},
 };
+use super::json_rpc::{config::JsonRpcConfig, contains_control_chars, envelope::parse_json_rpc_value};
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
-    builtins::http::payload_processing::json_rpc::{
-        config::JsonRpcConfig, contains_control_chars, envelope::parse_json_rpc_value,
-    },
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -182,9 +180,7 @@ impl HttpFilter for McpFilter {
 
 /// Build a `JsonRpcConfig` for the shared parser with MCP-appropriate defaults.
 fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
-    use crate::builtins::http::payload_processing::json_rpc::config::{
-        BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders,
-    };
+    use super::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
 
     JsonRpcConfig {
         max_body_bytes,
@@ -200,10 +196,10 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
 
 /// Handle JSON-RPC parse errors, separating batch rejection from general errors.
 fn handle_parse_error(
-    e: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcParseError,
+    e: &super::json_rpc::envelope::JsonRpcParseError,
     config: &McpConfig,
 ) -> Result<FilterAction, FilterError> {
-    use crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcParseError;
+    use super::json_rpc::envelope::JsonRpcParseError;
 
     match e {
         JsonRpcParseError::UnsupportedBatch | JsonRpcParseError::EmptyBatch => {
@@ -228,7 +224,7 @@ fn handle_non_mcp(config: &McpConfig) -> Result<FilterAction, FilterError> {
 /// Selector-bearing methods cannot be trusted when the selector is absent or malformed.
 fn reject_missing_required_selector(
     mcp: &McpEnvelope,
-    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+    envelope: &super::json_rpc::envelope::JsonRpcEnvelope,
     config: &McpConfig,
 ) -> Option<FilterAction> {
     let requires = mcp.method.requires_name() || mcp.method.requires_uri();
@@ -249,7 +245,7 @@ fn reject_missing_required_selector(
 fn validate_mcp_headers(
     ctx: &mut HttpFilterContext<'_>,
     mcp: &McpEnvelope,
-    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+    envelope: &super::json_rpc::envelope::JsonRpcEnvelope,
     config: &McpConfig,
 ) -> Result<(), FilterAction> {
     validate_single_header(ctx, "mcp-method", mcp.method.as_str(), envelope, config)?;
@@ -275,7 +271,7 @@ fn validate_single_header(
     ctx: &mut HttpFilterContext<'_>,
     header_name: &str,
     body_value: &str,
-    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+    envelope: &super::json_rpc::envelope::JsonRpcEnvelope,
     config: &McpConfig,
 ) -> Result<(), FilterAction> {
     match ctx.request.headers.get(header_name) {
@@ -322,26 +318,22 @@ fn validate_single_header(
 }
 
 /// Build the JSON-RPC error -32602 (`InvalidParams`) rejection.
-fn mcp_invalid_params_rejection(
-    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
-) -> FilterAction {
+fn mcp_invalid_params_rejection(envelope: &super::json_rpc::envelope::JsonRpcEnvelope) -> FilterAction {
     mcp_json_rpc_error_rejection(envelope, -32602, "InvalidParams")
 }
 
 /// Build the JSON-RPC error -32001 (`HeaderMismatch`) rejection.
-fn mcp_header_mismatch_rejection(
-    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
-) -> FilterAction {
+fn mcp_header_mismatch_rejection(envelope: &super::json_rpc::envelope::JsonRpcEnvelope) -> FilterAction {
     mcp_json_rpc_error_rejection(envelope, -32001, "HeaderMismatch")
 }
 
 /// MCP rejections preserve JSON-RPC IDs so clients can correlate errors.
 fn mcp_json_rpc_error_rejection(
-    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+    envelope: &super::json_rpc::envelope::JsonRpcEnvelope,
     code: i32,
     message: &str,
 ) -> FilterAction {
-    use crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcIdKind;
+    use super::json_rpc::envelope::JsonRpcIdKind;
 
     let id_json = match (&envelope.id, &envelope.id_kind) {
         (Some(id), JsonRpcIdKind::Integer | JsonRpcIdKind::Number) => id.clone(),
@@ -361,7 +353,7 @@ fn mcp_json_rpc_error_rejection(
 /// Write durable metadata that persists across all Pingora lifecycle phases.
 fn write_metadata(
     ctx: &mut HttpFilterContext<'_>,
-    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+    envelope: &super::json_rpc::envelope::JsonRpcEnvelope,
     mcp: &McpEnvelope,
 ) {
     let method_str = mcp.method.as_str();
@@ -391,7 +383,7 @@ fn write_metadata(
 /// Promote MCP metadata to internal request headers.
 fn promote_mcp_headers(
     mcp: &McpEnvelope,
-    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+    envelope: &super::json_rpc::envelope::JsonRpcEnvelope,
     config: &McpConfig,
     headers: &mut Vec<(Cow<'static, str>, String)>,
 ) {
@@ -422,7 +414,7 @@ fn promote_mcp_headers(
 /// Promote MCP metadata to filter results for router branch conditions.
 fn promote_filter_results(
     ctx: &mut HttpFilterContext<'_>,
-    envelope: &crate::builtins::http::payload_processing::json_rpc::envelope::JsonRpcEnvelope,
+    envelope: &super::json_rpc::envelope::JsonRpcEnvelope,
     mcp: &McpEnvelope,
 ) -> Result<(), FilterError> {
     let results = ctx.filter_results.entry("mcp").or_default();
