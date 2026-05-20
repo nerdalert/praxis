@@ -139,7 +139,9 @@ impl HttpFilter for LoadBalancerFilter {
             warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
         }
 
-        let addr = entry.strategy.select(ctx, health);
+        let addr = entry.strategy.select(ctx, health).ok_or_else(|| -> FilterError {
+            format!("load_balancer filter: cluster '{cluster_name}' has no available endpoints").into()
+        })?;
         debug!(cluster = %cluster_name, upstream = %addr, "upstream selected");
 
         if let Some(h) = health {

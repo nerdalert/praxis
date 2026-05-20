@@ -9,6 +9,7 @@ pub use test_utils::load_example_config;
 
 mod access_logging;
 mod admin_interface;
+mod agentic_routing;
 mod api_key_filter;
 mod basic_reverse_proxy;
 mod canary_routing;
@@ -30,6 +31,8 @@ mod multi_listener;
 mod path_based_routing;
 mod path_rewriting;
 mod payload_processing;
+#[cfg(feature = "ai-inference")]
+mod prompt_enrichment;
 mod protocols;
 mod redirect;
 mod round_robin;

@@ -39,6 +39,16 @@ pub(super) struct RouterConfig {
     /// Route table entries.
     #[serde(default)]
     pub routes: Vec<RouterRouteConfig>,
+
+    /// Enable multi-level subdomain matching for wildcard hosts.
+    ///
+    /// When `false` (default), `*.example.com` matches only single-level
+    /// subdomains like `foo.example.com`. When `true`, it also matches
+    /// multi-level subdomains like `foo.bar.example.com` (suffix match).
+    ///
+    /// Some control planes (e.g. Kubernetes Gateway API) require this.
+    #[serde(default)]
+    pub multi_level_subdomain_matching: bool,
 }
 
 /// Router-owned route config so JSON body aliasing stays out of

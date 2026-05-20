@@ -40,17 +40,16 @@ async-trait = "0.1.89"
 benchmarks = { path = "benchmarks" }
 bytes = "1.11.1"
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
-dashmap = "6.1.0"
+dashmap = "6.2.1"
 clap = { version = "4.6.1", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 futures = "0.3.32"
 h2 = "0.4.14"
 http = "1.4.0"
 metrics = "0.24.6"
-metrics-exporter-prometheus = { version = "0.16.2", default-features = false }
-# Pinned to match Pingora's dependency.
-nix = "0.24.3"
-notify = "7.0.0"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
+notify = "8.2.0"
 # Temporary fork: custom ServerConfig (PR #726) + WrappedX509::parse() for per-cluster CA.
 pingora-core = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "d066f6818038dc296326566afb8e7bf39fb463ff", features = ["rustls"] }
 pingora-http = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "d066f6818038dc296326566afb8e7bf39fb463ff" }
@@ -71,7 +70,7 @@ praxis-tls = { version = "0.3.1", path = "tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.149"
-rcgen = "0.13.2"
+rcgen = "0.14.8"
 regex = "1.12.3"
 rustls = "0.23.40"
 rustls-pemfile = "2.2.0"

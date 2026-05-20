@@ -147,6 +147,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         "model_to_header",
         crate::builtins::ModelToHeaderFilter::from_config,
     );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "prompt_enrich",
+        crate::builtins::PromptEnrichFilter::from_config,
+    );
 }
 
 /// Register a single HTTP filter factory by name.
@@ -258,6 +264,8 @@ mod tests {
             names.contains(&"model_to_header"),
             "model_to_header should be registered"
         );
+        #[cfg(feature = "ai-inference")]
+        assert!(names.contains(&"prompt_enrich"), "prompt_enrich should be registered");
     }
 
     #[test]

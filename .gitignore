@@ -16,6 +16,7 @@ tests/fuzz/corpus/
 
 # LLVM coverage artifacts
 coverage/
+coverage.json
 *.profraw
 *.profdata
 

@@ -36,11 +36,11 @@ impl Strategy {
     ///
     /// For HTTP, the caller extracts the key from headers or URI path.
     /// For TCP, the caller typically passes the client IP address.
-    pub(crate) fn select(&self, hash_key: Option<&str>, health: Option<&ClusterHealthState>) -> Arc<str> {
+    pub(crate) fn select(&self, hash_key: Option<&str>, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
         match self {
             Self::RoundRobin(rr) => rr.select(health),
-            Self::LeastConnections(lc) => lc.select(health),
-            Self::ConsistentHash(ch) => ch.select(hash_key, health),
+            Self::LeastConnections(lc) => Some(lc.select(health)),
+            Self::ConsistentHash(ch) => Some(ch.select(hash_key, health)),
         }
     }
 

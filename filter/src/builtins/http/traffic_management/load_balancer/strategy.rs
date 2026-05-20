@@ -27,7 +27,7 @@ pub(super) struct Strategy {
 
 impl Strategy {
     /// Pick the next endpoint address, skipping unhealthy endpoints.
-    pub(super) fn select(&self, ctx: &HttpFilterContext<'_>, health: Option<&ClusterHealthState>) -> Arc<str> {
+    pub(super) fn select(&self, ctx: &HttpFilterContext<'_>, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
         let hash_key = self.extract_hash_key(ctx);
         self.inner.select(hash_key, health)
     }

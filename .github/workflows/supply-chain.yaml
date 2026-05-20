@@ -23,7 +23,7 @@ jobs:
   # ----------------------------------------------------------------------------
 
   security-audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -49,7 +49,7 @@ jobs:
   # ----------------------------------------------------------------------------
 
   dependency-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:

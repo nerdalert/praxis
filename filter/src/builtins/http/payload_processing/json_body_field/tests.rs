@@ -310,13 +310,11 @@ fn body_access_is_read_only() {
 
 #[test]
 fn body_mode_is_stream_buffer_with_default_limit() {
-    use super::config::DEFAULT_MAX_BODY_BYTES;
-
     let filter = make_filter("f", "H");
     assert_eq!(
         filter.request_body_mode(),
         crate::body::BodyMode::StreamBuffer {
-            max_bytes: Some(DEFAULT_MAX_BODY_BYTES)
+            max_bytes: Some(crate::body::DEFAULT_JSON_BODY_MAX_BYTES)
         },
         "body mode should be StreamBuffer with 10 MiB default limit"
     );
@@ -561,7 +559,7 @@ async fn non_json_body_continues() {
 /// Build a single-mapping filter for testing.
 fn make_filter(field: &str, header: &str) -> JsonBodyFieldFilter {
     JsonBodyFieldFilter {
-        max_body_bytes: super::config::DEFAULT_MAX_BODY_BYTES,
+        max_body_bytes: crate::body::DEFAULT_JSON_BODY_MAX_BYTES,
         mappings: vec![(field.to_owned(), header.to_owned())],
     }
 }
@@ -569,7 +567,7 @@ fn make_filter(field: &str, header: &str) -> JsonBodyFieldFilter {
 /// Build a multi-mapping filter for testing.
 fn make_multi_filter(mappings: &[(&str, &str)]) -> JsonBodyFieldFilter {
     JsonBodyFieldFilter {
-        max_body_bytes: super::config::DEFAULT_MAX_BODY_BYTES,
+        max_body_bytes: crate::body::DEFAULT_JSON_BODY_MAX_BYTES,
         mappings: mappings
             .iter()
             .map(|(f, h)| ((*f).to_owned(), (*h).to_owned()))

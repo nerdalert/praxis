@@ -141,7 +141,9 @@ impl TcpFilter for TcpLoadBalancerFilter {
         }
 
         let client_ip = ctx.remote_addr.rsplit_once(':').map_or(ctx.remote_addr, |(ip, _)| ip);
-        let addr = strategy.select(Some(client_ip), health);
+        let addr = strategy.select(Some(client_ip), health).ok_or_else(|| -> FilterError {
+            format!("tcp_load_balancer: cluster '{cluster_name}' has no available endpoints").into()
+        })?;
         debug!(cluster = %cluster_name, upstream = %addr, "TCP upstream selected");
 
         ctx.upstream_addr = Some(Cow::Owned(addr.to_string()));
@@ -426,6 +428,17 @@ clusters:
             bytes_out: 0,
         };
         lb.on_disconnect(&mut ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn on_connect_errors_when_cluster_has_no_endpoints() {
+        let lb = TcpLoadBalancerFilter::new(&[test_cluster("empty", &[])]);
+        let mut ctx = make_ctx("empty");
+        let err = lb.on_connect(&mut ctx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("no available endpoints"),
+            "error should mention no available endpoints: {err}"
+        );
     }
 
     // -------------------------------------------------------------------------

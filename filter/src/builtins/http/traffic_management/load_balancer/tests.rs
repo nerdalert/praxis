@@ -342,7 +342,7 @@ fn build_cluster_entry_preserves_endpoints_via_selection() {
     let ctx = crate::test_utils::make_filter_context(&req);
     let mut seen = std::collections::HashSet::new();
     for _ in 0..3 {
-        seen.insert(entry.strategy.select(&ctx, None).to_string());
+        seen.insert(entry.strategy.select(&ctx, None).unwrap().to_string());
     }
     assert_eq!(seen.len(), 3, "all three endpoints should be reachable");
 }
@@ -368,7 +368,7 @@ fn build_cluster_entry_preserves_weights_via_distribution() {
     let mut counts = HashMap::new();
     for _ in 0..8 {
         *counts
-            .entry(entry.strategy.select(&ctx, None).to_string())
+            .entry(entry.strategy.select(&ctx, None).unwrap().to_string())
             .or_insert(0u32) += 1;
     }
     assert_eq!(
@@ -469,6 +469,20 @@ async fn tls_and_sni_wired_from_cluster() {
         upstream.tls.as_ref().unwrap().sni(),
         Some("api.example.com"),
         "SNI should match cluster config"
+    );
+}
+
+#[tokio::test]
+async fn on_request_errors_when_cluster_has_no_endpoints() {
+    let lb = LoadBalancerFilter::new(&[test_cluster("empty", &[])]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("empty"));
+    let result = lb.on_request(&mut ctx).await;
+    assert!(result.is_err(), "empty cluster should produce error");
+    assert!(
+        result.unwrap_err().to_string().contains("no available endpoints"),
+        "error should mention no available endpoints"
     );
 }
 

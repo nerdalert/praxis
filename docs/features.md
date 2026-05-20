@@ -73,6 +73,11 @@
   bodies and promotes values to request headers, enabling
   AI inference model routing, content-based cluster
   selection, and request classification.
+- **Prompt enrichment**: inject system or user messages
+  into OpenAI-compatible chat completion request bodies
+  at the proxy layer. Static configured messages are
+  prepended or appended to the `messages` array before
+  forwarding upstream.
 - **Response compression**: gzip, brotli, and zstd
   response compression with per-algorithm levels,
   content type filtering, and minimum size thresholds.

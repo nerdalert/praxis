@@ -45,17 +45,19 @@ impl RoundRobin {
     /// endpoint list to find the matching weight bucket. Falls back to
     /// all endpoints (panic mode) when every endpoint is unhealthy.
     #[inline]
-    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Arc<str> {
-        debug_assert!(!self.endpoints.is_empty(), "round-robin requires at least one endpoint");
+    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
+        if self.total_weight == 0 {
+            return None;
+        }
         let tick = self.counter.fetch_add(1, Ordering::Relaxed);
 
         if let Some(state) = health
             && let Some(addr) = self.select_healthy(tick, state)
         {
-            return addr;
+            return Some(addr);
         }
 
-        select_by_weight(&self.endpoints, tick, self.total_weight)
+        Some(select_by_weight(&self.endpoints, tick, self.total_weight))
     }
 
     /// Attempt weighted selection among only healthy endpoints.
@@ -128,9 +130,9 @@ mod tests {
             weight: 1,
             index: 0,
         }]);
-        assert_eq!(&*rr.select(None), "127.0.0.1:8080", "select #1");
-        assert_eq!(&*rr.select(None), "127.0.0.1:8080", "select #2");
-        assert_eq!(&*rr.select(None), "127.0.0.1:8080", "select #3");
+        assert_eq!(&*rr.select(None).unwrap(), "127.0.0.1:8080", "select #1");
+        assert_eq!(&*rr.select(None).unwrap(), "127.0.0.1:8080", "select #2");
+        assert_eq!(&*rr.select(None).unwrap(), "127.0.0.1:8080", "select #3");
     }
 
     #[test]
@@ -152,10 +154,14 @@ mod tests {
                 index: 2,
             },
         ]);
-        assert_eq!(&*rr.select(None), "127.0.0.1:8080", "cycle 1: first endpoint");
-        assert_eq!(&*rr.select(None), "127.0.0.1:8081", "cycle 1: second endpoint");
-        assert_eq!(&*rr.select(None), "127.0.0.1:8082", "cycle 1: third endpoint");
-        assert_eq!(&*rr.select(None), "127.0.0.1:8080", "cycle 2: should wrap to first");
+        assert_eq!(&*rr.select(None).unwrap(), "127.0.0.1:8080", "cycle 1: first endpoint");
+        assert_eq!(&*rr.select(None).unwrap(), "127.0.0.1:8081", "cycle 1: second endpoint");
+        assert_eq!(&*rr.select(None).unwrap(), "127.0.0.1:8082", "cycle 1: third endpoint");
+        assert_eq!(
+            &*rr.select(None).unwrap(),
+            "127.0.0.1:8080",
+            "cycle 2: should wrap to first"
+        );
     }
 
     #[test]
@@ -175,7 +181,7 @@ mod tests {
 
         let mut counts = std::collections::HashMap::new();
         for _ in 0..4 {
-            *counts.entry(rr.select(None)).or_insert(0u32) += 1;
+            *counts.entry(rr.select(None).unwrap()).or_insert(0u32) += 1;
         }
         assert_eq!(
             counts.get("10.0.0.1:80").copied().unwrap_or(0),
@@ -221,7 +227,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
 
         assert_eq!(
-            &*rr.select(Some(&state)),
+            &*rr.select(Some(&state)).unwrap(),
             "10.0.0.2:80",
             "should skip unhealthy endpoint 0"
         );
@@ -260,7 +266,7 @@ mod tests {
 
         let mut counts = std::collections::HashMap::new();
         for _ in 0..20 {
-            let selected = rr.select(Some(&state));
+            let selected = rr.select(Some(&state)).unwrap();
             assert_ne!(
                 &*selected, "10.0.0.2:80",
                 "unhealthy endpoint B should never be selected"
@@ -299,10 +305,49 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
 
-        let selected = rr.select(Some(&state));
+        let selected = rr.select(Some(&state)).unwrap();
         assert!(
             &*selected == "10.0.0.1:80" || &*selected == "10.0.0.2:80",
             "panic mode should still return an endpoint"
+        );
+    }
+
+    #[test]
+    fn empty_endpoints_returns_none() {
+        let rr = RoundRobin::new(vec![]);
+        assert!(
+            rr.select(None).is_none(),
+            "empty endpoint list should return None instead of panicking"
+        );
+    }
+
+    #[test]
+    fn empty_endpoints_with_health_returns_none() {
+        let rr = RoundRobin::new(vec![]);
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(vec![], vec![], None, None));
+        assert!(
+            rr.select(Some(&state)).is_none(),
+            "empty endpoint list with health state should return None"
+        );
+    }
+
+    #[test]
+    fn all_zero_weight_returns_none() {
+        let rr = RoundRobin::new(vec![
+            WeightedEndpoint {
+                address: Arc::from("10.0.0.1:80"),
+                weight: 0,
+                index: 0,
+            },
+            WeightedEndpoint {
+                address: Arc::from("10.0.0.2:80"),
+                weight: 0,
+                index: 1,
+            },
+        ]);
+        assert!(
+            rr.select(None).is_none(),
+            "all-zero-weight endpoints should return None (total_weight is 0)"
         );
     }
 }
