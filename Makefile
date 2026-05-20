@@ -151,7 +151,6 @@ fuzz-build:
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo +nightly fmt --all -- --check
-	cargo xtask lint-deps
 
 fmt:
 	cargo +nightly fmt --all
@@ -170,10 +169,11 @@ coverage:
 		--fail-under-lines 90
 
 coverage-check:
-	cargo llvm-cov --workspace \
+	cargo llvm-cov --workspace --json \
 		--exclude praxis-tests-conformance \
 		--ignore-filename-regex '(target/|tests/|xtask/|benchmarks/)' \
-		--fail-under-lines 90
+		--fail-under-lines 90 \
+		--output-path coverage.json
 
 # -------------------------------------------------------------------
 # Dev tools

@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -48,3 +49,134 @@ jobs:
 
       - name: Check coverage (≥90% lines)
         run: make coverage-check
+
+      - name: Upload baseline
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-baseline
+          path: coverage.json
+          overwrite: true
+
+      - name: Rename PR coverage
+        if: github.event_name == 'pull_request'
+        run: cp coverage.json pr-coverage.json
+
+      - name: Download baseline
+        if: github.event_name == 'pull_request'
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_id=$(gh api "repos/${{ github.repository }}/actions/workflows/coverage.yaml/runs?branch=main&status=success&per_page=1" \
+            --jq '.workflow_runs[0].id // empty')
+          if [ -z "$run_id" ]; then
+            echo "status=missing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          artifact_id=$(gh api "repos/${{ github.repository }}/actions/runs/${run_id}/artifacts" \
+            --jq '.artifacts[] | select(.name == "coverage-baseline") | .id // empty')
+          if [ -z "$artifact_id" ]; then
+            echo "status=missing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          gh api "repos/${{ github.repository }}/actions/artifacts/${artifact_id}/zip" > baseline.zip
+          unzip -o baseline.zip -d .
+          mv coverage.json base-coverage.json
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+
+      - name: Post coverage comment
+        if: >-
+          github.event_name == 'pull_request' &&
+          steps.baseline.outputs.status == 'ok'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          pr_lines=$(jq '.data[0].totals.lines.percent' pr-coverage.json)
+          pr_covered=$(jq '.data[0].totals.lines.covered' pr-coverage.json)
+          pr_count=$(jq '.data[0].totals.lines.count' pr-coverage.json)
+          pr_functions=$(jq '.data[0].totals.functions.percent' pr-coverage.json)
+
+          base_lines=$(jq '.data[0].totals.lines.percent' base-coverage.json)
+          base_covered=$(jq '.data[0].totals.lines.covered' base-coverage.json)
+          base_count=$(jq '.data[0].totals.lines.count' base-coverage.json)
+          base_functions=$(jq '.data[0].totals.functions.percent' base-coverage.json)
+
+          lines_delta=$(awk "BEGIN {printf \"%.2f\", ${pr_lines} - ${base_lines}}")
+          functions_delta=$(awk "BEGIN {printf \"%.2f\", ${pr_functions} - ${base_functions}}")
+
+          pr_lines_fmt=$(awk "BEGIN {printf \"%.2f\", ${pr_lines}}")
+          base_lines_fmt=$(awk "BEGIN {printf \"%.2f\", ${base_lines}}")
+          pr_functions_fmt=$(awk "BEGIN {printf \"%.2f\", ${pr_functions}}")
+          base_functions_fmt=$(awk "BEGIN {printf \"%.2f\", ${base_functions}}")
+
+          if awk "BEGIN {exit !(${lines_delta} > 0.01)}"; then
+            lines_delta_fmt="+${lines_delta}"
+          else
+            lines_delta_fmt="${lines_delta}"
+          fi
+
+          if awk "BEGIN {exit !(${functions_delta} > 0.01)}"; then
+            functions_delta_fmt="+${functions_delta}"
+          else
+            functions_delta_fmt="${functions_delta}"
+          fi
+
+          marker="<!-- praxis:coverage-comparison -->"
+          existing_id=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq "[.[] | select(.body | contains(\"${marker}\"))] | .[0].id // empty")
+          if [ -n "$existing_id" ]; then
+            gh api -X DELETE "repos/${{ github.repository }}/issues/comments/${existing_id}"
+          fi
+
+          body=$(cat <<EOF
+          ${marker}
+          ### Coverage Report
+
+          | Metric | Base | PR | Delta |
+          |--------|------|----|-------|
+          | Lines | ${base_lines_fmt}% | ${pr_lines_fmt}% | ${lines_delta_fmt}% |
+          | Functions | ${base_functions_fmt}% | ${pr_functions_fmt}% | ${functions_delta_fmt}% |
+
+          **Lines covered**: ${pr_covered}/${pr_count} (base: ${base_covered}/${base_count})
+
+          > Coverage gate: 90% lines (enforced by \`make coverage-check\`)
+          EOF
+          )
+          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+
+      - name: Post comment (no baseline)
+        if: >-
+          github.event_name == 'pull_request' &&
+          steps.baseline.outputs.status == 'missing'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          pr_lines=$(jq '.data[0].totals.lines.percent' pr-coverage.json)
+          pr_lines_fmt=$(awk "BEGIN {printf \"%.2f\", ${pr_lines}}")
+
+          marker="<!-- praxis:coverage-comparison -->"
+          existing_id=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq "[.[] | select(.body | contains(\"${marker}\"))] | .[0].id // empty")
+          if [ -n "$existing_id" ]; then
+            gh api -X DELETE "repos/${{ github.repository }}/issues/comments/${existing_id}"
+          fi
+
+          body=$(cat <<EOF
+          ${marker}
+          ### Coverage Report
+
+          **Lines**: ${pr_lines_fmt}%
+
+          No baseline available from \`main\`. Coverage recorded; trend comparison skipped.
+
+          > A baseline will be created on the next push to \`main\`.
+          EOF
+          )
+          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
