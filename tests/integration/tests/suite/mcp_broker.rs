@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Integration tests for MCP gateway static catalog/broker behavior.
+//! Integration tests for MCP static catalog and broker behavior.
+
+use std::collections::HashMap;
 
 use praxis_core::config::Config;
-use praxis_test_utils::{free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_proxy};
+use praxis_test_utils::{
+    free_port, http_send, load_example_config, parse_body, parse_status, start_backend_with_shutdown, start_proxy,
+};
 
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
 #[test]
-fn mcp_gateway_initialize_returns_session() {
+fn mcp_broker_initialize_returns_session() {
     let backend_guard = start_backend_with_shutdown("backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -30,9 +34,10 @@ fn mcp_gateway_initialize_returns_session() {
         response_body.contains("protocolVersion"),
         "should contain protocolVersion: {response_body}"
     );
-    assert!(
-        response_body.contains("praxis-mcp-gateway"),
-        "should contain server name: {response_body}"
+    let parsed: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+    assert_eq!(
+        parsed["result"]["serverInfo"]["name"], "praxis",
+        "should contain Praxis server name: {response_body}"
     );
     assert!(
         raw.contains("mcp-session-id:"),
@@ -40,16 +45,16 @@ fn mcp_gateway_initialize_returns_session() {
     );
     assert_ne!(
         response_body, "backend",
-        "response should come from gateway, not backend"
+        "response should come from Praxis, not backend"
     );
 }
 
 #[test]
-fn mcp_gateway_tools_list_returns_prefixed_catalog() {
+fn mcp_broker_tools_list_returns_prefixed_catalog() {
     let backend_guard = start_backend_with_shutdown("backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -80,16 +85,61 @@ fn mcp_gateway_tools_list_returns_prefixed_catalog() {
     );
     assert_ne!(
         response_body, "backend",
-        "response should come from gateway, not backend"
+        "response should come from Praxis, not backend"
     );
 }
 
 #[test]
-fn mcp_gateway_ping_returns_result() {
+fn mcp_broker_example_serves_prefixed_catalog() {
+    let weather_guard = start_backend_with_shutdown("weather");
+    let calendar_guard = start_backend_with_shutdown("calendar");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "payload-processing/mcp-static-catalog.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:3001", weather_guard.port()),
+            ("127.0.0.1:3002", calendar_guard.port()),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &json_post("/mcp", r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#),
+    );
+
+    assert_eq!(parse_status(&raw), 200, "tools/list should return 200");
+    let body = parse_body(&raw);
+    assert!(
+        body.contains("weather_get_weather"),
+        "weather tool should include prefix: {body}"
+    );
+    assert!(
+        body.contains("weather_forecast"),
+        "weather forecast should include prefix: {body}"
+    );
+    assert!(
+        body.contains("cal_create_event"),
+        "calendar create tool should include prefix: {body}"
+    );
+    assert!(
+        body.contains("cal_list_events"),
+        "calendar list tool should include prefix: {body}"
+    );
+    assert!(
+        body.contains(r#""city""#),
+        "example inputSchema should be preserved: {body}"
+    );
+}
+
+#[test]
+fn mcp_broker_ping_returns_result() {
     let backend_guard = start_backend_with_shutdown("backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -110,11 +160,11 @@ fn mcp_gateway_ping_returns_result() {
 }
 
 #[test]
-fn mcp_gateway_initialized_notification_returns_202() {
+fn mcp_broker_initialized_notification_returns_202() {
     let backend_guard = start_backend_with_shutdown("backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -131,11 +181,11 @@ fn mcp_gateway_initialized_notification_returns_202() {
 }
 
 #[test]
-fn mcp_gateway_ping_with_null_id_rejected() {
+fn mcp_broker_ping_with_null_id_rejected() {
     let backend_guard = start_backend_with_shutdown("backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -143,7 +193,11 @@ fn mcp_gateway_ping_with_null_id_rejected() {
     let request = json_post("/mcp", body);
     let raw = http_send(proxy.addr(), &request);
 
-    assert_eq!(parse_status(&raw), 400, "null request ids should be rejected");
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "null request ids should return JSON-RPC errors"
+    );
     let response_body = parse_body(&raw);
     assert!(
         response_body.contains("-32600"),
@@ -156,11 +210,11 @@ fn mcp_gateway_ping_with_null_id_rejected() {
 }
 
 #[test]
-fn mcp_gateway_ping_with_missing_id_rejected() {
+fn mcp_broker_ping_with_missing_id_rejected() {
     let backend_guard = start_backend_with_shutdown("backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -170,8 +224,8 @@ fn mcp_gateway_ping_with_missing_id_rejected() {
 
     assert_eq!(
         parse_status(&raw),
-        400,
-        "request methods without ids should be rejected"
+        200,
+        "request methods without ids should return JSON-RPC errors"
     );
     let response_body = parse_body(&raw);
     assert!(
@@ -181,11 +235,11 @@ fn mcp_gateway_ping_with_missing_id_rejected() {
 }
 
 #[test]
-fn mcp_gateway_unsupported_method_returns_method_not_found() {
+fn mcp_broker_unsupported_method_returns_method_not_found() {
     let backend_guard = start_backend_with_shutdown("backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -193,7 +247,11 @@ fn mcp_gateway_unsupported_method_returns_method_not_found() {
     let request = json_post("/mcp", body);
     let raw = http_send(proxy.addr(), &request);
 
-    assert_eq!(parse_status(&raw), 400, "unsupported method should return 400");
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "unsupported method should return a JSON-RPC error response"
+    );
     let response_body = parse_body(&raw);
     assert!(
         response_body.contains("-32601"),
@@ -202,11 +260,11 @@ fn mcp_gateway_unsupported_method_returns_method_not_found() {
 }
 
 #[test]
-fn mcp_gateway_tools_call_not_forwarded_before_routing() {
+fn mcp_broker_tools_call_not_forwarded_before_routing() {
     let backend_guard = start_backend_with_shutdown("not-reachable-backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -219,8 +277,8 @@ fn mcp_gateway_tools_call_not_forwarded_before_routing() {
     let response_body = parse_body(&raw);
 
     assert_eq!(
-        status, 400,
-        "tools/call should return error status before backend routing is added"
+        status, 200,
+        "tools/call should return a JSON-RPC error response before backend routing is added"
     );
     assert!(
         response_body.contains("-32601"),
@@ -233,18 +291,18 @@ fn mcp_gateway_tools_call_not_forwarded_before_routing() {
 }
 
 #[test]
-fn mcp_gateway_delete_returns_controlled_response() {
+fn mcp_broker_delete_returns_controlled_response() {
     let backend_guard = start_backend_with_shutdown("backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
     let request = format!(
         "DELETE /mcp HTTP/1.1\r\n\
          Host: localhost\r\n\
-         Mcp-Session-Id: gw-test-session\r\n\
+         Mcp-Session-Id: mcp-test-session\r\n\
          Connection: close\r\n\
          \r\n"
     );
@@ -254,11 +312,11 @@ fn mcp_gateway_delete_returns_controlled_response() {
 }
 
 #[test]
-fn mcp_gateway_wrong_path_returns_404() {
+fn mcp_broker_wrong_path_returns_404() {
     let backend_guard = start_backend_with_shutdown("backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -274,11 +332,11 @@ fn mcp_gateway_wrong_path_returns_404() {
 }
 
 #[test]
-fn mcp_gateway_ping_with_query_param() {
+fn mcp_broker_ping_with_query_param() {
     let backend_guard = start_backend_with_shutdown("not-reachable-backend");
     let proxy_port = free_port();
 
-    let yaml = gateway_yaml(proxy_port, backend_guard.port());
+    let yaml = broker_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -286,7 +344,11 @@ fn mcp_gateway_ping_with_query_param() {
     let request = json_post("/mcp?x=1", body);
     let raw = http_send(proxy.addr(), &request);
 
-    assert_eq!(parse_status(&raw), 200, "POST /mcp?x=1 should match gateway");
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "POST /mcp?x=1 should match configured MCP path"
+    );
     let response_body = parse_body(&raw);
     assert!(
         response_body.contains(r#""result":{}"#),
@@ -315,7 +377,7 @@ fn json_post(path: &str, body: &str) -> String {
     )
 }
 
-fn gateway_yaml(proxy_port: u16, backend_port: u16) -> String {
+fn broker_yaml(proxy_port: u16, backend_port: u16) -> String {
     format!(
         r#"
 listeners:
@@ -325,7 +387,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: mcp_gateway
+      - filter: mcp
         path: /mcp
         max_body_bytes: 65536
         servers:

@@ -127,14 +127,13 @@ pub(super) async fn pre_read_body(
 
         let end_of_stream = chunk.is_none();
         let mut body = chunk;
+        let downstream_chunk_len = body.as_ref().map_or(0, bytes::Bytes::len) as u64;
 
         // Track original downstream bytes before the synthetic EOS
         // body is created. This stays separate from the pipeline's
         // accumulate_body_bytes so the retry guard sees the original
         // size even when a ReadWrite filter shrinks or grows the body.
-        if let Some(ref b) = body {
-            original_body_bytes += b.len() as u64;
-        }
+        original_body_bytes += downstream_chunk_len;
 
         if !released
             && let Some(ref b) = body
@@ -150,11 +149,20 @@ pub(super) async fn pre_read_body(
             buffer = BodyBuffer::new(max_bytes);
         }
 
+        // Seed body byte accounting so filters see accumulated downstream
+        // bytes during pre-read without double-counting the synthetic EOS body.
+        ctx.request_body_bytes = if end_of_stream && !released {
+            0
+        } else {
+            original_body_bytes.saturating_sub(downstream_chunk_len)
+        };
+
         let mut filter_ctx = ctx.build_filter_context(pipeline, request, None);
         let action = pipeline
             .execute_http_request_body(&mut filter_ctx, &mut body, end_of_stream)
             .await;
 
+        ctx.request_body_bytes = original_body_bytes;
         ctx.cluster = filter_ctx.cluster;
         ctx.rewritten_path = filter_ctx.rewritten_path;
         ctx.upstream = filter_ctx.upstream;

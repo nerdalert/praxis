@@ -53,7 +53,7 @@ mod ip_acl;
 mod json_body_field;
 mod json_rpc;
 mod mcp;
-mod mcp_gateway;
+mod mcp_broker;
 mod path_rewrite;
 mod payload_processing;
 mod per_listener_pipeline;

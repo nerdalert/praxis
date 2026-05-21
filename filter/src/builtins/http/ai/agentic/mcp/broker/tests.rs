@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Unit tests for MCP gateway filter.
+//! Unit tests for MCP static catalog filter.
 
 use bytes::Bytes;
 
 use super::{
-    config::{McpGatewayConfig, build_config},
+    config::{McpBrokerConfig, build_config},
     *,
 };
 
@@ -17,14 +17,14 @@ use super::{
 #[test]
 fn parse_minimal_config() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
-    let filter = McpGatewayFilter::from_config(&yaml).unwrap();
-    assert_eq!(filter.name(), "mcp_gateway", "filter name should be mcp_gateway");
+    let filter = McpBrokerFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "mcp", "filter name should be mcp");
 }
 
 #[test]
 fn reject_zero_max_body_bytes() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("max_body_bytes: 0").unwrap();
-    let err = McpGatewayFilter::from_config(&yaml).err().expect("should fail");
+    let err = McpBrokerFilter::from_config(&yaml).err().expect("should fail");
     assert!(
         err.to_string().contains("must be greater than 0"),
         "error should mention max_body_bytes: {err}"
@@ -44,7 +44,7 @@ servers:
     tools:
       - name: forecast
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "duplicate server names should fail");
     assert!(
@@ -61,7 +61,7 @@ servers:
     cluster: cluster1
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "empty server name should fail");
     assert!(
@@ -78,7 +78,7 @@ servers:
     cluster: ""
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "empty cluster should fail");
     assert!(
@@ -96,7 +96,7 @@ servers:
     path: "no-leading-slash"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "path without leading slash should fail");
     assert!(
@@ -114,7 +114,7 @@ servers:
     path: "//evil"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "path starting with // should fail");
     assert!(
@@ -132,7 +132,7 @@ servers:
     path: "/backend/../etc/passwd"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "path with .. traversal should fail");
     assert!(
@@ -150,7 +150,7 @@ servers:
     path: "/backend/%2e%2e/secret"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "percent-encoded .. should fail");
     assert!(
@@ -168,7 +168,7 @@ servers:
     path: "/backend/.%2e/secret"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "mixed-encoded .. should fail");
     assert!(
@@ -186,12 +186,32 @@ servers:
     path: "/backend/%2e./secret"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "reverse mixed-encoded .. should fail");
     assert!(
         result.err().unwrap().to_string().contains("traversal"),
         "error should mention traversal"
+    );
+}
+
+#[test]
+fn server_path_allows_long_dot_segment() {
+    let long_encoded_dot_segment = "%2e".repeat(258);
+    let yaml = format!(
+        r#"
+servers:
+  - name: ok
+    cluster: c
+    path: "/backend/{long_encoded_dot_segment}/resource"
+    tools: []
+"#
+    );
+    let cfg: McpBrokerConfig = serde_yaml::from_str(&yaml).unwrap();
+    let result = build_config(cfg);
+    assert!(
+        result.is_ok(),
+        "long dot-only segments are not '..' traversal and should not overflow"
     );
 }
 
@@ -204,7 +224,7 @@ servers:
     path: "http://example.com/mcp"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "path with scheme/authority should fail");
     assert!(
@@ -219,7 +239,7 @@ fn public_path_with_query_rejected() {
 path: "/mcp?x=1"
 servers: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "public path with query should fail");
     assert!(
@@ -237,7 +257,7 @@ servers:
     path: "/mcp?session=abc"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "server path with query should fail");
     assert!(
@@ -255,7 +275,7 @@ servers:
     path: "/backend/my path"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "path with spaces should fail URI parsing");
     assert!(
@@ -270,7 +290,7 @@ fn public_path_no_leading_slash_rejected() {
 path: "no-slash"
 servers: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "public path without leading slash should fail");
     assert!(
@@ -285,7 +305,7 @@ fn public_path_double_slash_rejected() {
 path: "//evil"
 servers: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "public path with // should fail");
 }
@@ -299,7 +319,7 @@ servers:
     path: "/backend/v1/mcp"
     tools: []
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(build_config(cfg).is_ok(), "valid path should be accepted");
 }
 
@@ -316,7 +336,7 @@ servers:
     tools:
       - name: search
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "duplicate exposed tool names should fail");
     assert!(
@@ -344,7 +364,7 @@ servers:
     tools:
       - name: search
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_ok(), "same tool name with different prefixes should be valid");
     let (_, catalog) = result.unwrap();
@@ -363,7 +383,7 @@ servers:
       - name: bad_tool
         inputSchema: "not-an-object"
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "non-object schema should fail with reject_server");
     assert!(
@@ -387,7 +407,7 @@ servers:
         inputSchema:
           type: string
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "inputSchema.type other than object should fail");
     assert!(
@@ -414,7 +434,7 @@ servers:
         inputSchema:
           type: object
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_ok(), "filter_out should not reject config");
     let (_, catalog) = result.unwrap();
@@ -439,7 +459,7 @@ servers:
             city:
               type: string
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let (_, catalog) = build_config(cfg).unwrap();
     assert_eq!(
         catalog[0].input_schema["type"], "object",
@@ -456,7 +476,7 @@ servers:
     tools:
       - name: no_params
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let (_, catalog) = build_config(cfg).unwrap();
     assert_eq!(
         catalog[0].input_schema,
@@ -474,7 +494,7 @@ servers:
     tools:
       - name: ""
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let result = build_config(cfg);
     assert!(result.is_err(), "empty tool name should fail");
     assert!(
@@ -489,7 +509,7 @@ servers:
 
 #[tokio::test]
 async fn initialize_returns_session_and_id() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str =
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}"#;
     let req = make_mcp_request();
@@ -506,10 +526,9 @@ async fn initialize_returns_session_and_id() {
                 body_str.contains("protocolVersion"),
                 "should contain protocolVersion: {body_str}"
             );
-            assert!(
-                body_str.contains("praxis-mcp-gateway"),
-                "should contain server name: {body_str}"
-            );
+            let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
+            assert_eq!(parsed["result"]["serverInfo"]["name"], "praxis");
+            assert_eq!(parsed["result"]["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
             assert!(
                 rejection.headers.iter().any(|(k, _)| k == "mcp-session-id"),
                 "should contain mcp-session-id header"
@@ -521,7 +540,7 @@ async fn initialize_returns_session_and_id() {
 
 #[tokio::test]
 async fn initialize_extracts_protocol_version() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str =
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}"#;
     let req = make_mcp_request();
@@ -539,7 +558,7 @@ async fn initialize_extracts_protocol_version() {
 
 #[tokio::test]
 async fn initialize_with_string_id_escaping() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","id":"req\"\\1","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -564,7 +583,7 @@ async fn initialize_with_string_id_escaping() {
 
 #[tokio::test]
 async fn ping_preserves_numeric_id() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","id":42,"method":"ping"}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -591,7 +610,7 @@ async fn ping_preserves_numeric_id() {
 
 #[tokio::test]
 async fn ping_preserves_string_id() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","id":"abc","method":"ping"}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -614,7 +633,7 @@ async fn ping_preserves_string_id() {
 
 #[tokio::test]
 async fn notifications_initialized_returns_202() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -636,7 +655,7 @@ async fn notifications_initialized_returns_202() {
 
 #[tokio::test]
 async fn notifications_initialized_with_id_rejected() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"notifications/initialized"}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -647,8 +666,8 @@ async fn notifications_initialized_with_id_rejected() {
     match action {
         FilterAction::Reject(ref rejection) => {
             assert_eq!(
-                rejection.status, 400,
-                "notification methods with ids should be invalid requests"
+                rejection.status, 200,
+                "notification methods with ids should return a JSON-RPC invalid request response"
             );
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
@@ -662,7 +681,7 @@ async fn notifications_initialized_with_id_rejected() {
 
 #[tokio::test]
 async fn ping_with_null_id_rejected() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -672,7 +691,10 @@ async fn ping_with_null_id_rejected() {
 
     match action {
         FilterAction::Reject(ref rejection) => {
-            assert_eq!(rejection.status, 400, "null request ids should be rejected");
+            assert_eq!(
+                rejection.status, 200,
+                "null request ids should return a JSON-RPC error response"
+            );
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
                 body_str.contains("-32600"),
@@ -689,7 +711,7 @@ async fn ping_with_null_id_rejected() {
 
 #[tokio::test]
 async fn ping_with_missing_id_rejected() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","method":"ping"}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -699,7 +721,10 @@ async fn ping_with_missing_id_rejected() {
 
     match action {
         FilterAction::Reject(ref rejection) => {
-            assert_eq!(rejection.status, 400, "request methods without ids should be rejected");
+            assert_eq!(
+                rejection.status, 200,
+                "request methods without ids should return a JSON-RPC error response"
+            );
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
                 body_str.contains("-32600"),
@@ -712,7 +737,7 @@ async fn ping_with_missing_id_rejected() {
 
 #[tokio::test]
 async fn ping_with_fractional_id_rejected_with_null_id() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","id":1.5,"method":"ping"}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -722,7 +747,10 @@ async fn ping_with_fractional_id_rejected_with_null_id() {
 
     match action {
         FilterAction::Reject(ref rejection) => {
-            assert_eq!(rejection.status, 400, "fractional request ids should be rejected");
+            assert_eq!(
+                rejection.status, 200,
+                "fractional request ids should return a JSON-RPC error response"
+            );
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
                 body_str.contains(r#""id":null"#),
@@ -735,7 +763,7 @@ async fn ping_with_fractional_id_rejected_with_null_id() {
 
 #[tokio::test]
 async fn tools_list_returns_prefixed_catalog() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -763,7 +791,7 @@ async fn tools_list_returns_prefixed_catalog() {
 
 #[tokio::test]
 async fn tools_call_returns_unsupported() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str =
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"weather_get_weather","arguments":{}}}"#;
     let req = make_mcp_request();
@@ -775,8 +803,8 @@ async fn tools_call_returns_unsupported() {
     match action {
         FilterAction::Reject(ref rejection) => {
             assert_eq!(
-                rejection.status, 400,
-                "tools/call should return error status before backend routing is added"
+                rejection.status, 200,
+                "tools/call should return a JSON-RPC error response before backend routing is added"
             );
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
@@ -791,7 +819,7 @@ async fn tools_call_returns_unsupported() {
 
 #[tokio::test]
 async fn unsupported_method_returns_method_not_found() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","id":7,"method":"resources/list"}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -801,7 +829,10 @@ async fn unsupported_method_returns_method_not_found() {
 
     match action {
         FilterAction::Reject(ref rejection) => {
-            assert_eq!(rejection.status, 400, "unsupported method should return 400");
+            assert_eq!(
+                rejection.status, 200,
+                "unsupported method should return a JSON-RPC error response"
+            );
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
                 body_str.contains("-32601"),
@@ -815,9 +846,9 @@ async fn unsupported_method_returns_method_not_found() {
 
 #[tokio::test]
 async fn delete_with_session_returns_204() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let mut req = crate::test_utils::make_request(http::Method::DELETE, "/mcp");
-    req.headers.insert("mcp-session-id", "gw-test-123".parse().unwrap());
+    req.headers.insert("mcp-session-id", "mcp-test-123".parse().unwrap());
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
     let action = filter.on_request(&mut ctx).await.unwrap();
@@ -832,7 +863,7 @@ async fn delete_with_session_returns_204() {
 
 #[tokio::test]
 async fn delete_without_session_returns_400() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let req = crate::test_utils::make_request(http::Method::DELETE, "/mcp");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -848,7 +879,7 @@ async fn delete_without_session_returns_400() {
 
 #[tokio::test]
 async fn non_post_on_request_body_continues() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let req = crate::test_utils::make_request(http::Method::GET, "/mcp");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let mut body: Option<Bytes> = None;
@@ -863,7 +894,7 @@ async fn non_post_on_request_body_continues() {
 
 #[tokio::test]
 async fn malformed_json_rejected() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = "not json";
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -881,7 +912,7 @@ async fn malformed_json_rejected() {
 
 #[tokio::test]
 async fn missing_method_rejected() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let body_str = r#"{"jsonrpc":"2.0","id":1}"#;
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -899,29 +930,29 @@ async fn missing_method_rejected() {
 
 #[test]
 fn body_access_is_read_write() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     assert_eq!(
         filter.request_body_access(),
         BodyAccess::ReadWrite,
-        "gateway should declare ReadWrite body access"
+        "Praxis should declare ReadWrite body access"
     );
 }
 
 #[test]
 fn body_mode_is_stream_buffer() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     assert_eq!(
         filter.request_body_mode(),
         BodyMode::StreamBuffer {
             max_bytes: Some(config::DEFAULT_MAX_BODY_BYTES)
         },
-        "gateway should use StreamBuffer body mode"
+        "Praxis should use StreamBuffer body mode"
     );
 }
 
 #[test]
 fn static_catalog_builds_correctly() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     assert_eq!(filter.catalog.len(), 2, "catalog should have two tools");
     assert_eq!(
         filter.catalog[0].exposed_name, "weather_get_weather",
@@ -945,7 +976,7 @@ fn static_catalog_builds_correctly() {
 
 #[tokio::test]
 async fn get_request_rejected_in_on_request() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let req = crate::test_utils::make_request(http::Method::GET, "/mcp");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -961,7 +992,7 @@ async fn get_request_rejected_in_on_request() {
 
 #[tokio::test]
 async fn none_body_continues() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let mut body: Option<Bytes> = None;
@@ -973,7 +1004,7 @@ async fn none_body_continues() {
 
 #[tokio::test]
 async fn control_char_method_not_written_to_metadata() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let mut body = Some(Bytes::from(
@@ -990,7 +1021,7 @@ async fn control_char_method_not_written_to_metadata() {
 
 #[tokio::test]
 async fn control_char_protocol_version_not_written() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let body_str = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025\\u000003-26\",\"capabilities\":{}}}";
@@ -1006,7 +1037,7 @@ async fn control_char_protocol_version_not_written() {
 
 #[tokio::test]
 async fn post_to_wrong_path_returns_404() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let mut req = crate::test_utils::make_request(http::Method::POST, "/not-mcp");
     req.headers.insert("content-type", "application/json".parse().unwrap());
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1016,7 +1047,7 @@ async fn post_to_wrong_path_returns_404() {
 
     match action {
         FilterAction::Reject(ref rejection) => {
-            assert_eq!(rejection.status, 404, "POST to non-gateway path should return 404");
+            assert_eq!(rejection.status, 404, "POST to non-MCP path should return 404");
         },
         _ => panic!("expected Reject with 404"),
     }
@@ -1024,16 +1055,16 @@ async fn post_to_wrong_path_returns_404() {
 
 #[tokio::test]
 async fn delete_to_wrong_path_returns_404() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let mut req = crate::test_utils::make_request(http::Method::DELETE, "/not-mcp");
-    req.headers.insert("mcp-session-id", "gw-test".parse().unwrap());
+    req.headers.insert("mcp-session-id", "mcp-test".parse().unwrap());
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
     let action = filter.on_request(&mut ctx).await.unwrap();
 
     match action {
         FilterAction::Reject(ref rejection) => {
-            assert_eq!(rejection.status, 404, "DELETE to non-gateway path should return 404");
+            assert_eq!(rejection.status, 404, "DELETE to non-MCP path should return 404");
         },
         _ => panic!("expected Reject with 404"),
     }
@@ -1041,7 +1072,7 @@ async fn delete_to_wrong_path_returns_404() {
 
 #[tokio::test]
 async fn partial_chunk_before_eos_continues() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let mut body = Some(Bytes::from(r#"{"jsonrpc":"2.0","#));
@@ -1056,7 +1087,7 @@ async fn partial_chunk_before_eos_continues() {
 
 #[tokio::test]
 async fn full_body_at_eos_handles() {
-    let filter = make_gateway_filter();
+    let filter = make_broker_filter();
     let req = make_mcp_request();
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let mut body = Some(Bytes::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#));
@@ -1072,8 +1103,8 @@ async fn full_body_at_eos_handles() {
 }
 
 #[tokio::test]
-async fn ping_with_query_param_matches_gateway_path() {
-    let filter = make_gateway_filter();
+async fn ping_with_query_param_matches_configured_mcp_path() {
+    let filter = make_broker_filter();
     let mut req = crate::test_utils::make_request(http::Method::POST, "/mcp?x=1");
     req.headers.insert("content-type", "application/json".parse().unwrap());
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1083,24 +1114,24 @@ async fn ping_with_query_param_matches_gateway_path() {
 
     match action {
         FilterAction::Reject(ref rejection) => {
-            assert_eq!(rejection.status, 200, "POST /mcp?x=1 should match gateway path");
+            assert_eq!(rejection.status, 200, "POST /mcp?x=1 should match MCP path");
         },
         _ => panic!("expected Reject with 200 for ping on /mcp?x=1"),
     }
 }
 
 #[tokio::test]
-async fn delete_with_query_param_matches_gateway_path() {
-    let filter = make_gateway_filter();
+async fn delete_with_query_param_matches_configured_mcp_path() {
+    let filter = make_broker_filter();
     let mut req = crate::test_utils::make_request(http::Method::DELETE, "/mcp?x=1");
-    req.headers.insert("mcp-session-id", "gw-test".parse().unwrap());
+    req.headers.insert("mcp-session-id", "mcp-test".parse().unwrap());
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
     let action = filter.on_request(&mut ctx).await.unwrap();
 
     match action {
         FilterAction::Reject(ref rejection) => {
-            assert_eq!(rejection.status, 204, "DELETE /mcp?x=1 should match gateway path");
+            assert_eq!(rejection.status, 204, "DELETE /mcp?x=1 should match MCP path");
         },
         _ => panic!("expected Reject with 204 for DELETE on /mcp?x=1"),
     }
@@ -1110,7 +1141,7 @@ async fn delete_with_query_param_matches_gateway_path() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-fn make_gateway_filter() -> McpGatewayFilter {
+fn make_broker_filter() -> McpBrokerFilter {
     let yaml = r#"
 servers:
   - name: weather
@@ -1129,10 +1160,10 @@ servers:
       - name: create_event
         description: Create a calendar event
 "#;
-    let cfg: McpGatewayConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let (validated, catalog) = build_config(cfg).unwrap();
     let json_rpc_config = build_json_rpc_config(validated.max_body_bytes);
-    McpGatewayFilter {
+    McpBrokerFilter {
         json_rpc_config,
         max_body_bytes: validated.max_body_bytes,
         public_path: validated.path.clone(),

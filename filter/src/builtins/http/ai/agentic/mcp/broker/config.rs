@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Configuration types for the MCP gateway filter.
+//! Configuration types for the MCP static catalog filter.
 
 use serde::Deserialize;
 
-use crate::FilterError;
+use crate::{FilterError, builtins::http::transformation::has_dot_dot_traversal};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -72,14 +72,14 @@ pub(super) struct McpServerConfig {
 }
 
 // -----------------------------------------------------------------------------
-// McpGatewayConfig
+// McpBrokerConfig
 // -----------------------------------------------------------------------------
 
-/// MCP gateway filter configuration.
+/// MCP static catalog filter configuration.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct McpGatewayConfig {
-    /// Public MCP path that this gateway listens on.
+pub(super) struct McpBrokerConfig {
+    /// Public MCP path handled by Praxis.
     #[serde(default = "default_path")]
     pub path: String,
     /// Maximum body size in bytes.
@@ -138,12 +138,12 @@ fn default_max_body_bytes() -> usize {
 // -----------------------------------------------------------------------------
 
 /// Validate configuration and build the static tool catalog.
-pub(super) fn build_config(cfg: McpGatewayConfig) -> Result<(McpGatewayConfig, Vec<CatalogTool>), FilterError> {
+pub(super) fn build_config(cfg: McpBrokerConfig) -> Result<(McpBrokerConfig, Vec<CatalogTool>), FilterError> {
     if cfg.max_body_bytes == 0 {
-        return Err("mcp_gateway: max_body_bytes must be greater than 0".into());
+        return Err("mcp: max_body_bytes must be greater than 0".into());
     }
 
-    validate_path("mcp_gateway", &cfg.path)?;
+    validate_path("mcp", &cfg.path)?;
     validate_unique_server_names(&cfg.servers)?;
     validate_server_clusters(&cfg.servers)?;
     validate_server_paths(&cfg.servers)?;
@@ -160,10 +160,10 @@ fn validate_unique_server_names(servers: &[McpServerConfig]) -> Result<(), Filte
     let mut seen = std::collections::HashSet::new();
     for server in servers {
         if server.name.is_empty() {
-            return Err("mcp_gateway: server name must not be empty".into());
+            return Err("mcp: server name must not be empty".into());
         }
         if !seen.insert(&server.name) {
-            return Err(format!("mcp_gateway: duplicate server name: '{}'", server.name).into());
+            return Err(format!("mcp: duplicate server name: '{}'", server.name).into());
         }
     }
     Ok(())
@@ -173,14 +173,13 @@ fn validate_unique_server_names(servers: &[McpServerConfig]) -> Result<(), Filte
 fn validate_server_clusters(servers: &[McpServerConfig]) -> Result<(), FilterError> {
     for server in servers {
         if server.cluster.is_empty() {
-            return Err(format!("mcp_gateway: server '{}' cluster must not be empty", server.name).into());
+            return Err(format!("mcp: server '{}' cluster must not be empty", server.name).into());
         }
     }
     Ok(())
 }
 
-/// Validate server backend paths against the constraints enforced
-/// by `apply_rewritten_path` at runtime.
+/// Validate server backend paths against runtime rewrite constraints.
 fn validate_server_paths(servers: &[McpServerConfig]) -> Result<(), FilterError> {
     for server in servers {
         validate_path(&format!("server '{}'", server.name), &server.path)?;
@@ -188,66 +187,37 @@ fn validate_server_paths(servers: &[McpServerConfig]) -> Result<(), FilterError>
     Ok(())
 }
 
-/// Shared path validator for both the public gateway path and backend
+/// Shared path validator for both the public MCP path and backend
 /// server paths. Rejects scheme/authority, missing leading `/`, double
 /// leading `/`, traversal segments (including percent-encoded), and
 /// values that fail [`http::Uri`] parsing.
 fn validate_path(label: &str, path: &str) -> Result<(), FilterError> {
     if path.contains("://") {
-        return Err(format!("mcp_gateway: {label} path must not contain a scheme/authority: '{path}'").into());
+        return Err(format!("mcp: {label} path must not contain a scheme/authority: '{path}'").into());
     }
     if !path.starts_with('/') {
-        return Err(format!("mcp_gateway: {label} path must start with /: '{path}'").into());
+        return Err(format!("mcp: {label} path must start with /: '{path}'").into());
     }
     if path.starts_with("//") {
-        return Err(format!("mcp_gateway: {label} path must not start with //: '{path}'").into());
+        return Err(format!("mcp: {label} path must not start with //: '{path}'").into());
     }
 
     let uri: http::Uri = path
         .parse()
-        .map_err(|e| FilterError::from(format!("mcp_gateway: {label} path is not a valid URI: '{path}': {e}")))?;
+        .map_err(|e| FilterError::from(format!("mcp: {label} path is not a valid URI: '{path}': {e}")))?;
 
     if uri.scheme().is_some() || uri.authority().is_some() {
-        return Err(format!("mcp_gateway: {label} path must not contain a scheme/authority: '{path}'").into());
+        return Err(format!("mcp: {label} path must not contain a scheme/authority: '{path}'").into());
     }
 
     if uri.query().is_some() {
-        return Err(format!("mcp_gateway: {label} path must not contain a query string: '{path}'").into());
+        return Err(format!("mcp: {label} path must not contain a query string: '{path}'").into());
     }
 
-    if uri.path().split('/').any(is_traversal_segment) {
-        return Err(format!("mcp_gateway: {label} path contains '..' traversal: '{path}'").into());
+    if has_dot_dot_traversal(uri.path()) {
+        return Err(format!("mcp: {label} path contains '..' traversal: '{path}'").into());
     }
     Ok(())
-}
-
-/// Matches literal `..` and percent-encoded variants (`%2e%2e`, `.%2e`,
-/// `%2e.`). Mirrors the runtime check in `apply_rewritten_path` so bad
-/// backend paths fail at config load, not as runtime errors.
-#[allow(clippy::indexing_slicing, reason = "bounds checked by i + 2 < b.len()")]
-fn is_traversal_segment(seg: &str) -> bool {
-    if seg == ".." {
-        return true;
-    }
-    let mut dots = 0u8;
-    let mut i = 0;
-    let b = seg.as_bytes();
-    while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && b[i + 1].eq_ignore_ascii_case(&b'2')
-            && b[i + 2].eq_ignore_ascii_case(&b'e')
-        {
-            dots += 1;
-            i += 3;
-        } else if b[i] == b'.' {
-            dots += 1;
-            i += 1;
-        } else {
-            return false;
-        }
-    }
-    dots == 2
 }
 
 /// Validate that all tool names are non-empty.
@@ -255,7 +225,7 @@ fn validate_tool_names(servers: &[McpServerConfig]) -> Result<(), FilterError> {
     for server in servers {
         for tool in &server.tools {
             if tool.name.is_empty() {
-                return Err(format!("mcp_gateway: server '{}' has a tool with an empty name", server.name).into());
+                return Err(format!("mcp: server '{}' has a tool with an empty name", server.name).into());
             }
         }
     }
@@ -267,7 +237,7 @@ fn validate_unique_exposed_names(catalog: &[CatalogTool]) -> Result<(), FilterEr
     let mut seen = std::collections::HashSet::new();
     for tool in catalog {
         if !seen.insert(&tool.exposed_name) {
-            return Err(format!("mcp_gateway: duplicate exposed tool name: '{}'", tool.exposed_name).into());
+            return Err(format!("mcp: duplicate exposed tool name: '{}'", tool.exposed_name).into());
         }
     }
     Ok(())
@@ -281,9 +251,7 @@ fn build_catalog(servers: &[McpServerConfig], policy: InvalidToolPolicy) -> Resu
             if let Err(reason) = validate_tool_schemas(tool) {
                 match policy {
                     InvalidToolPolicy::RejectServer => {
-                        return Err(
-                            format!("mcp_gateway: server '{}' tool '{}' {reason}", server.name, tool.name,).into(),
-                        );
+                        return Err(format!("mcp: server '{}' tool '{}' {reason}", server.name, tool.name,).into());
                     },
                     InvalidToolPolicy::FilterOut => {
                         tracing::debug!(

@@ -1,12 +1,12 @@
-# MCP Gateway: static catalog and broker; tools/call routing follows in a later PR
+# Praxis MCP static catalog and broker; tools/call routing follows in a later PR
 #
-# Pipeline: mcp_gateway -> load_balancer (no router).
-# The gateway short-circuits initialize, tools/list, ping,
+# Pipeline: mcp -> load_balancer (no router).
+# Praxis short-circuits initialize, tools/list, ping,
 # and notifications/initialized. tools/call routing is added
 # in a follow-up PR.
 #
 # Backend endpoints are placeholders for follow-up tools/call routing.
-#   cargo run -p praxis -- -c examples/configs/payload-processing/mcp-gateway.yaml
+#   cargo run -p praxis -- -c examples/configs/payload-processing/mcp-static-catalog.yaml
 
 listeners:
   - name: default
@@ -16,7 +16,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: mcp_gateway
+      - filter: mcp
         path: /mcp
         max_body_bytes: 65536
         servers:

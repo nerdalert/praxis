@@ -16,10 +16,8 @@ use praxis_core::config::FilterEntry;
 pub(super) fn extract_selected_clusters(entries: &[FilterEntry]) -> HashSet<String> {
     let mut clusters = HashSet::new();
     for entry in entries {
-        match entry.filter_type.as_str() {
-            "router" => extract_from_router(&entry.config, &mut clusters),
-            "mcp_gateway" => extract_from_mcp_gateway(&entry.config, &mut clusters),
-            _ => {},
+        if entry.filter_type == "router" {
+            extract_from_router(&entry.config, &mut clusters);
         }
     }
     clusters
@@ -32,18 +30,6 @@ fn extract_from_router(config: &serde_yaml::Value, clusters: &mut HashSet<String
     };
     for route in routes {
         if let Some(cluster) = route.get("cluster").and_then(|v| v.as_str()) {
-            clusters.insert(cluster.to_owned());
-        }
-    }
-}
-
-/// Gateway validation needs every backend server target.
-fn extract_from_mcp_gateway(config: &serde_yaml::Value, clusters: &mut HashSet<String>) {
-    let Some(servers) = config.get("servers").and_then(|v| v.as_sequence()) else {
-        return;
-    };
-    for server in servers {
-        if let Some(cluster) = server.get("cluster").and_then(|v| v.as_str()) {
             clusters.insert(cluster.to_owned());
         }
     }
@@ -114,20 +100,14 @@ mod tests {
     }
 
     #[test]
-    fn extracts_mcp_gateway_clusters() {
-        let entries = vec![make_entry(
-            "mcp_gateway",
-            "servers:\n  - name: weather\n    cluster: weather-mcp\n    tools: []\n  - name: calendar\n    cluster: calendar-mcp\n    tools: []",
-        )];
-        let clusters = extract_selected_clusters(&entries);
-        assert_eq!(clusters.len(), 2, "should extract two gateway clusters");
-        assert!(clusters.contains("weather-mcp"), "should contain 'weather-mcp'");
-        assert!(clusters.contains("calendar-mcp"), "should contain 'calendar-mcp'");
-    }
-
-    #[test]
     fn skips_non_cluster_selecting_entries() {
-        let entries = vec![make_entry("ip_acl", "allow: [\"10.0.0.0/8\"]")];
+        let entries = vec![
+            make_entry("ip_acl", "allow: [\"10.0.0.0/8\"]"),
+            make_entry(
+                "mcp",
+                "servers:\n  - name: weather\n    cluster: weather-mcp\n    tools: []",
+            ),
+        ];
         let clusters = extract_selected_clusters(&entries);
         assert!(
             clusters.is_empty(),

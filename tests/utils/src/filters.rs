@@ -11,7 +11,7 @@ use praxis_filter::{BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter,
 ///
 /// Exercises body mutation, path rewrite, and cluster selection during
 /// `StreamBuffer` pre-read so the adapter contract can be validated
-/// before protocol-specific filters like `mcp_gateway` exist.
+/// before protocol-specific body-phase filters exist.
 pub struct BodyMutatingStreamBufferFilter {
     /// Replacement payload used to make framing repair observable.
     pub replacement_body: Bytes,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! MCP gateway filter: static tool catalog, prefix management, and broker
+//! MCP static catalog filter: static tool catalog, prefix management, and broker
 //! behavior for `initialize`, `tools/list`, `ping`, and `notifications`.
 
 pub(crate) mod config;
@@ -21,13 +21,14 @@ mod tests;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use rand::{TryRngCore, rngs::OsRng};
 use tracing::{debug, trace};
 
-use self::config::{CatalogTool, McpGatewayConfig, build_config};
+use self::config::{CatalogTool, McpBrokerConfig, build_config};
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
-    builtins::http::payload_processing::json_rpc::{
+    builtins::http::ai::agentic::json_rpc::{
         config::JsonRpcConfig,
         contains_control_chars,
         envelope::{JsonRpcEnvelope, JsonRpcIdKind, JsonRpcKind, parse_json_rpc_value},
@@ -37,21 +38,31 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
-// McpGatewayFilter
+// Constants
 // -----------------------------------------------------------------------------
 
-/// MCP gateway filter that aggregates tool catalogs from multiple backend
+/// MCP protocol version currently supported by Praxis.
+const SUPPORTED_PROTOCOL_VERSION: &str = "2025-03-26";
+
+/// Server name reported in MCP initialize responses.
+const SERVER_NAME: &str = "praxis";
+
+// -----------------------------------------------------------------------------
+// McpBrokerFilter
+// -----------------------------------------------------------------------------
+
+/// MCP static catalog filter that aggregates tool catalogs from multiple backend
 /// MCP servers and handles `initialize`, `tools/list`, `tools/call`, `ping`,
 /// and `notifications/initialized` directly as a static broker.
 ///
-/// This first gateway change short-circuits all methods: no request is
+/// This first MCP static catalog change short-circuits all methods: no request is
 /// forwarded to backends. `tools/call` returns a controlled `-32601` error
 /// until backend routing is added.
 ///
 /// # YAML
 ///
 /// ```yaml
-/// filter: mcp_gateway
+/// filter: mcp
 /// path: /mcp
 /// max_body_bytes: 65536
 /// servers:
@@ -70,18 +81,23 @@ use crate::{
 ///       - name: create_event
 ///         description: Create a calendar event
 /// ```
-pub(crate) struct McpGatewayFilter {
+pub(crate) struct McpBrokerFilter {
     /// Shared JSON-RPC parser configuration.
     json_rpc_config: JsonRpcConfig,
     /// Maximum body bytes for `StreamBuffer`.
     max_body_bytes: usize,
-    /// Public path this gateway handles (e.g. `/mcp`).
+    /// Public path this MCP broker handles (e.g. `/mcp`).
     public_path: String,
     /// Static tool catalog built from config.
     catalog: Vec<CatalogTool>,
 }
 
-impl McpGatewayFilter {
+impl McpBrokerFilter {
+    /// Return true when this MCP config selects static catalog behavior.
+    pub(crate) fn matches_config(config: &serde_yaml::Value) -> bool {
+        config.get("servers").is_some()
+    }
+
     /// Create a filter from parsed YAML config.
     ///
     /// # Errors
@@ -89,7 +105,7 @@ impl McpGatewayFilter {
     /// Returns [`FilterError`] if the YAML config is invalid or if
     /// the static tool catalog cannot be serialized.
     pub(crate) fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
-        let cfg: McpGatewayConfig = parse_filter_config("mcp_gateway", config)?;
+        let cfg: McpBrokerConfig = parse_filter_config("mcp", config)?;
         let (validated, catalog) = build_config(cfg)?;
 
         let json_rpc_config = build_json_rpc_config(validated.max_body_bytes);
@@ -104,9 +120,9 @@ impl McpGatewayFilter {
 }
 
 #[async_trait]
-impl HttpFilter for McpGatewayFilter {
+impl HttpFilter for McpBrokerFilter {
     fn name(&self) -> &'static str {
-        "mcp_gateway"
+        "mcp"
     }
 
     fn request_body_access(&self) -> BodyAccess {
@@ -178,7 +194,7 @@ impl HttpFilter for McpGatewayFilter {
 // Method Dispatch
 // -----------------------------------------------------------------------------
 
-/// Maps a JSON-RPC method to the gateway handler that owns it.
+/// Maps a JSON-RPC method to the MCP handler that owns it.
 /// Never returns [`FilterAction::Release`] — all paths produce
 /// a terminal synthetic response.
 fn dispatch_method(
@@ -197,7 +213,7 @@ fn dispatch_method(
     }
 
     let action = match method_str {
-        "initialize" => handle_initialize(ctx, value, envelope),
+        "initialize" => handle_initialize(ctx, value, envelope)?,
         "tools/list" => handle_tools_list(catalog, envelope)?,
         "tools/call" => json_rpc_error_action(envelope, -32601, "method not yet supported"),
         "ping" => handle_ping(envelope),
@@ -254,13 +270,30 @@ fn handle_delete(ctx: &HttpFilterContext<'_>) -> FilterAction {
     }
 }
 
-/// Generates a new gateway session and returns MCP capabilities.
-/// Does not initialize backends — that belongs to follow-up backend session work.
+/// Generates a new MCP session and returns MCP capabilities.
+/// Does not initialize backends, that belongs to follow-up backend session work.
 fn handle_initialize(
     ctx: &mut HttpFilterContext<'_>,
     value: &serde_json::Value,
     envelope: &JsonRpcEnvelope,
-) -> FilterAction {
+) -> Result<FilterAction, FilterError> {
+    record_client_protocol_version(ctx, value);
+    let session_id = generate_session_id()?;
+
+    debug!(session_id_len = session_id.len(), "MCP initialize");
+    ctx.set_metadata("mcp.session_id", session_id.clone());
+
+    Ok(FilterAction::Reject(
+        Rejection::status(200)
+            .with_header("content-type", "application/json")
+            .with_header("mcp-session-id", &session_id)
+            .with_body(Bytes::from(initialize_response_body(envelope).to_string())),
+    ))
+}
+
+/// Persist the client's advertised MCP protocol version for later negotiation
+/// work, avoiding metadata writes for malformed control-character values.
+fn record_client_protocol_version(ctx: &mut HttpFilterContext<'_>, value: &serde_json::Value) {
     if let Some(version) = value
         .get("params")
         .and_then(|p| p.get("protocolVersion"))
@@ -269,23 +302,26 @@ fn handle_initialize(
     {
         ctx.set_metadata("mcp.protocol_version", version.to_owned());
     }
+}
 
-    let id_json = format_id_json(envelope);
-    let session_id = generate_session_id();
-
-    debug!(session_id_len = session_id.len(), "gateway initialize");
-    ctx.set_metadata("mcp.session_id", session_id.clone());
-
-    let response_body = format!(
-        r#"{{"jsonrpc":"2.0","id":{id_json},"result":{{"protocolVersion":"2025-03-26","capabilities":{{"tools":{{"listChanged":false}}}},"serverInfo":{{"name":"praxis-mcp-gateway","version":"0.1.0"}}}}}}"#,
-    );
-
-    FilterAction::Reject(
-        Rejection::status(200)
-            .with_header("content-type", "application/json")
-            .with_header("mcp-session-id", &session_id)
-            .with_body(Bytes::from(response_body)),
-    )
+/// Build the initialize response from dynamic crate and protocol constants.
+fn initialize_response_body(envelope: &JsonRpcEnvelope) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id_value(envelope),
+        "result": {
+            "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
+            "capabilities": {
+                "tools": {
+                    "listChanged": false,
+                },
+            },
+            "serverInfo": {
+                "name": SERVER_NAME,
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        },
+    })
 }
 
 /// Returns the aggregated static catalog. Dynamic backend discovery
@@ -308,8 +344,7 @@ fn handle_tools_list(catalog: &[CatalogTool], envelope: &JsonRpcEnvelope) -> Res
 /// return a controlled error rather than silently degrading.
 fn serialize_catalog(catalog: &[CatalogTool]) -> Result<String, FilterError> {
     let tools: Vec<serde_json::Value> = catalog.iter().map(catalog_tool_to_json).collect();
-    serde_json::to_string(&tools)
-        .map_err(|e| FilterError::from(format!("mcp_gateway: failed to serialize tool catalog: {e}")))
+    serde_json::to_string(&tools).map_err(|e| FilterError::from(format!("mcp: failed to serialize tool catalog: {e}")))
 }
 
 /// Produces the MCP tool object shape (`name`, optional `description`
@@ -356,6 +391,18 @@ fn format_id_json(envelope: &JsonRpcEnvelope) -> String {
     }
 }
 
+/// Convert the parsed JSON-RPC id into a response JSON value.
+fn id_value(envelope: &JsonRpcEnvelope) -> serde_json::Value {
+    let Some(id) = envelope.id.as_deref() else {
+        return serde_json::Value::Null;
+    };
+    match envelope.id_kind {
+        JsonRpcIdKind::String => serde_json::Value::String(id.to_owned()),
+        JsonRpcIdKind::Integer | JsonRpcIdKind::Number => serde_json::from_str(id).unwrap_or(serde_json::Value::Null),
+        JsonRpcIdKind::Null | JsonRpcIdKind::Missing => serde_json::Value::Null,
+    }
+}
+
 /// Build a JSON-RPC error [`FilterAction::Reject`] response.
 ///
 /// The message is JSON-escaped so future caller-supplied values
@@ -372,7 +419,7 @@ fn json_rpc_error_action_with_id(id_json: &str, code: i32, message: &str) -> Fil
         r#"{{"jsonrpc":"2.0","error":{{"code":{code},"message":{message_json}}},"id":{id_json}}}"#,
     ));
     FilterAction::Reject(
-        Rejection::status(400)
+        Rejection::status(200)
             .with_header("content-type", "application/json")
             .with_body(body),
     )
@@ -382,7 +429,7 @@ fn json_rpc_error_action_with_id(id_json: &str, code: i32, message: &str) -> Fil
 // Path Matching
 // -----------------------------------------------------------------------------
 
-/// Returns `true` when the request URI path matches the configured gateway
+/// Returns `true` when the request URI path matches the configured MCP
 /// path. Uses exact match on the path component only.
 fn request_path_matches(uri: &http::Uri, public_path: &str) -> bool {
     uri.path() == public_path
@@ -392,23 +439,24 @@ fn request_path_matches(uri: &http::Uri, public_path: &str) -> bool {
 // Session ID
 // -----------------------------------------------------------------------------
 
-/// Generate a cryptographically random gateway session ID.
-fn generate_session_id() -> String {
-    let bytes: [u8; 16] = rand::random();
+/// Generate a cryptographically random MCP session ID.
+fn generate_session_id() -> Result<String, FilterError> {
+    let mut bytes = [0u8; 16];
+    let mut rng = OsRng;
+    rng.try_fill_bytes(&mut bytes)
+        .map_err(|e| FilterError::from(format!("mcp: failed to generate session id: {e}")))?;
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!("gw-{hex}")
+    Ok(format!("mcp-{hex}"))
 }
 
 // -----------------------------------------------------------------------------
 // Shared Parser Config
 // -----------------------------------------------------------------------------
 
-/// Build a [`JsonRpcConfig`] for the shared parser with gateway-appropriate
+/// Build a [`JsonRpcConfig`] for the shared parser with MCP broker-appropriate
 /// defaults.
 fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
-    use crate::builtins::http::payload_processing::json_rpc::config::{
-        BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders,
-    };
+    use crate::builtins::http::ai::agentic::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
 
     JsonRpcConfig {
         max_body_bytes,

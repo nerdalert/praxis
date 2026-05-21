@@ -18,10 +18,6 @@ const SECURITY_FILTERS: &[&str] = &["csrf", "ip_acl", "forwarded_headers"];
 /// Filters that rewrite the request path.
 const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 
-/// `load_balancer` cannot select an endpoint unless an earlier filter has
-/// populated `ctx.cluster`.
-const CLUSTER_SELECTING_FILTERS: &[&str] = &["router", "mcp_gateway"];
-
 // -----------------------------------------------------------------------------
 // Error Checks
 // -----------------------------------------------------------------------------
@@ -31,7 +27,7 @@ const CLUSTER_SELECTING_FILTERS: &[&str] = &["router", "mcp_gateway"];
 #[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_lb_without_cluster_selector(names: &[&str], errors: &mut Vec<String>) {
     for (i, name) in names.iter().enumerate() {
-        if *name == "load_balancer" && !CLUSTER_SELECTING_FILTERS.iter().any(|f| names[..i].contains(f)) {
+        if *name == "load_balancer" && !names[..i].contains(&"router") {
             errors.push(
                 "load_balancer without a preceding router \
                  or cluster-selecting filter; requests will \
@@ -108,21 +104,6 @@ pub(super) fn check_open_security_filters(
                 errors.push(msg);
             }
         }
-    }
-}
-
-/// `router` cannot coexist with body-phase cluster selectors because it
-/// runs later and unconditionally overwrites `ctx.cluster`.
-pub(super) fn check_conflicting_cluster_selectors(names: &[&str], errors: &mut Vec<String>) {
-    let has_gateway = names.contains(&"mcp_gateway");
-    let has_router = names.contains(&"router");
-    if has_gateway && has_router {
-        errors.push(
-            "mcp_gateway and router in the same pipeline; \
-             router overwrites the cluster selected by \
-             mcp_gateway during body-phase pre-read"
-                .to_owned(),
-        );
     }
 }
 
@@ -314,36 +295,23 @@ mod tests {
     }
 
     #[test]
-    fn lb_with_mcp_gateway_no_error() {
-        let names = vec!["mcp_gateway", "load_balancer"];
+    fn lb_with_only_mcp_static_catalog_errors() {
+        let names = vec!["mcp", "load_balancer"];
         let mut errors = Vec::new();
         check_lb_without_cluster_selector(&names, &mut errors);
-        assert!(errors.is_empty(), "mcp_gateway before LB should produce no errors");
-    }
-
-    #[test]
-    fn mcp_gateway_with_router_errors() {
-        let names = vec!["mcp_gateway", "router", "load_balancer"];
-        let mut errors = Vec::new();
-        check_conflicting_cluster_selectors(&names, &mut errors);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("mcp_gateway and router"));
+        assert!(
+            errors[0].contains("load_balancer without a preceding router"),
+            "MCP static catalog does not select a cluster in this PR: {}",
+            errors[0]
+        );
     }
 
     #[test]
-    fn router_with_mcp_gateway_errors() {
-        let names = vec!["router", "mcp_gateway", "load_balancer"];
+    fn mcp_static_catalog_with_router_no_conflict_check() {
+        let names = vec!["mcp", "router", "load_balancer"];
         let mut errors = Vec::new();
-        check_conflicting_cluster_selectors(&names, &mut errors);
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("mcp_gateway and router"));
-    }
-
-    #[test]
-    fn mcp_gateway_alone_no_conflict() {
-        let names = vec!["mcp_gateway", "load_balancer"];
-        let mut errors = Vec::new();
-        check_conflicting_cluster_selectors(&names, &mut errors);
+        check_lb_without_cluster_selector(&names, &mut errors);
         assert!(errors.is_empty());
     }
 
@@ -596,28 +564,6 @@ mod tests {
         let mut errors = Vec::new();
         check_misaligned_clusters(&entries, &mut errors);
         assert!(errors.is_empty(), "aligned clusters should produce no errors");
-    }
-
-    #[test]
-    fn mcp_gateway_cluster_missing_from_lb_errors() {
-        let entries = vec![
-            make_entry(
-                "mcp_gateway",
-                "servers:\n  - name: weather\n    cluster: weather-mcp\n    tools: []",
-            ),
-            make_entry(
-                "load_balancer",
-                "clusters:\n  - name: other\n    endpoints: [\"1.2.3.4:80\"]",
-            ),
-        ];
-        let mut errors = Vec::new();
-        check_misaligned_clusters(&entries, &mut errors);
-        assert_eq!(errors.len(), 1);
-        assert!(
-            errors[0].contains("weather-mcp") && errors[0].contains("not defined"),
-            "error should mention the missing gateway cluster: {}",
-            errors[0]
-        );
     }
 
     #[test]
