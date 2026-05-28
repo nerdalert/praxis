@@ -14,6 +14,8 @@ mod transformation;
 pub use ai::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::PromptEnrichFilter;
+#[cfg(feature = "ai-inference")]
+pub use ai::ResponsesOrchestratorFilter;
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter, McpFilter};
 pub use security::{

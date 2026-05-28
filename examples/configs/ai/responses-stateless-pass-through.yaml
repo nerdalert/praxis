@@ -1,0 +1,37 @@
+# Responses API Stateless Pass-Through
+#
+# Routes POST /v1/responses requests to the configured
+# inference backend without modifying the request body.
+# The backend handles tool execution, conversation state,
+# and the agentic loop internally.
+#
+# This config uses exact path matching for /v1/responses
+# so that only Responses API traffic reaches the inference
+# backend. A future responses_format classifier will add
+# body-level format detection.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/ai/responses-stateless-pass-through.yaml
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"gpt-4.1-mini","input":"Hello"}'
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - responses-passthrough
+
+filter_chains:
+  - name: responses-passthrough
+    filters:
+      - filter: router
+        routes:
+          - path: "/v1/responses"
+            cluster: inference
+
+      - filter: load_balancer
+        clusters:
+          - name: inference
+            endpoints:
+              - "127.0.0.1:3000"

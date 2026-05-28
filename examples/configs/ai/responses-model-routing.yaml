@@ -1,0 +1,56 @@
+# Responses API Model-Based Routing
+#
+# Requires the ai-inference feature:
+#   cargo build -p praxis --features ai-inference
+#
+# Extracts the "model" field from Responses API request
+# bodies and routes to model-specific inference backends.
+# Unknown or missing model names receive a 404 from the
+# router — no catch-all fallback is configured.
+#
+# The model_to_header filter uses json_body_field under
+# the hood; it reads the body via StreamBuffer and does
+# not mutate it.
+#
+# Usage:
+#   cargo run -p praxis --features ai-inference -- \
+#     -c examples/configs/ai/responses-model-routing.yaml
+#
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"model-a","input":"Hello"}'
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - extract-model
+      - model-routing
+
+filter_chains:
+  - name: extract-model
+    filters:
+      - filter: model_to_header
+        header: X-AI-Model
+
+  - name: model-routing
+    filters:
+      - filter: router
+        routes:
+          - path: "/v1/responses"
+            headers:
+              x-ai-model: "model-a"
+            cluster: backend_a
+          - path: "/v1/responses"
+            headers:
+              x-ai-model: "model-b"
+            cluster: backend_b
+
+      - filter: load_balancer
+        clusters:
+          - name: backend_a
+            endpoints:
+              - "127.0.0.1:3001"
+          - name: backend_b
+            endpoints:
+              - "127.0.0.1:3002"

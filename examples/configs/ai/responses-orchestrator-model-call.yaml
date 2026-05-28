@@ -1,0 +1,40 @@
+# Responses API Orchestrator — Model Backend Call
+#
+# Requires the ai-inference feature:
+#   cargo build -p praxis --features ai-inference
+#
+# The responses_orchestrator makes an internal HTTP
+# subrequest to the configured model backend and
+# returns the backend's response to the client.
+#
+# This config maps model names to backend endpoints.
+# Unknown or missing models receive a clear error.
+#
+# Usage:
+#   cargo run -p praxis --features ai-inference -- \
+#     -c examples/configs/ai/responses-orchestrator-model-call.yaml
+#
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"model-a","input":"Hello"}'
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - orchestrator
+
+filter_chains:
+  - name: orchestrator
+    filters:
+      - filter: responses_orchestrator
+        timeout_ms: 5000
+        models:
+          model-a:
+            endpoint: "127.0.0.1:3001"
+          model-b:
+            endpoint: "127.0.0.1:3002"
+        conditions:
+          - when:
+              path: "/v1/responses"
+              methods: [POST]

@@ -153,6 +153,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         "prompt_enrich",
         crate::builtins::PromptEnrichFilter::from_config,
     );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "responses_orchestrator",
+        crate::builtins::ResponsesOrchestratorFilter::from_config,
+    );
 }
 
 /// Register a single HTTP filter factory by name.
@@ -266,6 +272,11 @@ mod tests {
         );
         #[cfg(feature = "ai-inference")]
         assert!(names.contains(&"prompt_enrich"), "prompt_enrich should be registered");
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"responses_orchestrator"),
+            "responses_orchestrator should be registered"
+        );
     }
 
     #[test]

@@ -8,6 +8,8 @@
 
 pub mod a2a;
 pub mod mcp;
+pub mod responses;
+pub mod tool_http;
 
 pub use a2a::{
     A2aMockConfig, A2aMockServerGuard, A2aRecordedRequest, start_a2a_mock_server, start_a2a_mock_server_with_config,
@@ -15,6 +17,13 @@ pub use a2a::{
 pub use mcp::{
     McpMockConfig, McpMockServerGuard, McpRecordedRequest, McpToolFixture, start_mcp_mock_server,
     start_mcp_mock_server_with_config,
+};
+pub use responses::{
+    ResponsesFixture, ResponsesMockConfig, ResponsesMockServerGuard, ResponsesRecordedRequest,
+    start_responses_mock_server, start_responses_mock_server_with_config,
+};
+pub use tool_http::{
+    ToolHttpMockConfig, ToolHttpMockServerGuard, start_tool_http_mock_server, start_tool_http_mock_server_with_config,
 };
 
 // -----------------------------------------------------------------------------

@@ -1,0 +1,35 @@
+# Responses API Orchestrator Skeleton
+#
+# Requires the ai-inference feature:
+#   cargo build -p praxis --features ai-inference
+#
+# Demonstrates the responses_orchestrator terminal filter
+# returning a local Responses-shaped response without
+# contacting any upstream backend.
+#
+# The orchestrator buffers the request body, extracts the
+# model field, and returns a placeholder response. No
+# model inference or tool execution happens yet.
+#
+# Usage:
+#   cargo run -p praxis --features ai-inference -- \
+#     -c examples/configs/ai/responses-orchestrator-skeleton.yaml
+#
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"gpt-4.1-mini","input":"Hello"}'
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - orchestrator
+
+filter_chains:
+  - name: orchestrator
+    filters:
+      - filter: responses_orchestrator
+        conditions:
+          - when:
+              path: "/v1/responses"
+              methods: [POST]

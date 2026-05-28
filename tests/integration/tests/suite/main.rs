@@ -59,6 +59,27 @@ mod per_listener_pipeline;
 #[cfg(feature = "ai-inference")]
 mod prompt_enrich;
 mod rate_limit;
+mod responses;
+#[cfg(feature = "ai-inference")]
+mod responses_model_routing;
+#[cfg(feature = "ai-inference")]
+mod responses_orchestrator;
+#[cfg(feature = "ai-inference")]
+mod responses_orchestrator_guardrails;
+#[cfg(feature = "ai-inference")]
+mod responses_orchestrator_limits;
+#[cfg(feature = "ai-inference")]
+mod responses_orchestrator_loop;
+#[cfg(feature = "ai-inference")]
+mod responses_orchestrator_model;
+#[cfg(feature = "ai-inference")]
+mod responses_orchestrator_parse;
+#[cfg(feature = "ai-inference")]
+mod responses_orchestrator_state;
+#[cfg(feature = "ai-inference")]
+mod responses_orchestrator_streaming;
+#[cfg(feature = "ai-inference")]
+mod responses_orchestrator_tool;
 mod retry;
 mod routing;
 mod security;
