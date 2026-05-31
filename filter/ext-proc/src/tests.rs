@@ -9,7 +9,15 @@
     reason = "tests"
 )]
 
+use std::{collections::HashMap, time::Instant};
+
+use bytes::Bytes;
+use http::{HeaderMap, Method, StatusCode, Uri};
 use praxis_filter::parse_filter_config;
+use praxis_proto::envoy::service::{
+    common::v3::{HeaderValue, HeaderValueOption, HttpStatus},
+    ext_proc::v3::{CommonResponse, HeaderMutation, HeadersResponse, ImmediateResponse},
+};
 
 use super::*;
 
@@ -716,8 +724,505 @@ max_message_timeout_ms: -1
 }
 
 // -----------------------------------------------------------------------------
+// Proto Conversion: request_to_proto_headers
+// -----------------------------------------------------------------------------
+
+#[test]
+fn request_to_proto_headers_includes_method_and_path() {
+    let req = make_request(Method::POST, "/api/v1/users");
+    let ctx = make_ctx(&req);
+
+    let proto = mutations::request_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+
+    let method = headers
+        .iter()
+        .find(|h| h.key == ":method")
+        .expect("should include :method");
+    assert_eq!(method.value, "POST", "method pseudo-header should match request method");
+
+    let path = headers.iter().find(|h| h.key == ":path").expect("should include :path");
+    assert_eq!(
+        path.value, "/api/v1/users",
+        "path pseudo-header should match request URI"
+    );
+}
+
+#[test]
+fn request_to_proto_headers_includes_request_headers() {
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert("content-type", "application/json".parse().unwrap());
+    req.headers.insert("x-request-id", "abc-123".parse().unwrap());
+    let ctx = make_ctx(&req);
+
+    let proto = mutations::request_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+
+    let ct = headers
+        .iter()
+        .find(|h| h.key == "content-type")
+        .expect("should include content-type");
+    assert_eq!(ct.value, "application/json", "content-type should match");
+
+    let rid = headers
+        .iter()
+        .find(|h| h.key == "x-request-id")
+        .expect("should include x-request-id");
+    assert_eq!(rid.value, "abc-123", "x-request-id should match");
+}
+
+// -----------------------------------------------------------------------------
+// Proto Conversion: response_to_proto_headers
+// -----------------------------------------------------------------------------
+
+#[test]
+fn response_to_proto_headers_includes_status() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.status = StatusCode::NOT_FOUND;
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let proto = mutations::response_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+
+    let status = headers
+        .iter()
+        .find(|h| h.key == ":status")
+        .expect("should include :status");
+    assert_eq!(status.value, "404", "status pseudo-header should match response status");
+}
+
+#[test]
+fn response_to_proto_headers_includes_response_headers() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("x-powered-by", "praxis".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let proto = mutations::response_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+
+    let hdr = headers
+        .iter()
+        .find(|h| h.key == "x-powered-by")
+        .expect("should include x-powered-by");
+    assert_eq!(hdr.value, "praxis", "x-powered-by value should match");
+}
+
+#[test]
+fn response_to_proto_headers_empty_when_no_response() {
+    let req = make_request(Method::GET, "/");
+    let ctx = make_ctx(&req);
+
+    let proto = mutations::response_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+    assert!(
+        headers.is_empty(),
+        "headers should be empty when response_header is None"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Mutation: apply_request_header_mutation
+// -----------------------------------------------------------------------------
+
+#[test]
+fn apply_request_header_mutation_adds_to_extra_headers() {
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![make_hvo("x-custom", "value1")],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should add one header");
+    assert_eq!(ctx.extra_request_headers[0].0, "x-custom", "header name should match");
+    assert_eq!(ctx.extra_request_headers[0].1, "value1", "header value should match");
+}
+
+#[test]
+fn apply_request_header_mutation_skips_pseudo_headers() {
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![
+            make_hvo(":method", "POST"),
+            make_hvo(":path", "/new"),
+            make_hvo("x-real", "kept"),
+        ],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should skip pseudo-headers");
+    assert_eq!(
+        ctx.extra_request_headers[0].0, "x-real",
+        "only non-pseudo header should be added"
+    );
+}
+
+#[test]
+fn apply_request_header_mutation_skips_removal() {
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![],
+        remove_headers: vec!["content-type".to_owned()],
+    };
+
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "removal should be skipped without error"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Mutation: apply_response_header_mutation
+// -----------------------------------------------------------------------------
+
+#[test]
+fn apply_response_header_mutation_modifies_response() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![make_hvo("x-added", "new-value")],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    assert!(ctx.response_headers_modified, "should set response_headers_modified");
+    let resp = ctx.response_header.unwrap();
+    assert_eq!(
+        resp.headers.get("x-added").unwrap(),
+        "new-value",
+        "header should be inserted"
+    );
+}
+
+#[test]
+fn apply_response_header_mutation_removes_header() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("x-remove-me", "gone".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![],
+        remove_headers: vec!["x-remove-me".to_owned()],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    assert!(ctx.response_headers_modified, "should set response_headers_modified");
+    let resp = ctx.response_header.unwrap();
+    assert!(resp.headers.get("x-remove-me").is_none(), "header should be removed");
+}
+
+#[test]
+fn apply_response_header_mutation_skips_pseudo_headers() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![make_hvo(":status", "404")],
+        remove_headers: vec![":status".to_owned()],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        !ctx.response_headers_modified,
+        "pseudo-header mutations should not mark headers as modified"
+    );
+}
+
+#[test]
+fn apply_response_header_mutation_noop_when_no_response() {
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![make_hvo("x-added", "value")],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        !ctx.response_headers_modified,
+        "should not modify when response_header is None"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Mutation: immediate_to_rejection
+// -----------------------------------------------------------------------------
+
+#[test]
+fn immediate_to_rejection_maps_status_body_headers() {
+    let imm = ImmediateResponse {
+        status: Some(HttpStatus { code: 403 }),
+        headers: Some(HeaderMutation {
+            set_headers: vec![make_hvo("x-reason", "blocked")],
+            remove_headers: vec![],
+        }),
+        body: "forbidden".to_owned(),
+        grpc_status: None,
+        details: String::new(),
+    };
+
+    let action = mutations::immediate_to_rejection(&imm);
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+
+    assert_eq!(rejection.status, 403, "status should match");
+    assert_eq!(rejection.body.unwrap(), Bytes::from("forbidden"), "body should match");
+    assert_eq!(rejection.headers.len(), 1, "should have one header");
+    assert_eq!(rejection.headers[0].0, "x-reason", "header name should match");
+    assert_eq!(rejection.headers[0].1, "blocked", "header value should match");
+}
+
+#[test]
+fn immediate_to_rejection_defaults_status_to_200() {
+    let imm = ImmediateResponse {
+        status: None,
+        headers: None,
+        body: String::new(),
+        grpc_status: None,
+        details: String::new(),
+    };
+
+    let action = mutations::immediate_to_rejection(&imm);
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+
+    assert_eq!(rejection.status, 200, "should default to 200 when status absent");
+    assert!(rejection.body.is_none(), "empty body should be None");
+    assert!(rejection.headers.is_empty(), "should have no headers");
+}
+
+#[test]
+fn immediate_to_rejection_clamps_invalid_status() {
+    let imm = ImmediateResponse {
+        status: Some(HttpStatus { code: 999 }),
+        headers: None,
+        body: String::new(),
+        grpc_status: None,
+        details: String::new(),
+    };
+
+    let action = mutations::immediate_to_rejection(&imm);
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+
+    assert_eq!(rejection.status, 500, "out-of-range status should clamp to 500");
+}
+
+// -----------------------------------------------------------------------------
+// Utility: header_value_string
+// -----------------------------------------------------------------------------
+
+#[test]
+fn header_value_string_prefers_raw_value() {
+    let hv = HeaderValue {
+        key: "x-test".to_owned(),
+        value: "text-value".to_owned(),
+        raw_value: b"raw-value".to_vec(),
+    };
+
+    assert_eq!(
+        mutations::header_value_string(&hv),
+        "raw-value",
+        "should prefer raw_value when non-empty"
+    );
+}
+
+#[test]
+fn header_value_string_falls_back_to_value() {
+    let hv = HeaderValue {
+        key: "x-test".to_owned(),
+        value: "text-value".to_owned(),
+        raw_value: Vec::new(),
+    };
+
+    assert_eq!(
+        mutations::header_value_string(&hv),
+        "text-value",
+        "should fall back to value when raw_value is empty"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Utility: is_pseudo_header
+// -----------------------------------------------------------------------------
+
+#[test]
+fn is_pseudo_header_detects_colon_prefix() {
+    assert!(mutations::is_pseudo_header(":method"), ":method is a pseudo-header");
+    assert!(mutations::is_pseudo_header(":path"), ":path is a pseudo-header");
+    assert!(mutations::is_pseudo_header(":status"), ":status is a pseudo-header");
+    assert!(
+        !mutations::is_pseudo_header("content-type"),
+        "content-type is not a pseudo-header"
+    );
+    assert!(
+        !mutations::is_pseudo_header("x-custom"),
+        "x-custom is not a pseudo-header"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Mutation: apply_headers_response delegates by phase
+// -----------------------------------------------------------------------------
+
+#[test]
+fn apply_headers_response_delegates_to_request_phase() {
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let hr = HeadersResponse {
+        response: Some(CommonResponse {
+            status: 0,
+            header_mutation: Some(HeaderMutation {
+                set_headers: vec![make_hvo("x-from-proc", "req")],
+                remove_headers: vec![],
+            }),
+            body_mutation: None,
+            trailers: None,
+            clear_route_cache: false,
+        }),
+    };
+
+    mutations::apply_headers_response(&hr, &mut ctx, Phase::Request);
+
+    assert_eq!(
+        ctx.extra_request_headers.len(),
+        1,
+        "should add to extra request headers"
+    );
+    assert_eq!(
+        ctx.extra_request_headers[0].0, "x-from-proc",
+        "header name should match"
+    );
+}
+
+#[test]
+fn apply_headers_response_delegates_to_response_phase() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let hr = HeadersResponse {
+        response: Some(CommonResponse {
+            status: 0,
+            header_mutation: Some(HeaderMutation {
+                set_headers: vec![make_hvo("x-from-proc", "resp")],
+                remove_headers: vec![],
+            }),
+            body_mutation: None,
+            trailers: None,
+            clear_route_cache: false,
+        }),
+    };
+
+    mutations::apply_headers_response(&hr, &mut ctx, Phase::Response);
+
+    assert!(ctx.response_headers_modified, "should set response_headers_modified");
+    let resp = ctx.response_header.unwrap();
+    assert_eq!(
+        resp.headers.get("x-from-proc").unwrap(),
+        "resp",
+        "header should be set on response"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Build a minimal [`praxis_filter::Request`].
+fn make_request(method: Method, path: &str) -> praxis_filter::Request {
+    praxis_filter::Request {
+        method,
+        uri: path.parse::<Uri>().expect("invalid URI in test"),
+        headers: HeaderMap::new(),
+    }
+}
+
+/// Build a minimal OK [`praxis_filter::Response`].
+fn make_response() -> praxis_filter::Response {
+    praxis_filter::Response {
+        headers: HeaderMap::new(),
+        status: StatusCode::OK,
+    }
+}
+
+/// Build a minimal [`HttpFilterContext`] for unit tests.
+fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
+    HttpFilterContext {
+        body_done_indices: Vec::new(),
+        branch_iterations: HashMap::new(),
+        client_addr: None,
+        cluster: None,
+        downstream_tls: false,
+        executed_filter_indices: Vec::new(),
+        extra_request_headers: Vec::new(),
+        request_headers_to_remove: Vec::new(),
+        request_headers_to_set: Vec::new(),
+        filter_metadata: HashMap::new(),
+        filter_results: HashMap::new(),
+        health_registry: None,
+        kv_stores: None,
+        request: req,
+        request_body_bytes: 0,
+        request_body_mode: praxis_filter::BodyMode::Stream,
+        request_start: Instant::now(),
+        response_body_bytes: 0,
+        response_body_mode: praxis_filter::BodyMode::Stream,
+        response_header: None,
+        response_headers_modified: false,
+        rewritten_path: None,
+        selected_endpoint_index: None,
+        upstream: None,
+    }
+}
+
+/// Build a [`HeaderValueOption`] with the given key and value.
+fn make_hvo(key: &str, value: &str) -> HeaderValueOption {
+    HeaderValueOption {
+        header: Some(HeaderValue {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            raw_value: Vec::new(),
+        }),
+        append: None,
+        append_action: 0,
+    }
+}
 
 /// Parse a minimal valid config for default-checking tests.
 fn minimal_config() -> ExtProcConfig {
