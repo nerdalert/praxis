@@ -35,6 +35,8 @@
 
 #![deny(unreachable_pub)]
 
+mod callout;
+mod mutations;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -54,6 +56,29 @@ const DEFAULT_STATUS_ON_ERROR: u16 = 500;
 
 /// Default deferred close timeout in milliseconds (observability mode).
 const DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS: u64 = 5000;
+
+// -----------------------------------------------------------------------------
+// Phase
+// -----------------------------------------------------------------------------
+
+/// Processing phase for dispatching mutations to the correct target.
+#[derive(Debug, Clone, Copy)]
+enum Phase {
+    /// Request headers phase.
+    Request,
+
+    /// Response headers phase.
+    Response,
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request => f.write_str("request"),
+            Self::Response => f.write_str("response"),
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // ExtProcConfig
@@ -470,18 +495,13 @@ fn validate_processing_mode(pm: ProcessingModeConfig) -> Result<(), FilterError>
 #[derive(Debug)]
 pub struct ExtProcFilter {
     /// Lazily-connecting gRPC channel to the external processor.
-    ///
-    /// Drives `ExternalProcessorClient` from `praxis-proto` once the
-    /// gRPC callout is implemented.
-    #[allow(dead_code, reason = "used by ExternalProcessorClient in subsequent PRs")]
     channel: Channel,
 
     /// Per-message timeout for gRPC calls.
-    #[allow(dead_code, reason = "used by gRPC callout in subsequent PRs")]
     message_timeout: Duration,
 
     /// HTTP status code returned on processor errors.
-    #[allow(dead_code, reason = "used by gRPC callout in subsequent PRs")]
+    #[allow(dead_code, reason = "used by status-on-error rejection in subsequent PRs")]
     status_on_error: u16,
 
     /// gRPC endpoint URI (retained for diagnostics).
@@ -525,12 +545,12 @@ impl HttpFilter for ExtProcFilter {
         "ext_proc"
     }
 
-    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        tracing::warn!(
-            target = %self.target,
-            "ext_proc on_request not yet implemented"
-        );
-        Ok(FilterAction::Continue)
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        callout::process_request_headers(self.channel.clone(), &self.target, self.message_timeout, ctx).await
+    }
+
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        callout::process_response_headers(self.channel.clone(), &self.target, self.message_timeout, ctx).await
     }
 }
 

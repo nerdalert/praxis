@@ -2289,8 +2289,13 @@ name = "praxis-proxy-ext-proc"
 version = "0.3.1"
 dependencies = [
  "async-trait",
+ "bytes",
+ "futures",
+ "http",
  "praxis-proxy-filter",
+ "praxis-proxy-proto",
  "serde",
+ "thiserror 2.0.18",
  "tokio",
  "tonic",
  "tracing",

@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Praxis Contributors
+
+//! gRPC stream management for the `ext_proc` filter.
+//!
+//! Opens a bidirectional `Process` stream to the external processor,
+//! sends a single [`ProcessingRequest`], and receives a single
+//! [`ProcessingResponse`] within a configurable timeout.
+//!
+//! [`ProcessingRequest`]: praxis_proto::envoy::service::ext_proc::v3::ProcessingRequest
+//! [`ProcessingResponse`]: praxis_proto::envoy::service::ext_proc::v3::ProcessingResponse
+
+use std::time::Duration;
+
+use futures::stream;
+use praxis_filter::{FilterAction, FilterError, HttpFilterContext};
+use praxis_proto::envoy::service::ext_proc::v3::{
+    ProcessingRequest, ProcessingResponse, external_processor_client::ExternalProcessorClient, processing_request,
+    processing_response,
+};
+use tonic::transport::Channel;
+
+use crate::{
+    Phase,
+    mutations::{apply_headers_response, immediate_to_rejection, request_to_proto_headers, response_to_proto_headers},
+};
+
+// -----------------------------------------------------------------------------
+// CalloutError
+// -----------------------------------------------------------------------------
+
+/// Errors that can occur during a gRPC callout.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CalloutError {
+    /// gRPC transport or protocol error.
+    #[error("ext_proc gRPC error: {0}")]
+    Grpc(#[from] tonic::Status),
+
+    /// The per-message timeout expired.
+    #[error("ext_proc message timeout")]
+    Timeout,
+
+    /// The server closed the stream without sending a response.
+    #[error("ext_proc server closed stream without response")]
+    EmptyStream,
+}
+
+// -----------------------------------------------------------------------------
+// Public callout functions
+// -----------------------------------------------------------------------------
+
+/// Send request headers to the external processor and apply mutations.
+///
+/// Opens a `Process` stream, sends a `RequestHeaders` message, and
+/// waits for one response within `timeout`. Returns [`FilterAction`]
+/// indicating whether the pipeline should continue or reject.
+pub(crate) async fn process_request_headers(
+    channel: Channel,
+    target: &str,
+    timeout: Duration,
+    ctx: &mut HttpFilterContext<'_>,
+) -> Result<FilterAction, FilterError> {
+    let headers = request_to_proto_headers(ctx);
+    let request = ProcessingRequest {
+        request: Some(processing_request::Request::RequestHeaders(headers)),
+        ..Default::default()
+    };
+
+    let response = send_and_receive(channel, request, timeout, target).await?;
+    dispatch_response(&response, ctx, Phase::Request)
+}
+
+/// Send response headers to the external processor and apply mutations.
+///
+/// Same pattern as [`process_request_headers`] but wraps
+/// `ResponseHeaders` and operates during the response phase.
+pub(crate) async fn process_response_headers(
+    channel: Channel,
+    target: &str,
+    timeout: Duration,
+    ctx: &mut HttpFilterContext<'_>,
+) -> Result<FilterAction, FilterError> {
+    let headers = response_to_proto_headers(ctx);
+    let request = ProcessingRequest {
+        request: Some(processing_request::Request::ResponseHeaders(headers)),
+        ..Default::default()
+    };
+
+    let response = send_and_receive(channel, request, timeout, target).await?;
+    dispatch_response(&response, ctx, Phase::Response)
+}
+
+// -----------------------------------------------------------------------------
+// Private helpers
+// -----------------------------------------------------------------------------
+
+/// Open a `Process` stream, send one request, and receive one response.
+///
+/// Each callout opens its own stream. The timeout covers the entire
+/// round-trip (stream open + send + receive).
+async fn send_and_receive(
+    channel: Channel,
+    request: ProcessingRequest,
+    timeout: Duration,
+    target: &str,
+) -> Result<ProcessingResponse, FilterError> {
+    let result = tokio::time::timeout(timeout, async {
+        let mut client = ExternalProcessorClient::new(channel);
+        let request_stream = stream::once(async { request });
+        let response = client.process(request_stream).await.map_err(CalloutError::Grpc)?;
+        let mut streaming = response.into_inner();
+
+        streaming
+            .message()
+            .await
+            .map_err(CalloutError::Grpc)?
+            .ok_or(CalloutError::EmptyStream)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(e)) => {
+            tracing::warn!(target = %target, error = %e, "ext_proc callout failed");
+            Err(e.into())
+        },
+        Err(_elapsed) => {
+            tracing::warn!(target = %target, "ext_proc callout timed out");
+            Err(CalloutError::Timeout.into())
+        },
+    }
+}
+
+/// Route a [`ProcessingResponse`] variant to the correct mutation handler.
+///
+/// Returns [`FilterAction::Continue`] for header mutations or
+/// [`FilterAction::Reject`] for immediate responses. Unexpected
+/// response types produce a [`FilterError`].
+fn dispatch_response(
+    response: &ProcessingResponse,
+    ctx: &mut HttpFilterContext<'_>,
+    phase: Phase,
+) -> Result<FilterAction, FilterError> {
+    let Some(resp) = &response.response else {
+        return Ok(FilterAction::Continue);
+    };
+
+    match resp {
+        processing_response::Response::RequestHeaders(hr) | processing_response::Response::ResponseHeaders(hr) => {
+            apply_headers_response(hr, ctx, phase);
+            Ok(FilterAction::Continue)
+        },
+        processing_response::Response::ImmediateResponse(imm) => Ok(immediate_to_rejection(imm)),
+        other => {
+            let variant = response_variant_name(other);
+            Err(format!("ext_proc: unexpected response type '{variant}' during {phase} phase").into())
+        },
+    }
+}
+
+/// Returns a human-readable name for a [`processing_response::Response`] variant.
+fn response_variant_name(resp: &processing_response::Response) -> &'static str {
+    match resp {
+        processing_response::Response::RequestHeaders(_) => "RequestHeaders",
+        processing_response::Response::ResponseHeaders(_) => "ResponseHeaders",
+        processing_response::Response::RequestBody(_) => "RequestBody",
+        processing_response::Response::ResponseBody(_) => "ResponseBody",
+        processing_response::Response::RequestTrailers(_) => "RequestTrailers",
+        processing_response::Response::ResponseTrailers(_) => "ResponseTrailers",
+        processing_response::Response::ImmediateResponse(_) => "ImmediateResponse",
+    }
+}
