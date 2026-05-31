@@ -9,7 +9,10 @@
     reason = "tests"
 )]
 
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri};
@@ -1161,6 +1164,145 @@ fn apply_headers_response_delegates_to_response_phase() {
 }
 
 // -----------------------------------------------------------------------------
+// gRPC Callout Integration
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn grpc_request_headers_round_trip_applies_mutation() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::AddHeader {
+        name: "x-injected".to_owned(),
+        value: "from-processor".to_owned(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+
+    let req = make_request(Method::GET, "/test");
+    let mut ctx = make_ctx(&req);
+    let timeout = Duration::from_secs(5);
+
+    let action = callout::process_request_headers(channel, &addr.to_string(), timeout, &mut ctx)
+        .await
+        .expect("callout should succeed");
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "action should be Continue after header mutation"
+    );
+    let injected = ctx.extra_request_headers.iter().find(|(k, _)| k == "x-injected");
+    assert!(injected.is_some(), "processor-injected header should be present");
+    assert_eq!(
+        injected.unwrap().1,
+        "from-processor",
+        "injected header value should match"
+    );
+}
+
+#[tokio::test]
+async fn grpc_response_headers_round_trip_applies_mutation() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::AddHeader {
+        name: "x-resp-injected".to_owned(),
+        value: "from-processor".to_owned(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+    let timeout = Duration::from_secs(5);
+
+    let action = callout::process_response_headers(channel, &addr.to_string(), timeout, &mut ctx)
+        .await
+        .expect("callout should succeed");
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "action should be Continue after response header mutation"
+    );
+    assert!(ctx.response_headers_modified, "response_headers_modified should be set");
+    let resp = ctx.response_header.unwrap();
+    assert_eq!(
+        resp.headers.get("x-resp-injected").unwrap(),
+        "from-processor",
+        "response header should be mutated"
+    );
+}
+
+#[tokio::test]
+async fn grpc_immediate_response_returns_rejection() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::ImmediateReject {
+        status: 403,
+        body: "blocked".to_owned(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+
+    let req = make_request(Method::GET, "/secret");
+    let mut ctx = make_ctx(&req);
+    let timeout = Duration::from_secs(5);
+
+    let action = callout::process_request_headers(channel, &addr.to_string(), timeout, &mut ctx)
+        .await
+        .expect("callout should succeed");
+
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+    assert_eq!(rejection.status, 403, "rejection status should match");
+    assert_eq!(
+        rejection.body.unwrap(),
+        Bytes::from("blocked"),
+        "rejection body should match"
+    );
+}
+
+#[tokio::test]
+async fn grpc_noop_response_returns_continue() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::Noop).await;
+
+    let channel = connect_channel(addr).await;
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+    let timeout = Duration::from_secs(5);
+
+    let action = callout::process_request_headers(channel, &addr.to_string(), timeout, &mut ctx)
+        .await
+        .expect("callout should succeed");
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "no-op response should produce Continue"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "no headers should be added for no-op response"
+    );
+}
+
+#[tokio::test]
+async fn grpc_timeout_returns_error() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::Hang).await;
+
+    let channel = connect_channel(addr).await;
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+    let timeout = Duration::from_millis(50);
+
+    let result = callout::process_request_headers(channel, &addr.to_string(), timeout, &mut ctx).await;
+
+    assert!(result.is_err(), "timed-out callout should return Err");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("timeout"), "error should mention timeout: {err}");
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -1224,8 +1366,180 @@ fn make_hvo(key: &str, value: &str) -> HeaderValueOption {
     }
 }
 
+/// Connect a tonic [`Channel`] to the given address.
+async fn connect_channel(addr: SocketAddr) -> Channel {
+    Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap()
+}
+
 /// Parse a minimal valid config for default-checking tests.
 fn minimal_config() -> ExtProcConfig {
     let yaml: serde_yaml::Value = serde_yaml::from_str(r#"target: "http://127.0.0.1:50051""#).unwrap();
     parse_filter_config("ext_proc", &yaml).unwrap()
+}
+
+// -----------------------------------------------------------------------------
+// Mock gRPC Server
+// -----------------------------------------------------------------------------
+
+use std::{net::SocketAddr, pin::Pin};
+
+use async_trait::async_trait;
+use praxis_proto::envoy::service::ext_proc::v3::{
+    ProcessingRequest, ProcessingResponse,
+    external_processor_server::{ExternalProcessor, ExternalProcessorServer},
+    processing_request, processing_response,
+};
+use tokio::sync::oneshot;
+use tokio_stream::Stream;
+
+/// Configurable behavior for the mock external processor.
+#[derive(Clone)]
+enum MockBehavior {
+    /// Add a header to the response mutation.
+    AddHeader { name: String, value: String },
+
+    /// Return an `ImmediateResponse` rejection.
+    ImmediateReject { status: i32, body: String },
+
+    /// Return a response with no mutations.
+    Noop,
+
+    /// Never respond (for timeout testing).
+    Hang,
+}
+
+/// Mock implementation of the Envoy `ExternalProcessor` gRPC service.
+struct MockProcessor {
+    behavior: MockBehavior,
+}
+
+#[async_trait]
+impl ExternalProcessor for MockProcessor {
+    type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+    async fn process(
+        &self,
+        request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+    ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+        let mut stream = request.into_inner();
+        let msg = stream
+            .message()
+            .await?
+            .ok_or_else(|| tonic::Status::internal("empty request stream"))?;
+
+        let response = match &self.behavior {
+            MockBehavior::Hang => {
+                futures::future::pending::<()>().await;
+                unreachable!("pending future should never resolve");
+            },
+            MockBehavior::Noop => build_noop_response(&msg),
+            MockBehavior::AddHeader { name, value } => build_add_header_response(&msg, name, value),
+            MockBehavior::ImmediateReject { status, body } => build_immediate_response(*status, body),
+        };
+
+        let output = futures::stream::once(async { Ok(response) });
+        Ok(tonic::Response::new(Box::pin(output)))
+    }
+}
+
+/// Build a response that echoes back the phase with no mutations.
+fn build_noop_response(req: &ProcessingRequest) -> ProcessingResponse {
+    let response = match &req.request {
+        Some(processing_request::Request::RequestHeaders(_)) => {
+            processing_response::Response::RequestHeaders(HeadersResponse { response: None })
+        },
+        Some(processing_request::Request::ResponseHeaders(_)) => {
+            processing_response::Response::ResponseHeaders(HeadersResponse { response: None })
+        },
+        _ => processing_response::Response::RequestHeaders(HeadersResponse { response: None }),
+    };
+    ProcessingResponse {
+        response: Some(response),
+        ..Default::default()
+    }
+}
+
+/// Build a response that adds a single header via [`HeaderMutation`].
+fn build_add_header_response(req: &ProcessingRequest, name: &str, value: &str) -> ProcessingResponse {
+    let mutation = Some(HeaderMutation {
+        set_headers: vec![make_hvo(name, value)],
+        remove_headers: vec![],
+    });
+    let common = Some(CommonResponse {
+        status: 0,
+        header_mutation: mutation,
+        body_mutation: None,
+        trailers: None,
+        clear_route_cache: false,
+    });
+    let response = match &req.request {
+        Some(processing_request::Request::ResponseHeaders(_)) => {
+            processing_response::Response::ResponseHeaders(HeadersResponse { response: common })
+        },
+        _ => processing_response::Response::RequestHeaders(HeadersResponse { response: common }),
+    };
+    ProcessingResponse {
+        response: Some(response),
+        ..Default::default()
+    }
+}
+
+/// Build an [`ImmediateResponse`] rejection.
+fn build_immediate_response(status: i32, body: &str) -> ProcessingResponse {
+    ProcessingResponse {
+        response: Some(processing_response::Response::ImmediateResponse(ImmediateResponse {
+            status: Some(HttpStatus { code: status }),
+            headers: None,
+            body: body.to_owned(),
+            grpc_status: None,
+            details: String::new(),
+        })),
+        ..Default::default()
+    }
+}
+
+/// RAII guard that shuts down the mock gRPC server on drop.
+struct MockServerGuard {
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for MockServerGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Start a mock `ExternalProcessor` gRPC server on a random port.
+///
+/// Returns the listen address and an RAII guard that shuts down
+/// the server when dropped.
+async fn start_mock_processor(behavior: MockBehavior) -> (SocketAddr, MockServerGuard) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let svc = ExternalProcessorServer::new(MockProcessor { behavior });
+
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+    (addr, guard)
 }

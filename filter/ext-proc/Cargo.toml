@@ -31,3 +31,5 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "net"] }
+tokio-stream = "0.1"
