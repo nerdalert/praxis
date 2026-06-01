@@ -53,6 +53,8 @@ mod hot_reload;
 mod ip_acl;
 mod json_body_field;
 mod json_rpc;
+#[cfg(feature = "ai-inference")]
+mod llmd_endpoint_picker;
 mod mcp;
 mod mcp_broker;
 mod path_rewrite;

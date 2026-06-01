@@ -12,12 +12,12 @@ mod transformation;
 pub(crate) mod value_safety;
 
 #[cfg(feature = "ai-inference")]
-pub use ai::ModelToHeaderFilter;
-#[cfg(feature = "ai-inference")]
 pub use ai::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::ResponsesFormatFilter;
 pub use ai::{A2aFilter, JsonRpcFilter, McpFilter};
+#[cfg(feature = "ai-inference")]
+pub use ai::{LlmdEndpointPickerFilter, ModelToHeaderFilter};
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter};
 pub use security::{

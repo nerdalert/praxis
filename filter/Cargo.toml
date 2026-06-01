@@ -15,13 +15,14 @@ name = "praxis_filter"
 
 [features]
 default = ["ai-inference"]
-ai-inference = []
+ai-inference = ["dep:rustls", "dep:rustls-pemfile", "dep:tokenizers", "dep:ciborium"]
 ext-proc = ["dep:praxis-proto", "dep:tonic", "dep:prost-wkt-types"]
 
 [lints]
 workspace = true
 
 [dependencies]
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
@@ -32,11 +33,15 @@ praxis-proto = { workspace = true, optional = true }
 rand = { workspace = true }
 prost-wkt-types = { workspace = true, optional = true }
 regex = { workspace = true }
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tonic = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+ciborium = { workspace = true, optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -2301,6 +2301,7 @@ dependencies = [
 name = "praxis-proxy-filter"
 version = "0.3.1"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "bytes",
  "dashmap",
@@ -2311,6 +2312,8 @@ dependencies = [
  "prost-wkt-types",
  "rand 0.9.4",
  "regex",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2432,6 +2435,7 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "praxis-test-utils",
+ "rcgen",
  "rustls",
  "rustls-pemfile",
  "serde",

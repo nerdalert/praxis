@@ -7,8 +7,6 @@ pub(crate) mod http;
 mod tcp;
 
 #[cfg(feature = "ai-inference")]
-pub use http::ModelToHeaderFilter;
-#[cfg(feature = "ai-inference")]
 pub use http::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::ResponsesFormatFilter;
@@ -19,4 +17,6 @@ pub use http::{
     RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind,
     StaticResponseFilter, TimeoutFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
 };
+#[cfg(feature = "ai-inference")]
+pub use http::{LlmdEndpointPickerFilter, ModelToHeaderFilter};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

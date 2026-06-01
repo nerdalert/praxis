@@ -511,6 +511,7 @@ A filter can have both `conditions` (request phase) and
 | `redirect` | Traffic Management | HTTP | `status` (301/302/307/308), `location` template with `${path}`/`${query}` |
 | `path_rewrite` | Transformation | HTTP | `strip_prefix`, `add_prefix`, or `replace` (regex) on request path |
 | `url_rewrite` | Transformation | HTTP | `operations[]`: `regex_replace`, `strip_query_params`, `add_query_params` |
+| `llmd_endpoint_picker` | AI / Inference | HTTP | Native llm-d-style endpoint selection from OpenAI `model`, queue depth, and KV-cache pressure. Optionally scrapes vLLM `/metrics` for dynamic state. Requires `ai-inference` feature. |
 | `model_to_header` | AI / Inference | HTTP | Extract JSON "model" field and promote to X-Model header. Requires `ai-inference` feature. |
 | `prompt_enrich` | AI / Inference | HTTP | Inject messages into OpenAI-compatible chat completion request bodies. Requires `ai-inference` feature. |
 

@@ -393,6 +393,7 @@ supports TCP-level filters too.
 | `url_rewrite` | Transformation | HTTP |
 | `sni_router` | Traffic Management | TCP |
 | `tcp_load_balancer` | Traffic Management | TCP |
+| `llmd_endpoint_picker` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `model_to_header` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `prompt_enrich` | AI / Inference | HTTP (requires `ai-inference` feature) |
 
@@ -960,6 +961,398 @@ enabled by default. See [compression.yaml].
 | `content_types` | list | see above | MIME type prefixes that qualify |
 
 At least one algorithm must be enabled.
+
+### llm-d Endpoint Picker
+
+Native llm-d-style endpoint selection for OpenAI-compatible
+inference requests. The filter buffers the request body,
+extracts the top-level `model` field, filters endpoints by
+model and health, scores eligible endpoints by queue depth
+and KV-cache pressure, and selects an upstream directly.
+
+```yaml
+- filter: llmd_endpoint_picker
+  pool_name: fake-model
+  queue_weight: 2.0
+  kv_cache_weight: 2.0
+  max_body_bytes: 10485760
+  metrics_refresh_ms: 1000
+  metrics_timeout_ms: 500
+  endpoints:
+    - name: vllm-a
+      address: "127.0.0.1:8000"
+      models: ["fake-model"]
+      metrics_url: "http://vllm-a.default.svc:8000/metrics"
+      running_requests: 1
+      waiting_requests: 0
+      kv_cache_usage_percent: 12.5
+    - name: vllm-b
+      address: "127.0.0.1:8001"
+      models: ["fake-model"]
+      running_requests: 0
+      waiting_requests: 0
+      kv_cache_usage_percent: 5.0
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `pool_name` | string | `"llmd"` | Logical pool name used in request metadata |
+| `max_body_bytes` | integer | 10485760 | Maximum request body size to buffer (10 MiB) |
+| `queue_weight` | number | `2.0` | Weight for inverse queue-depth scoring |
+| `kv_cache_weight` | number | `2.0` | Weight for inverse KV-cache utilization scoring |
+| `metrics_refresh_ms` | integer | `1000` | Interval between metrics scrapes in milliseconds |
+| `metrics_timeout_ms` | integer | `500` | Per-endpoint scrape timeout in milliseconds |
+| `endpoints` | list | required | Endpoint definitions with optional metrics scraping |
+
+Each endpoint requires `name`, `address`, and at least one
+entry in `models`. `running_requests`, `waiting_requests`,
+`kv_cache_usage_percent`, and `healthy` are optional static
+seed values used as initial state and as fallback when
+scraping is not configured or fails.
+
+If an endpoint has a `metrics_url`, a background worker
+periodically scrapes that URL for vLLM Prometheus metrics
+(`vllm:num_requests_running`, `vllm:num_requests_waiting`,
+`vllm:gpu_cache_usage_perc` or `vllm:kv_cache_usage_perc`)
+and updates the endpoint
+snapshot. The worker starts when any static endpoint has
+`metrics_url` or when `inference_pool` discovery is
+configured. Scrape failures mark the affected
+endpoint unhealthy; a later successful scrape restores it.
+
+Metrics scraping supports hostname resolution (including
+Kubernetes service DNS names like
+`vllm-a.default.svc:8000`) and IP addresses. It currently
+supports plain HTTP only (no TLS). Metrics responses are
+bounded at 1 MiB; oversized responses are discarded.
+Sequential scraping means one slow endpoint can delay
+snapshot publication by up to
+`endpoint_count * metrics_timeout_ms`.
+
+#### Kubernetes Endpoint Discovery
+
+When `inference_pool` is configured, the filter discovers
+endpoints by polling the Kubernetes API for an
+`InferencePool` resource and listing matching pods:
+
+```yaml
+- filter: llmd_endpoint_picker
+  metrics_refresh_ms: 2000
+  metrics_timeout_ms: 500
+  inference_pool:
+    name: sim-pool
+    namespace: default
+    api_version: "inference.networking.x-k8s.io/v1alpha2"
+    models: ["fake-model"]
+    metrics_path: "/metrics"
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `name` | string | required | `InferencePool` resource name |
+| `namespace` | string | SA namespace or `default` | `InferencePool` namespace |
+| `api_version` | string | `inference.networking.k8s.io/v1` | API group and version |
+| `models` | list | required | Models served by discovered endpoints |
+| `metrics_path` | string | `/metrics` | Path appended to pod IPs for scraping |
+
+The filter config is valid if either `endpoints` is
+non-empty or `inference_pool` is configured. Both may be
+present; static endpoints and discovered endpoints are
+merged. Discovered endpoints receive `metrics_url` values
+built from pod IPs and `metrics_path`.
+
+Discovery polls on the same interval as `metrics_refresh_ms`.
+On Kubernetes API failure, the last discovered endpoints are
+preserved. Supports both `inference.networking.k8s.io/v1`
+(`matchLabels` + `targetPorts`) and
+`inference.networking.x-k8s.io/v1alpha2`
+(`selector` + `targetPortNumber`) API shapes.
+
+Requires a Kubernetes `ServiceAccount` with RBAC to `get`
+`inferencepools` and `list` `pods`.
+
+#### Approximate Prefix-Cache Scoring
+
+Optional approximate prefix-cache scoring favors endpoints
+that likely already have the request's prompt prefix cached
+in their KV-cache. When enabled, the filter hashes the
+request's prompt content into fixed-size blocks, maintains
+an in-memory per-endpoint index of recently routed block
+hashes, and scores endpoints by their longest contiguous
+prefix match.
+
+```yaml
+- filter: llmd_endpoint_picker
+  queue_weight: 2.0
+  kv_cache_weight: 2.0
+  prefix_cache:
+    enabled: true
+    weight: 1.0
+    block_size_tokens: 16
+    max_prefix_blocks_to_match: 256
+    lru_capacity_per_endpoint: 31250
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | bool | required | Enable prefix-cache scoring |
+| `weight` | number | `1.0` | Weight for prefix score in endpoint ranking |
+| `block_size_tokens` | integer | `16` | Approximate tokens per hash block |
+| `max_prefix_blocks_to_match` | integer | `256` | Maximum blocks to match per request |
+| `max_prefix_tokens_to_match` | integer | `0` | Token-based cap (overrides block cap when > 0) |
+| `lru_capacity_per_endpoint` | integer | `31250` | Per-endpoint LRU capacity for block hashes |
+
+The total endpoint score becomes:
+
+`queue_weight * queue_score + kv_cache_weight * kv_score + prefix_weight * prefix_score`
+
+When prefix-cache is disabled or the request has no
+extractable prefix material, `prefix_score` is zero and
+existing load/KV scoring is unchanged.
+
+Limitations: approximate only (no real tokenizer, no direct
+vLLM KV-block introspection), in-memory index resets on
+process restart, index updates before upstream success
+confirmation.
+
+#### Saturation/Admission Gate
+
+Optional deterministic saturation gate that rejects
+requests when the model-server pool is overloaded
+and filters individual overloaded endpoints before
+scoring.
+
+```yaml
+- filter: llmd_endpoint_picker
+  saturation_gate:
+    enabled: true
+    queue_depth_threshold: 5
+    kv_cache_util_threshold: 0.8
+    pool_saturation_threshold: 1.0
+    headroom: 0.2
+    reject_status: 429
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | bool | required | Enable saturation gate |
+| `queue_depth_threshold` | integer | `5` | Waiting request count considered saturated |
+| `kv_cache_util_threshold` | number | `0.8` | KV-cache fraction (0-1) considered saturated |
+| `pool_saturation_threshold` | number | `1.0` | Average pool saturation that triggers rejection |
+| `headroom` | number | `0.2` | Safety margin above thresholds for endpoint filtering |
+| `reject_status` | integer | `429` | HTTP status code for pool-level rejection |
+| `priority_headroom_per_level` | number | `0.0` | Extra threshold per priority level |
+
+Endpoint saturation is `max(waiting/threshold, kv_fraction/threshold)`.
+Pool saturation is the average across candidates.
+
+When `priority_headroom_per_level` is non-zero and an
+`InferenceObjective` is resolved, the effective pool
+threshold becomes:
+
+`effective = pool_saturation_threshold + priority * priority_headroom_per_level`
+
+Higher-priority requests tolerate more saturation;
+negative-priority requests reject earlier. The effective
+threshold is clamped to >= 0. When `priority_headroom_per_level`
+is 0 (the default), priority has no effect and existing
+behavior is unchanged.
+
+Individual endpoints above headroom-adjusted limits are
+filtered before scoring; filtering fails open if all
+candidates would be removed and the pool reject has not
+fired.
+
+Limitations: deterministic only (no probabilistic
+shedding, no request queueing, no fairness).
+
+#### Prefill/Decode Disaggregation
+
+Optional support for llm-d prefill/decode disaggregated
+serving. When enabled, Praxis selects a decode endpoint as
+the primary upstream and optionally selects a separate
+prefill endpoint, injecting its address as a request header
+for the decode-side routing sidecar.
+
+```yaml
+- filter: llmd_endpoint_picker
+  disaggregation:
+    enabled: true
+    prefill_header: x-prefiller-host-port
+    prefill_mode: always
+  endpoints:
+    - name: decode-a
+      address: "decode-a:8000"
+      models: ["fake-model"]
+      role: decode
+    - name: prefill-a
+      address: "prefill-a:8000"
+      models: ["fake-model"]
+      role: prefill
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | bool | required | Enable disaggregation |
+| `prefill_header` | string | `x-prefiller-host-port` | Request header for prefill address |
+| `prefill_mode` | string | `always` | `always` or `never` |
+| `inject_kv_transfer_params` | bool | `true` | Inject a minimal decode-side sidecar hint into the request body |
+
+Each endpoint has an optional `role` field:
+
+| Role | Decode candidate | Prefill candidate |
+|------|-----------------|-------------------|
+| `decode` | Yes | No |
+| `prefill` | No | Yes |
+| `prefill-decode` (default) | Yes | Yes |
+
+When `prefill_mode=always`, the filter selects the best
+prefill endpoint (preferring one different from the decode
+target) and injects its address via the configured header.
+If no prefill candidate exists, routing falls back to
+decode-only.
+
+When `inject_kv_transfer_params` is true (the default),
+the filter also mutates the request body to include:
+
+```json
+"kv_transfer_params": {
+  "do_remote_decode": true,
+  "do_remote_prefill": false,
+  "remote_host": "<prefill_address>"
+}
+```
+
+This is a decode-side sidecar hint, not full disaggregation
+parity. Praxis does not execute prefill, handle NIXL/RDMA,
+or replace the sidecar. The hint tells the decode-side
+sidecar to fetch KV-cache data from the selected prefill
+endpoint.
+
+Limitations: no E/P/D encode routing, no sidecar
+replacement, no token counting for disaggregation
+decisions.
+
+#### Gateway API HTTPRoute Discovery
+
+Optional read-only Gateway API discovery mode. Instead of
+configuring an `InferencePool` directly, Praxis can read
+a Kubernetes `HTTPRoute`, find its `InferencePool`
+backendRef, and reuse existing pool discovery.
+
+```yaml
+- filter: llmd_endpoint_picker
+  gateway_api:
+    http_route:
+      name: sim-route
+      namespace: default
+    models: ["fake-model"]
+    metrics_path: /metrics
+    inference_pool_api_version: inference.networking.k8s.io/v1
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `http_route.name` | string | required | HTTPRoute resource name |
+| `http_route.namespace` | string | SA namespace or `default` | HTTPRoute namespace |
+| `models` | list | required | Models served by discovered endpoints |
+| `metrics_path` | string | `/metrics` | Metrics scrape path for pods |
+| `inference_pool_api_version` | string | `inference.networking.k8s.io/v1` | InferencePool API version |
+
+The filter reads the HTTPRoute, finds the first
+`InferencePool` backendRef (kind `InferencePool` with
+group `inference.networking.k8s.io` or
+`inference.networking.x-k8s.io`), then discovers pods
+using the existing InferencePool discovery path.
+
+`gateway_api` and direct `inference_pool` are mutually
+exclusive. Static `endpoints` may coexist with either.
+
+Limitations: read-only (no Gateway controller), no
+weighted backendRef splitting, no path/header matching,
+no InferenceObjective support.
+
+#### InferenceModelRewrite
+
+Optional model rewrite policy support. When enabled, the
+filter reads `InferenceModelRewrite` resources from the
+Kubernetes API and rewrites the request `model` field
+before endpoint selection.
+
+```yaml
+- filter: llmd_endpoint_picker
+  model_rewrite:
+    enabled: true
+    namespace: default
+    api_version: llm-d.ai/v1alpha2
+    pool_ref:
+      name: sim-pool
+      group: inference.networking.k8s.io
+      kind: InferencePool
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | bool | required | Enable model rewrite |
+| `namespace` | string | SA namespace or `default` | Namespace for rewrite resources |
+| `api_version` | string | `llm-d.ai/v1alpha2` | CRD API version |
+| `pool_ref.name` | string | required | InferencePool to filter by |
+| `pool_ref.group` | string | `inference.networking.k8s.io` | Pool ref group |
+| `pool_ref.kind` | string | `InferencePool` | Pool ref kind |
+
+Precedence: exact model match beats generic fallback.
+Across multiple rewrite resources targeting the same pool,
+oldest `creationTimestamp` wins. Within one resource, first
+matching rule in list order wins.
+
+Weighted target selection distributes across targets by
+weight. The rewritten model replaces the `model` field in
+the JSON request body before endpoint selection.
+
+Limitations: polling only (no K8s watch), no status writes.
+
+#### InferenceObjective Priority Metadata
+
+Optional support for resolving request priority from
+`InferenceObjective` Kubernetes resources. When enabled,
+the filter reads the `x-llm-d-inference-objective` request
+header (or deprecated `x-gateway-inference-objective`),
+looks up the named objective, and records its priority in
+request metadata.
+
+```yaml
+- filter: llmd_endpoint_picker
+  inference_objective:
+    enabled: true
+    namespace: default
+    api_version: llm-d.ai/v1alpha2
+    pool_ref:
+      name: sim-pool
+      group: inference.networking.k8s.io
+      kind: InferencePool
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | bool | required | Enable objective lookup |
+| `namespace` | string | SA namespace or `default` | Namespace for objective resources |
+| `api_version` | string | `llm-d.ai/v1alpha2` | CRD API version |
+| `pool_ref.name` | string | required | InferencePool to filter by |
+| `pool_ref.group` | string | `inference.networking.k8s.io` | Pool ref group |
+| `pool_ref.kind` | string | `InferencePool` | Pool ref kind |
+
+Sets metadata: `llmd.inference_objective` (name, `none`,
+or `unknown`), `llmd.inference_objective_priority`
+(resolved integer), `llmd.inference_objective_source`
+(source resource name).
+
+Priority metadata is observability-only in this release.
+It does not affect routing, scoring, or admission.
+Future flow-control work will use this metadata for
+priority-aware queuing and admission.
+
+Limitations: metadata only (no routing impact), polling
+only (no K8s watch), no status writes.
 
 ### Prompt Enrich
 
