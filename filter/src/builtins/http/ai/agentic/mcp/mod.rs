@@ -181,7 +181,7 @@ impl HttpFilter for McpFilter {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Private Utilities
 // -----------------------------------------------------------------------------
 
 /// Build a `JsonRpcConfig` for the shared parser with MCP-appropriate defaults.

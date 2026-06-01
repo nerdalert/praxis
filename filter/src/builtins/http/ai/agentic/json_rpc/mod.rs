@@ -151,7 +151,7 @@ impl HttpFilter for JsonRpcFilter {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Private Utilities
 // -----------------------------------------------------------------------------
 
 /// Handle JSON-RPC parse errors based on error type and `on_invalid` config.

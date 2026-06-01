@@ -185,7 +185,7 @@ impl HttpFilter for A2aFilter {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Private Utilities
 // -----------------------------------------------------------------------------
 
 /// Build a `JsonRpcConfig` for the shared parser with A2A-appropriate defaults.

@@ -112,7 +112,7 @@ fn classify_format(obj: &serde_json::Map<String, serde_json::Value>) -> AiReques
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Private Utilities
 // -----------------------------------------------------------------------------
 
 /// Build a result with no extracted facts.
