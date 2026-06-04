@@ -146,6 +146,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
+        "llmd_endpoint_picker",
+        crate::builtins::LlmdEndpointPickerFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
         "model_to_header",
         crate::builtins::ModelToHeaderFilter::from_config,
     );
@@ -269,6 +275,11 @@ mod tests {
         );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
         assert!(names.contains(&"mcp"), "mcp should be registered");
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"llmd_endpoint_picker"),
+            "llmd_endpoint_picker should be registered"
+        );
         #[cfg(feature = "ai-inference")]
         assert!(
             names.contains(&"model_to_header"),

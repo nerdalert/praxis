@@ -23,6 +23,8 @@ mod header_manipulation;
 mod health_checks;
 mod hostname_upstream;
 mod least_connections;
+#[cfg(feature = "ai-inference")]
+mod llmd_endpoint_picker;
 mod logging;
 mod max_body_guard;
 mod max_connections;

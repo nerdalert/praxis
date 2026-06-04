@@ -7,6 +7,8 @@ pub(crate) mod http;
 mod tcp;
 
 #[cfg(feature = "ai-inference")]
+pub use http::LlmdEndpointPickerFilter;
+#[cfg(feature = "ai-inference")]
 pub use http::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::PromptEnrichFilter;

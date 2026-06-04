@@ -35,6 +35,7 @@ and the [extensions guide](../filters/extensions.md).
 | `url_rewrite` | Transformation | HTTP |
 | `sni_router` | Traffic Management | TCP |
 | `tcp_load_balancer` | Traffic Management | TCP |
+| `llmd_endpoint_picker` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `model_to_header` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `prompt_enrich` | AI / Inference | HTTP (requires `ai-inference` feature) |
 
@@ -681,6 +682,57 @@ non-empty `content` string. JSON is re-serialized, so
 byte-for-byte body identity is not preserved. In chains
 that also use `json_body_field` or `model_to_header`,
 place `prompt_enrich` first.
+
+## llm-d Endpoint Picker
+
+Native endpoint picker for llm-d compatible inference
+workloads. Buffers OpenAI-compatible request bodies,
+extracts the `model` field, filters endpoints by model
+and health, scores by queue depth and KV-cache pressure,
+and routes to the highest-scored endpoint. Requires the
+`ai-inference` feature. See [llmd-endpoint-picker.yaml].
+
+[llmd-endpoint-picker.yaml]: ../../examples/configs/ai/llmd-endpoint-picker.yaml
+
+```yaml
+- filter: llmd_endpoint_picker
+  pool_name: llmd-pool
+  queue_weight: 2.0
+  kv_cache_weight: 2.0
+  endpoints:
+    - name: vllm-a
+      address: "10.0.1.1:8000"
+      models: ["meta-llama/Llama-3.2-3B-Instruct"]
+      running_requests: 2
+      waiting_requests: 0
+      kv_cache_usage_percent: 15.0
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `pool_name` | string | `"llmd"` | Logical pool name for metadata and cluster accounting |
+| `max_body_bytes` | integer | 10485760 | Maximum body size to buffer (10 MiB) |
+| `queue_weight` | float | `2.0` | Weight for inverse queue-depth scoring |
+| `kv_cache_weight` | float | `2.0` | Weight for inverse KV-cache pressure scoring |
+| `endpoints` | list | (required) | Static endpoint definitions (at least one) |
+
+Each endpoint entry:
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `name` | string | (required) | Stable endpoint name for metadata and logs |
+| `address` | string | (required) | Upstream address in `host:port` form |
+| `models` | list | (required) | Models served by this endpoint (at least one) |
+| `running_requests` | integer | `0` | Current running request count |
+| `waiting_requests` | integer | `0` | Current waiting request count |
+| `kv_cache_usage_percent` | float | `0.0` | KV-cache utilization percentage (0-100) |
+| `healthy` | boolean | `true` | Whether the endpoint is eligible for requests |
+
+Scoring formula:
+`score = queue_weight / (1 + queue_depth) + kv_cache_weight * (1 - kv/100)`.
+The endpoint with the highest score is selected. Only
+healthy endpoints serving the requested model are
+considered.
 
 ## Conditions
 
