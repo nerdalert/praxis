@@ -37,6 +37,9 @@ pub struct VegetaConfig {
 
     /// Optional request body.
     pub body: Option<Vec<u8>>,
+
+    /// Optional request headers (e.g. `Content-Type: application/json`).
+    pub headers: Vec<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -173,7 +176,11 @@ fn prepare_vegeta_files(
 
     let method = &config.method;
     let url = &config.target;
-    let target_spec = format!("{method} {url}\n");
+    let mut target_spec = format!("{method} {url}\n");
+    for header in &config.headers {
+        target_spec.push_str(header);
+        target_spec.push('\n');
+    }
     let target_path = dir.path().join("vegeta-targets.txt");
     std::fs::write(&target_path, &target_spec).map_err(BenchmarkError::Io)?;
 
@@ -572,5 +579,56 @@ mod tests {
             "bytes_per_sec should be 0 when duration is 0, got {}",
             result.throughput.bytes_per_sec
         );
+    }
+
+    #[test]
+    fn prepare_vegeta_files_writes_headers() {
+        let config = VegetaConfig {
+            target: "http://127.0.0.1:8080/v1/chat/completions".into(),
+            rate: 0,
+            duration: Duration::from_secs(5),
+            workers: 4,
+            method: "POST".into(),
+            body: Some(b"{}".to_vec()),
+            headers: vec!["Content-Type: application/json".into(), "X-Custom: test".into()],
+        };
+        let (_dir, target_path, body_path) = prepare_vegeta_files(&config).expect("should prepare files");
+
+        let targets = std::fs::read_to_string(&target_path).expect("should read targets file");
+        assert!(
+            targets.contains("POST http://127.0.0.1:8080/v1/chat/completions"),
+            "target file should contain method and URL"
+        );
+        assert!(
+            targets.contains("Content-Type: application/json"),
+            "target file should contain Content-Type header"
+        );
+        assert!(
+            targets.contains("X-Custom: test"),
+            "target file should contain custom header"
+        );
+        assert!(body_path.is_some(), "body path should be present when body is set");
+    }
+
+    #[test]
+    fn prepare_vegeta_files_no_headers() {
+        let config = VegetaConfig {
+            target: "http://127.0.0.1:8080/".into(),
+            rate: 100,
+            duration: Duration::from_secs(5),
+            workers: 4,
+            method: "GET".into(),
+            body: None,
+            headers: Vec::new(),
+        };
+        let (_dir, target_path, body_path) = prepare_vegeta_files(&config).expect("should prepare files");
+
+        let targets = std::fs::read_to_string(&target_path).expect("should read targets file");
+        assert_eq!(
+            targets.trim(),
+            "GET http://127.0.0.1:8080/",
+            "target file with no headers should be method + URL only"
+        );
+        assert!(body_path.is_none(), "body path should be None when no body");
     }
 }

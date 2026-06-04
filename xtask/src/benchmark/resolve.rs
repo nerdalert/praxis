@@ -13,7 +13,7 @@ use super::cli::Args;
 // Constants
 // -----------------------------------------------------------------------------
 
-/// All workload type names.
+/// All generic workload type names.
 const ALL_WORKLOADS: &[&str] = &[
     "high-concurrency-small-requests",
     "large-payloads",
@@ -24,6 +24,9 @@ const ALL_WORKLOADS: &[&str] = &[
     "tcp-throughput",
     "tcp-connection-rate",
 ];
+
+/// All llm-d workload type names.
+const ALL_LLMD_WORKLOADS: &[&str] = &["llmd-chat-small", "llmd-chat-large-prompt", "llmd-chat-streaming"];
 
 // -----------------------------------------------------------------------------
 // Proxy Names
@@ -45,7 +48,11 @@ pub(crate) fn resolve_proxy_names(proxies: &[String]) -> Vec<String> {
 // Workloads
 // -----------------------------------------------------------------------------
 
-/// Resolve selected workloads (default: all).
+/// Resolve selected workloads (default: all generic workloads).
+///
+/// llm-d workloads (`llmd-chat-small`, etc.) must be requested
+/// explicitly via `--workload`. For llm-d smoke testing, use
+/// `benchmarks/llm-d/run-smoke.sh` instead of `cargo xtask benchmark`.
 pub(crate) fn resolve_workloads(args: &Args) -> Vec<String> {
     if args.workloads.is_empty() {
         ALL_WORKLOADS.iter().map(|s| (*s).into()).collect()
@@ -88,6 +95,9 @@ pub(crate) fn build_scenarios(args: &Args, workload_names: &[String]) -> Vec<Sce
 ///
 /// [`Workload`]: benchmarks::scenario::Workload
 fn parse_workload(name: &str, args: &Args) -> Workload {
+    if let Some(w) = parse_llmd_workload(name, args) {
+        return w;
+    }
     match name {
         "high-concurrency-small-requests" => Workload::SmallRequests {
             concurrency: args.concurrency,
@@ -110,12 +120,33 @@ fn parse_workload(name: &str, args: &Args) -> Workload {
         },
         "tcp-throughput" => Workload::TcpThroughput,
         "tcp-connection-rate" => Workload::TcpConnectionRate,
-        other => {
-            eprintln!(
-                "error: unknown workload '{other}'\n\nvalid workloads: {}",
-                ALL_WORKLOADS.join(", ")
-            );
-            std::process::exit(1);
-        },
+        other => unknown_workload(other),
     }
+}
+
+/// Parse an llm-d workload name, returning `None` for non-llm-d names.
+fn parse_llmd_workload(name: &str, args: &Args) -> Option<Workload> {
+    match name {
+        "llmd-chat-small" => Some(Workload::LlmdChatSmall {
+            concurrency: args.concurrency,
+        }),
+        "llmd-chat-large-prompt" => Some(Workload::LlmdChatLargePrompt {
+            concurrency: args.concurrency,
+            prompt_size: args.prompt_size,
+        }),
+        "llmd-chat-streaming" => Some(Workload::LlmdChatStreaming {
+            concurrency: args.concurrency,
+        }),
+        _ => None,
+    }
+}
+
+/// Print an error for an unknown workload name and exit.
+fn unknown_workload(name: &str) -> ! {
+    let all: Vec<&str> = ALL_WORKLOADS.iter().chain(ALL_LLMD_WORKLOADS.iter()).copied().collect();
+    eprintln!(
+        "error: unknown workload '{name}'\n\nvalid workloads: {}",
+        all.join(", ")
+    );
+    std::process::exit(1);
 }

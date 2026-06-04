@@ -191,10 +191,7 @@ fn validate_approximate_mode(cfg: &PrefixCacheConfig) -> Result<(), FilterError>
 /// Validate precise-mode-specific fields.
 fn validate_precise_mode(cfg: &PrefixCacheConfig) -> Result<(), FilterError> {
     let Some(ref precise) = cfg.precise else {
-        return Err(
-            "llmd_endpoint_picker: prefix_cache.precise is required when mode is precise"
-                .into(),
-        );
+        return Err("llmd_endpoint_picker: prefix_cache.precise is required when mode is precise".into());
     };
     super::precise_prefix::validate_precise_config(precise)
 }

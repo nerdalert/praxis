@@ -46,33 +46,46 @@ impl ScenarioSettings {
 
 /// Extract workload-specific parameters into a map.
 fn workload_params(workload: &Workload) -> BTreeMap<String, serde_json::Value> {
-    let mut params = BTreeMap::new();
+    let mut p = BTreeMap::new();
     match workload {
-        Workload::SmallRequests { concurrency } => {
-            params.insert("concurrency".into(), (*concurrency).into());
-        },
-        Workload::LargePayload { body_size } => {
-            params.insert("body_size".into(), (*body_size).into());
-        },
+        Workload::SmallRequests { concurrency }
+        | Workload::LlmdChatSmall { concurrency }
+        | Workload::LlmdChatStreaming { concurrency } => insert_u32(&mut p, "concurrency", *concurrency),
+        Workload::LargePayload { body_size } => insert_usize(&mut p, "body_size", *body_size),
         Workload::LargePayloadHighConcurrency { concurrency, body_size } => {
-            params.insert("concurrency".into(), (*concurrency).into());
-            params.insert("body_size".into(), (*body_size).into());
+            insert_u32(&mut p, "concurrency", *concurrency);
+            insert_usize(&mut p, "body_size", *body_size);
         },
-        Workload::HighConnectionCount { connections } => {
-            params.insert("connections".into(), (*connections).into());
+        Workload::LlmdChatLargePrompt {
+            concurrency,
+            prompt_size,
+        } => {
+            insert_u32(&mut p, "concurrency", *concurrency);
+            insert_usize(&mut p, "prompt_size", *prompt_size);
         },
+        Workload::HighConnectionCount { connections } => insert_u32(&mut p, "connections", *connections),
         Workload::Ramp {
             start_qps,
             end_qps,
             step,
         } => {
-            params.insert("start_qps".into(), (*start_qps).into());
-            params.insert("end_qps".into(), (*end_qps).into());
-            params.insert("step".into(), (*step).into());
+            insert_u32(&mut p, "start_qps", *start_qps);
+            insert_u32(&mut p, "end_qps", *end_qps);
+            insert_u32(&mut p, "step", *step);
         },
         Workload::Sustained | Workload::TcpThroughput | Workload::TcpConnectionRate => {},
     }
-    params
+    p
+}
+
+/// Insert a `u32` parameter.
+fn insert_u32(params: &mut BTreeMap<String, serde_json::Value>, key: &str, value: u32) {
+    params.insert(key.into(), value.into());
+}
+
+/// Insert a `usize` parameter.
+fn insert_usize(params: &mut BTreeMap<String, serde_json::Value>, key: &str, value: usize) {
+    params.insert(key.into(), value.into());
 }
 
 /// Build a settings map from a list of scenarios.

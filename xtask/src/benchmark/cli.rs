@@ -104,6 +104,11 @@ pub(crate) struct Args {
     /// Include raw tool reports (Vegeta/Fortio JSON) in output.
     #[arg(long, default_value_t = false)]
     pub include_raw_report: bool,
+
+    /// Approximate prompt payload size for llmd-chat-large-prompt
+    /// workload (bytes).
+    #[arg(long, default_value_t = 65_536)]
+    pub prompt_size: usize,
 }
 
 /// CLI arguments for `cargo xtask benchmark compare`.

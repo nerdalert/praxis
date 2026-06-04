@@ -1,0 +1,29 @@
+# Praxis llm-d benchmark config: praxis-simple profile.
+#
+# Generic reverse proxy to whatever backend is listening on 127.0.0.1:18080.
+# No llmd_endpoint_picker — measures pure Praxis/Pingora data-plane overhead.
+# The smoke script (benchmarks/llm-d/run-smoke.sh) starts a minimal Python
+# mock backend on that port. For real benchmarks, replace with
+# llm-d-inference-sim or another OpenAI-compatible backend.
+
+admin:
+  address: "127.0.0.1:9901"
+
+listeners:
+  - name: default
+    address: "0.0.0.0:18090"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/v1/"
+            cluster: simulator
+
+      - filter: load_balancer
+        clusters:
+          - name: simulator
+            endpoints:
+              - "127.0.0.1:18080"

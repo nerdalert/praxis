@@ -210,7 +210,12 @@ impl Runner {
 
     /// Run load generation for a single measurement window.
     async fn run_load(&self, proxy: &dyn ProxyConfig, duration: Duration) -> Result<String, BenchmarkError> {
-        let url = format!("http://{}/", proxy.listen_address());
+        let base = format!("http://{}", proxy.listen_address());
+        let url = if self.scenario.workload.is_llmd() {
+            format!("{base}/v1/chat/completions")
+        } else {
+            format!("{base}/")
+        };
         let addr: String = proxy.listen_address().into();
         dispatch_workload(&self.scenario.workload, &url, addr, duration).await
     }
@@ -233,12 +238,19 @@ impl Runner {
 // -----------------------------------------------------------------------------
 
 /// Dispatch a workload to the appropriate load tool.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "flat match dispatch table over workload variants"
+)]
 async fn dispatch_workload(
     workload: &Workload,
     url: &str,
     addr: String,
     duration: Duration,
 ) -> Result<String, BenchmarkError> {
+    if workload.is_llmd() {
+        return dispatch_llmd_workload(workload, url, duration).await;
+    }
     match workload {
         Workload::SmallRequests { concurrency } => {
             vegeta::run(&vegeta_config(url, "GET", 0, (*concurrency).min(64), duration, None)).await
@@ -258,7 +270,24 @@ async fn dispatch_workload(
         },
         Workload::TcpThroughput => fortio::run(&fortio_config(addr, FortioProtocol::Tcp, 8, duration)).await,
         Workload::TcpConnectionRate => fortio::run(&fortio_config(addr, FortioProtocol::Tcp, 1, duration)).await,
+        Workload::LlmdChatSmall { .. } | Workload::LlmdChatLargePrompt { .. } | Workload::LlmdChatStreaming { .. } => {
+            unreachable!("llm-d workloads handled above")
+        },
     }
+}
+
+/// Dispatch an llm-d workload to Vegeta with JSON headers.
+async fn dispatch_llmd_workload(workload: &Workload, url: &str, duration: Duration) -> Result<String, BenchmarkError> {
+    let (body, concurrency) = match workload {
+        Workload::LlmdChatSmall { concurrency } => (crate::llmd::chat_small_body(), *concurrency),
+        Workload::LlmdChatLargePrompt {
+            concurrency,
+            prompt_size,
+        } => (crate::llmd::chat_large_prompt_body(*prompt_size), *concurrency),
+        Workload::LlmdChatStreaming { concurrency } => (crate::llmd::chat_streaming_body(), *concurrency),
+        _ => unreachable!("dispatch_llmd_workload called with non-llmd workload"),
+    };
+    run_llmd_load(url, concurrency.min(64), duration, body).await
 }
 
 /// Run a POST vegeta load with a generated body.
@@ -276,6 +305,20 @@ async fn run_post_load(
         duration,
         Some(vec![b'x'; body_size]),
     ))
+    .await
+}
+
+/// Run an llm-d chat completion workload via Vegeta.
+async fn run_llmd_load(url: &str, workers: u32, duration: Duration, body: Vec<u8>) -> Result<String, BenchmarkError> {
+    vegeta::run(&VegetaConfig {
+        target: url.into(),
+        rate: 0,
+        duration,
+        workers,
+        method: "POST".into(),
+        body: Some(body),
+        headers: vec!["Content-Type: application/json".into()],
+    })
     .await
 }
 
@@ -300,6 +343,7 @@ fn vegeta_config(
         workers,
         method: method.into(),
         body,
+        headers: Vec::new(),
     }
 }
 

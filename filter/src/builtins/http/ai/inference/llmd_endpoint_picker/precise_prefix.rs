@@ -4,7 +4,7 @@
 //! Precise prefix-cache scoring for the llm-d endpoint picker.
 //!
 //! Matches the Go EPP's token-level prefix-cache behavior: tokenizes
-//! request text with a HuggingFace tokenizer, chunks into exact
+//! request text with a `HuggingFace` tokenizer, chunks into exact
 //! `block_size_tokens` blocks (no partial blocks), and computes
 //! chained FNV-64a hashes over CBOR-encoded `[parent, tokens, extra]`
 //! payloads. This produces block keys that are bit-identical to those
@@ -73,7 +73,7 @@ pub(super) struct PrecisePrefixConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TokenizerConfig {
-    /// Filesystem path to the HuggingFace `tokenizer.json`.
+    /// Filesystem path to the `HuggingFace` `tokenizer.json`.
     pub path: String,
 }
 
@@ -91,7 +91,7 @@ fn default_block_size_tokens() -> usize {
 // Tokenizer Wrapper
 // -----------------------------------------------------------------------------
 
-/// Thin wrapper around a HuggingFace tokenizer loaded from a file.
+/// Thin wrapper around a `HuggingFace` tokenizer loaded from a file.
 pub(super) struct PreciseTokenizer {
     /// The underlying tokenizer instance.
     tokenizer: tokenizers::Tokenizer,
@@ -166,15 +166,8 @@ fn hash_cbor_payload(parent: u64, tokens: &[u32], extra: &str) -> u64 {
 }
 
 /// Build the CBOR array value `[parent, tokens, extra]`.
-fn build_cbor_array(
-    parent: u64,
-    tokens: &[u32],
-    extra: &str,
-) -> ciborium::Value {
-    let token_values: Vec<ciborium::Value> = tokens
-        .iter()
-        .map(|t| ciborium::Value::Integer((*t).into()))
-        .collect();
+fn build_cbor_array(parent: u64, tokens: &[u32], extra: &str) -> ciborium::Value {
+    let token_values: Vec<ciborium::Value> = tokens.iter().map(|t| ciborium::Value::Integer((*t).into())).collect();
 
     let extra_value = if extra.is_empty() {
         ciborium::Value::Null
@@ -202,10 +195,7 @@ fn fnv1a_hash(data: &[u8]) -> u64 {
 /// Split tokens into exact `block_size` chunks, discarding any
 /// trailing partial block.
 fn chunk_tokens_exact(tokens: &[u32], block_size: usize) -> Vec<&[u32]> {
-    tokens
-        .chunks(block_size)
-        .filter(|c| c.len() == block_size)
-        .collect()
+    tokens.chunks(block_size).filter(|c| c.len() == block_size).collect()
 }
 
 // -----------------------------------------------------------------------------
@@ -274,12 +264,7 @@ impl PrecisePrefixIndex {
     }
 
     /// Record speculative block keys with a TTL.
-    pub fn record_speculative(
-        &mut self,
-        endpoint: &Arc<str>,
-        block_keys: Vec<u64>,
-        ttl_ms: u64,
-    ) {
+    pub fn record_speculative(&mut self, endpoint: &Arc<str>, block_keys: Vec<u64>, ttl_ms: u64) {
         let expires_at = Instant::now() + std::time::Duration::from_millis(ttl_ms);
         self.record(endpoint, &block_keys);
         self.speculative.push(SpeculativeEntry {
@@ -292,18 +277,11 @@ impl PrecisePrefixIndex {
     /// Evict expired speculative entries.
     pub fn evict_expired_speculative(&mut self) {
         let now = Instant::now();
-        let expired: Vec<SpeculativeEntry> = self
-            .speculative
-            .extract_if(.., |e| e.expires_at <= now)
-            .collect();
+        let expired: Vec<SpeculativeEntry> = self.speculative.extract_if(.., |e| e.expires_at <= now).collect();
 
         for entry in &expired {
             for &key in &entry.block_keys {
-                remove_hash_mapping(
-                    &mut self.hash_to_endpoints,
-                    key,
-                    &entry.endpoint,
-                );
+                remove_hash_mapping(&mut self.hash_to_endpoints, key, &entry.endpoint);
             }
         }
     }
@@ -311,11 +289,7 @@ impl PrecisePrefixIndex {
     /// Count contiguous prefix matches for each endpoint.
     ///
     /// Stops at the first block key with no matching endpoints.
-    pub fn longest_prefix_match(
-        &self,
-        block_keys: &[u64],
-        candidates: &[Arc<str>],
-    ) -> HashMap<Arc<str>, usize> {
+    pub fn longest_prefix_match(&self, block_keys: &[u64], candidates: &[Arc<str>]) -> HashMap<Arc<str>, usize> {
         let mut counts: HashMap<Arc<str>, usize> = HashMap::new();
 
         for key in block_keys {
@@ -361,11 +335,7 @@ impl PrecisePrefixIndex {
 }
 
 /// Evict the oldest entry from the LRU and clean up the hash map.
-fn evict_oldest(
-    lru: &mut VecDeque<u64>,
-    map: &mut HashMap<u64, HashSet<Arc<str>>>,
-    endpoint: &Arc<str>,
-) {
+fn evict_oldest(lru: &mut VecDeque<u64>, map: &mut HashMap<u64, HashSet<Arc<str>>>, endpoint: &Arc<str>) {
     if let Some(evicted) = lru.pop_front() {
         remove_hash_mapping(map, evicted, endpoint);
     }
@@ -373,11 +343,7 @@ fn evict_oldest(
 
 /// Remove one endpoint from a hash-to-endpoints mapping entry,
 /// deleting the entry if empty.
-fn remove_hash_mapping(
-    map: &mut HashMap<u64, HashSet<Arc<str>>>,
-    key: u64,
-    endpoint: &Arc<str>,
-) {
+fn remove_hash_mapping(map: &mut HashMap<u64, HashSet<Arc<str>>>, key: u64, endpoint: &Arc<str>) {
     if let Some(set) = map.get_mut(&key) {
         set.remove(endpoint);
         if set.is_empty() {
@@ -428,25 +394,16 @@ pub(super) fn compute_precise_prefix_scores(
 /// # Errors
 ///
 /// Returns [`crate::FilterError`] when any field has an invalid value.
-pub(super) fn validate_precise_config(
-    cfg: &PrecisePrefixConfig,
-) -> Result<(), crate::FilterError> {
+pub(super) fn validate_precise_config(cfg: &PrecisePrefixConfig) -> Result<(), crate::FilterError> {
     if cfg.tokenizer.path.trim().is_empty() {
-        return Err(
-            "llmd_endpoint_picker: precise.tokenizer.path must not be empty"
-                .into(),
-        );
+        return Err("llmd_endpoint_picker: precise.tokenizer.path must not be empty".into());
     }
     if cfg.block_size_tokens == 0 {
-        return Err(
-            "llmd_endpoint_picker: precise.block_size_tokens must be > 0"
-                .into(),
-        );
+        return Err("llmd_endpoint_picker: precise.block_size_tokens must be > 0".into());
     }
     if cfg.speculative_ttl_ms == 0 && cfg.speculative_indexing {
         return Err(
-            "llmd_endpoint_picker: precise.speculative_ttl_ms must be > 0 when speculative_indexing is enabled"
-                .into(),
+            "llmd_endpoint_picker: precise.speculative_ttl_ms must be > 0 when speculative_indexing is enabled".into(),
         );
     }
     Ok(())
@@ -481,10 +438,7 @@ mod tests {
     #[test]
     fn fnv1a_hash_empty_is_offset_basis() {
         let result = fnv1a_hash(b"");
-        assert_eq!(
-            result, FNV_OFFSET_BASIS,
-            "FNV-1a of empty input should be offset basis"
-        );
+        assert_eq!(result, FNV_OFFSET_BASIS, "FNV-1a of empty input should be offset basis");
     }
 
     // -- CBOR + FNV hash stability --
@@ -521,10 +475,7 @@ mod tests {
     fn cbor_fnv_hash_nil_vs_empty_string() {
         let h_nil = hash_cbor_payload(0, &[1], "");
         let h_str = hash_cbor_payload(0, &[1], "something");
-        assert_ne!(
-            h_nil, h_str,
-            "nil extra vs string extra must differ"
-        );
+        assert_ne!(h_nil, h_str, "nil extra vs string extra must differ");
     }
 
     // -- Token chunking --
@@ -609,11 +560,7 @@ mod tests {
         index.record(&ep, &keys);
         let matches = index.longest_prefix_match(&keys, &[Arc::clone(&ep)]);
 
-        assert_eq!(
-            matches.get(&ep).copied(),
-            Some(3),
-            "all 3 blocks should match"
-        );
+        assert_eq!(matches.get(&ep).copied(), Some(3), "all 3 blocks should match");
     }
 
     #[test]
@@ -625,11 +572,7 @@ mod tests {
         let query = vec![100, 200, 300, 400];
         let matches = index.longest_prefix_match(&query, &[Arc::clone(&ep)]);
 
-        assert_eq!(
-            matches.get(&ep).copied(),
-            Some(2),
-            "should match first 2 blocks only"
-        );
+        assert_eq!(matches.get(&ep).copied(), Some(2), "should match first 2 blocks only");
     }
 
     #[test]
@@ -644,14 +587,8 @@ mod tests {
         );
 
         index.record(&ep, &[4]);
-        assert!(
-            !index.hash_to_endpoints.contains_key(&1),
-            "key 1 should be evicted"
-        );
-        assert!(
-            index.hash_to_endpoints.contains_key(&4),
-            "key 4 should exist"
-        );
+        assert!(!index.hash_to_endpoints.contains_key(&1), "key 1 should be evicted");
+        assert!(index.hash_to_endpoints.contains_key(&4), "key 4 should exist");
     }
 
     #[test]
@@ -666,14 +603,8 @@ mod tests {
         let active: HashSet<Arc<str>> = [Arc::clone(&ep_a)].into_iter().collect();
         index.cleanup_stale(&active);
 
-        assert!(
-            index.endpoint_lru.contains_key(&ep_a),
-            "active endpoint retained"
-        );
-        assert!(
-            !index.endpoint_lru.contains_key(&ep_b),
-            "stale endpoint removed"
-        );
+        assert!(index.endpoint_lru.contains_key(&ep_a), "active endpoint retained");
+        assert!(!index.endpoint_lru.contains_key(&ep_b), "stale endpoint removed");
     }
 
     // -- Speculative indexing --
@@ -731,12 +662,7 @@ mod tests {
         let keys = vec![10, 20, 30, 40];
 
         index.record(&ep, &keys);
-        let scores = compute_precise_prefix_scores(
-            &index,
-            &keys,
-            keys.len(),
-            &[Arc::clone(&ep)],
-        );
+        let scores = compute_precise_prefix_scores(&index, &keys, keys.len(), &[Arc::clone(&ep)]);
 
         let score = scores.get(&ep).copied().unwrap_or(0.0);
         assert!(
@@ -752,12 +678,7 @@ mod tests {
 
         index.record(&ep, &[10, 20]);
         let query = vec![10, 20, 30, 40];
-        let scores = compute_precise_prefix_scores(
-            &index,
-            &query,
-            query.len(),
-            &[Arc::clone(&ep)],
-        );
+        let scores = compute_precise_prefix_scores(&index, &query, query.len(), &[Arc::clone(&ep)]);
 
         let score = scores.get(&ep).copied().unwrap_or(0.0);
         assert!(
@@ -780,9 +701,7 @@ mod tests {
     #[test]
     fn validate_rejects_empty_tokenizer_path() {
         let cfg = PrecisePrefixConfig {
-            tokenizer: TokenizerConfig {
-                path: String::new(),
-            },
+            tokenizer: TokenizerConfig { path: String::new() },
             speculative_indexing: false,
             speculative_ttl_ms: 30_000,
             hash_seed: String::new(),
@@ -839,10 +758,7 @@ mod tests {
             hash_seed: "my-seed".to_owned(),
             block_size_tokens: 16,
         };
-        assert!(
-            validate_precise_config(&cfg).is_ok(),
-            "valid config should be accepted"
-        );
+        assert!(validate_precise_config(&cfg).is_ok(), "valid config should be accepted");
     }
 
     // -- Init hash seed --
@@ -850,10 +766,7 @@ mod tests {
     #[test]
     fn init_hash_seed_empty_string() {
         let seed = compute_init_hash_seed("");
-        assert_eq!(
-            seed, FNV_OFFSET_BASIS,
-            "empty seed should give FNV offset basis"
-        );
+        assert_eq!(seed, FNV_OFFSET_BASIS, "empty seed should give FNV offset basis");
     }
 
     #[test]

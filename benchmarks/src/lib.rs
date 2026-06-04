@@ -12,6 +12,8 @@
 
 /// Error types for benchmark operations.
 pub mod error;
+/// llm-d benchmark metadata and request body generators.
+pub mod llmd;
 /// Network utilities for benchmark orchestration.
 pub mod net;
 /// Proxy configuration trait and built-in implementations.

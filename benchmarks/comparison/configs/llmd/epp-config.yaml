@@ -1,0 +1,26 @@
+# Minimal EPP config for benchmark baseline.
+#
+# Uses file-discovery with a single static endpoint and random picker.
+# No Kubernetes, no scoring, no metrics scraping.
+plugins:
+  - name: file-disc
+    type: file-discovery
+    parameters:
+      path: PLACEHOLDER_ENDPOINTS_PATH
+
+  - name: random-picker
+    type: random-picker
+
+  - name: single-profile
+    type: single-profile-handler
+    parameters:
+      picker: random-picker
+
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: single-profile
+
+dataLayer:
+  discovery:
+    pluginRef: file-disc

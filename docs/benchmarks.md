@@ -395,3 +395,110 @@ GitHub Actions workflows run on this repository:
 - `release.yaml`: tag-triggered release workflow
 - `publish.yaml`: manual container build and push to
   GHCR
+
+## llm-d Benchmarks
+
+Praxis includes benchmark profiles for comparing the
+native `llmd_endpoint_picker` path against generic
+proxy behavior and (planned) the Envoy plus Go EPP
+baseline.
+
+### Profiles
+
+| Profile | Request path | Status |
+| --- | --- | --- |
+| `praxis-simple` | client -> Praxis proxy -> backend | Runnable (smoke uses mock backend) |
+| `praxis-native` | client -> Praxis `llmd_endpoint_picker` -> backend | Runnable (smoke uses mock backend) |
+| `envoy-go-epp` | client -> Envoy ext_proc -> Go EPP -> backend | Runnable (smoke uses mock backend, Docker Envoy, local EPP) |
+| `envoy-praxis-native` | client -> Envoy -> Praxis native -> backend | Planned |
+
+### Workloads
+
+| Workload | Endpoint | Description |
+| --- | --- | --- |
+| `llmd-chat-small` | `/v1/chat/completions` | Small OpenAI chat request |
+| `llmd-chat-large-prompt` | `/v1/chat/completions` | Large prompt payload |
+| `llmd-chat-streaming` | `/v1/chat/completions` | Streaming (`"stream": true`) |
+
+### Running the Smoke Benchmark
+
+The smoke script is the only supported way to run
+llm-d benchmarks in this slice. The `cargo xtask
+benchmark` path supports llm-d workload types but
+does not yet orchestrate llm-d-specific proxy configs
+or backends.
+
+```console
+./benchmarks/llm-d/run-smoke.sh [DURATION_SECS] [WARMUP_SECS]
+```
+
+The script starts a minimal Python mock backend
+(stdlib only, no pip packages), builds or reuses the
+Praxis binary, and runs both `praxis-simple` and
+`praxis-native` profiles with the `llmd-chat-small`
+workload. All output formats (JSON, YAML, text) are
+generated from a single Vegeta sample per profile.
+
+Results are written to
+`target/criterion/llmd-smoke/` with per-profile
+JSON, YAML, text reports and Praxis logs under
+`target/criterion/llmd-smoke/logs/`.
+
+### Running the Envoy + Go EPP Baseline
+
+A separate script runs the `envoy-go-epp` profile.
+Requires Docker (for Envoy) and either a pre-built
+Go EPP binary or the `llm-d-router` repo to build
+from source.
+
+```console
+./benchmarks/llm-d/run-envoy-go-epp-smoke.sh [DURATION_SECS] [WARMUP_SECS]
+```
+
+The request path is: Vegeta -> Envoy (Docker,
+port 18091) -> ext_proc gRPC -> Go EPP (local
+binary, port 9002) -> ORIGINAL_DST -> mock backend
+(port 18080). EPP uses file-based discovery with
+no Kubernetes.
+
+### What These Results Measure
+
+These benchmarks measure Praxis control-path overhead:
+request parsing, filter pipeline execution, route
+selection, upstream connection, and response
+forwarding. With a mock backend, they **do not**
+measure real GPU inference, KV-cache hit latency,
+NIXL/RDMA transfer, or production model serving.
+
+### What These Results Cannot Claim
+
+- Production throughput or latency
+- Real GPU scheduling behavior
+- True KV-cache hit TTFT improvements
+- NIXL/RDMA data movement performance
+
+### Configuration
+
+Proxy configs live in
+`benchmarks/comparison/configs/llmd/`:
+
+| Profile | Config | Description |
+| --- | --- | --- |
+| `praxis-simple` | `praxis-simple.yaml` | Generic router + load balancer |
+| `praxis-native` | `praxis-native.yaml` | `llmd_endpoint_picker` filter |
+| `envoy-go-epp` | `envoy-go-epp.yaml` + `epp-config.yaml` + `epp-endpoints.yaml` | Envoy ext_proc + Go EPP with file discovery |
+
+All profiles route requests to whatever backend is
+listening on `127.0.0.1:18080` (the smoke scripts
+start a minimal Python mock). The Praxis profiles
+expose an admin endpoint on `127.0.0.1:9901`; the
+Envoy profile uses `127.0.0.1:19000`. The
+`praxis-native` config uses static endpoint state,
+not scraped vLLM metrics.
+
+### Extending
+
+To add a new llm-d workload, add a variant to
+`Workload` in `benchmarks/src/scenario/workload.rs`,
+a body generator in `benchmarks/src/llmd.rs`, and
+dispatch logic in `benchmarks/src/runner.rs`.

@@ -9,6 +9,12 @@ mod inference_objective;
 mod kubernetes;
 mod metrics;
 mod model_rewrite;
+#[allow(
+    dead_code,
+    unreachable_pub,
+    reason = "precise prefix scoring is staged; wired from prefix_cache but not yet called at the filter entry point"
+)]
+mod precise_prefix;
 mod prefix_cache;
 mod saturation;
 mod state;
