@@ -1084,7 +1084,12 @@ fn response_header_default_action_appends() {
     let mut ctx = make_ctx(&req);
     ctx.response_header = Some(&mut resp);
 
-    let hvo = make_hvo_with_append("x-existing", "appended", HeaderAppendAction::AppendIfExistsOrAdd as i32, None);
+    let hvo = make_hvo_with_append(
+        "x-existing",
+        "appended",
+        HeaderAppendAction::AppendIfExistsOrAdd as i32,
+        None,
+    );
     let mutation = HeaderMutation {
         set_headers: vec![hvo],
         remove_headers: vec![],
@@ -1112,7 +1117,12 @@ fn response_header_overwrite_action_replaces() {
     let mut ctx = make_ctx(&req);
     ctx.response_header = Some(&mut resp);
 
-    let hvo = make_hvo_with_append("x-existing", "replaced", HeaderAppendAction::OverwriteIfExistsOrAdd as i32, None);
+    let hvo = make_hvo_with_append(
+        "x-existing",
+        "replaced",
+        HeaderAppendAction::OverwriteIfExistsOrAdd as i32,
+        None,
+    );
     let mutation = HeaderMutation {
         set_headers: vec![hvo],
         remove_headers: vec![],
@@ -1538,10 +1548,7 @@ async fn grpc_unexpected_response_type_returns_error() {
         err.contains("RequestBody"),
         "error should name the unexpected variant: {err}"
     );
-    assert!(
-        err.contains("request"),
-        "error should mention the phase: {err}"
-    );
+    assert!(err.contains("request"), "error should mention the phase: {err}");
 }
 
 #[tokio::test]
