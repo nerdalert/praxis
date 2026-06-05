@@ -257,7 +257,8 @@ pub(crate) fn is_pseudo_header(name: &str) -> bool {
 ///
 /// Uses `append_action` when set (non-zero), falling back to the
 /// deprecated `append` field. Default behaviour (both unset) is
-/// overwrite (insert).
+/// append, matching the proto3 default of `APPEND_IF_EXISTS_OR_ADD`
+/// (enum value 0).
 fn should_append(hvo: &HeaderValueOption) -> bool {
     use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
 
@@ -265,5 +266,8 @@ fn should_append(hvo: &HeaderValueOption) -> bool {
         return hvo.append_action == HeaderAppendAction::AppendIfExistsOrAdd as i32;
     }
 
-    hvo.append.unwrap_or(false)
+    // proto3 default for append_action is 0 (APPEND_IF_EXISTS_OR_ADD).
+    // Fall back to deprecated `append`; default to true (append)
+    // when neither field is explicitly set.
+    hvo.append.unwrap_or(true)
 }
