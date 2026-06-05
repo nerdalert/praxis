@@ -1084,15 +1084,7 @@ fn response_header_default_action_appends() {
     let mut ctx = make_ctx(&req);
     ctx.response_header = Some(&mut resp);
 
-    let hvo = HeaderValueOption {
-        header: Some(HeaderValue {
-            key: "x-existing".to_owned(),
-            value: "appended".to_owned(),
-            raw_value: Vec::new(),
-        }),
-        append: None,
-        append_action: HeaderAppendAction::AppendIfExistsOrAdd as i32,
-    };
+    let hvo = make_hvo_with_append("x-existing", "appended", HeaderAppendAction::AppendIfExistsOrAdd as i32, None);
     let mutation = HeaderMutation {
         set_headers: vec![hvo],
         remove_headers: vec![],
@@ -1120,15 +1112,7 @@ fn response_header_overwrite_action_replaces() {
     let mut ctx = make_ctx(&req);
     ctx.response_header = Some(&mut resp);
 
-    let hvo = HeaderValueOption {
-        header: Some(HeaderValue {
-            key: "x-existing".to_owned(),
-            value: "replaced".to_owned(),
-            raw_value: Vec::new(),
-        }),
-        append: None,
-        append_action: HeaderAppendAction::OverwriteIfExistsOrAdd as i32,
-    };
+    let hvo = make_hvo_with_append("x-existing", "replaced", HeaderAppendAction::OverwriteIfExistsOrAdd as i32, None);
     let mutation = HeaderMutation {
         set_headers: vec![hvo],
         remove_headers: vec![],
@@ -1152,17 +1136,8 @@ fn response_header_zero_action_with_append_true_appends() {
     let mut ctx = make_ctx(&req);
     ctx.response_header = Some(&mut resp);
 
-    let hvo = HeaderValueOption {
-        header: Some(HeaderValue {
-            key: "x-existing".to_owned(),
-            value: "appended".to_owned(),
-            raw_value: Vec::new(),
-        }),
-        append: Some(true),
-        append_action: 0,
-    };
     let mutation = HeaderMutation {
-        set_headers: vec![hvo],
+        set_headers: vec![make_hvo_with_append("x-existing", "appended", 0, Some(true))],
         remove_headers: vec![],
     };
 
@@ -1190,17 +1165,8 @@ fn response_header_zero_action_with_append_false_overwrites() {
     let mut ctx = make_ctx(&req);
     ctx.response_header = Some(&mut resp);
 
-    let hvo = HeaderValueOption {
-        header: Some(HeaderValue {
-            key: "x-existing".to_owned(),
-            value: "replaced".to_owned(),
-            raw_value: Vec::new(),
-        }),
-        append: Some(false),
-        append_action: 0,
-    };
     let mutation = HeaderMutation {
-        set_headers: vec![hvo],
+        set_headers: vec![make_hvo_with_append("x-existing", "replaced", 0, Some(false))],
         remove_headers: vec![],
     };
 
@@ -1676,6 +1642,19 @@ fn make_hvo(key: &str, value: &str) -> HeaderValueOption {
         }),
         append: None,
         append_action: 0,
+    }
+}
+
+/// Build a [`HeaderValueOption`] with explicit append control.
+fn make_hvo_with_append(key: &str, value: &str, append_action: i32, append: Option<bool>) -> HeaderValueOption {
+    HeaderValueOption {
+        header: Some(HeaderValue {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            raw_value: Vec::new(),
+        }),
+        append,
+        append_action,
     }
 }
 

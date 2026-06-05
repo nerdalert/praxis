@@ -34,45 +34,25 @@ use crate::Phase;
 /// the Envoy `ext_proc` convention that external processors
 /// expect.
 pub(crate) fn request_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHeaders {
-    let mut headers = Vec::new();
-
-    headers.push(HeaderValue {
-        key: ":method".to_owned(),
-        value: ctx.request.method.as_str().to_owned(),
-        raw_value: Vec::new(),
-    });
-    headers.push(HeaderValue {
-        key: ":path".to_owned(),
-        value: ctx
-            .request
-            .uri
-            .path_and_query()
-            .map_or(ctx.request.uri.path(), http::uri::PathAndQuery::as_str)
-            .to_owned(),
-        raw_value: Vec::new(),
-    });
-
+    let path = ctx
+        .request
+        .uri
+        .path_and_query()
+        .map_or_else(|| ctx.request.uri.path(), http::uri::PathAndQuery::as_str);
     let scheme = if ctx.downstream_tls { "https" } else { "http" };
-    headers.push(HeaderValue {
-        key: ":scheme".to_owned(),
-        value: scheme.to_owned(),
-        raw_value: Vec::new(),
-    });
+
+    let mut headers = vec![
+        proto_header(":method", ctx.request.method.as_str()),
+        proto_header(":path", path),
+        proto_header(":scheme", scheme),
+    ];
 
     if let Some(authority) = ctx.request.headers.get(http::header::HOST) {
-        headers.push(HeaderValue {
-            key: ":authority".to_owned(),
-            value: authority.to_str().unwrap_or_default().to_owned(),
-            raw_value: Vec::new(),
-        });
+        headers.push(proto_header(":authority", authority.to_str().unwrap_or_default()));
     }
 
     for (name, value) in &ctx.request.headers {
-        headers.push(HeaderValue {
-            key: name.as_str().to_owned(),
-            value: value.to_str().unwrap_or_default().to_owned(),
-            raw_value: Vec::new(),
-        });
+        headers.push(proto_header(name.as_str(), value.to_str().unwrap_or_default()));
     }
 
     HttpHeaders {
@@ -209,10 +189,10 @@ fn remove_response_headers(names: &[String], resp: &mut praxis_filter::Response)
         if is_pseudo_header(name) {
             continue;
         }
-        if let Ok(header_name) = http::HeaderName::try_from(name.as_str()) {
-            if resp.headers.remove(&header_name).is_some() {
-                modified = true;
-            }
+        if let Ok(header_name) = http::HeaderName::try_from(name.as_str())
+            && resp.headers.remove(&header_name).is_some()
+        {
+            modified = true;
         }
     }
     modified
@@ -268,6 +248,15 @@ pub(crate) fn header_value_string(hv: &HeaderValue) -> String {
 /// Returns `true` if the header name is an HTTP/2 pseudo-header.
 pub(crate) fn is_pseudo_header(name: &str) -> bool {
     name.starts_with(':')
+}
+
+/// Build a [`HeaderValue`] proto with the given key and value.
+fn proto_header(key: &str, value: &str) -> HeaderValue {
+    HeaderValue {
+        key: key.to_owned(),
+        value: value.to_owned(),
+        raw_value: Vec::new(),
+    }
 }
 
 /// Whether the [`HeaderValueOption`] indicates an append operation.
