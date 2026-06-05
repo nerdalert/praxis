@@ -752,6 +752,21 @@ fn request_to_proto_headers_includes_method_and_path() {
 }
 
 #[test]
+fn request_to_proto_headers_preserves_query_string() {
+    let req = make_request(Method::GET, "/search?q=secret&page=1");
+    let ctx = make_ctx(&req);
+
+    let proto = mutations::request_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+
+    let path = headers.iter().find(|h| h.key == ":path").expect("should include :path");
+    assert_eq!(
+        path.value, "/search?q=secret&page=1",
+        "path pseudo-header should include query string"
+    );
+}
+
+#[test]
 fn request_to_proto_headers_includes_request_headers() {
     let mut req = make_request(Method::GET, "/");
     req.headers.insert("content-type", "application/json".parse().unwrap());

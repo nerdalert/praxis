@@ -42,11 +42,12 @@ pub(crate) fn request_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHeade
     });
     headers.push(HeaderValue {
         key: ":path".to_owned(),
-    value: ctx.request
-        .uri
-        .path_and_query()
-        .map_or(ctx.request.uri.path(), http::uri::PathAndQuery::as_str)
-        .to_owned(),
+        value: ctx
+            .request
+            .uri
+            .path_and_query()
+            .map_or(ctx.request.uri.path(), http::uri::PathAndQuery::as_str)
+            .to_owned(),
         raw_value: Vec::new(),
     });
 
