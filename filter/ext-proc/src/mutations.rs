@@ -210,8 +210,9 @@ fn remove_response_headers(names: &[String], resp: &mut praxis_filter::Response)
             continue;
         }
         if let Ok(header_name) = http::HeaderName::try_from(name.as_str()) {
-            resp.headers.remove(&header_name);
-            modified = true;
+            if resp.headers.remove(&header_name).is_some() {
+                modified = true;
+            }
         }
     }
     modified
