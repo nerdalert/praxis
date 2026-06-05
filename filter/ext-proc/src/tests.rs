@@ -767,6 +767,67 @@ fn request_to_proto_headers_preserves_query_string() {
 }
 
 #[test]
+fn request_to_proto_headers_includes_scheme() {
+    let req = make_request(Method::GET, "/");
+    let ctx = make_ctx(&req);
+
+    let proto = mutations::request_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+
+    let scheme = headers
+        .iter()
+        .find(|h| h.key == ":scheme")
+        .expect("should include :scheme");
+    assert_eq!(scheme.value, "http", "scheme should default to http");
+}
+
+#[test]
+fn request_to_proto_headers_includes_https_scheme() {
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+    ctx.downstream_tls = true;
+
+    let proto = mutations::request_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+
+    let scheme = headers
+        .iter()
+        .find(|h| h.key == ":scheme")
+        .expect("should include :scheme");
+    assert_eq!(scheme.value, "https", "scheme should be https when TLS is active");
+}
+
+#[test]
+fn request_to_proto_headers_includes_authority() {
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert("host", "example.com".parse().unwrap());
+    let ctx = make_ctx(&req);
+
+    let proto = mutations::request_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+
+    let authority = headers
+        .iter()
+        .find(|h| h.key == ":authority")
+        .expect("should include :authority");
+    assert_eq!(authority.value, "example.com", "authority should match host header");
+}
+
+#[test]
+fn request_to_proto_headers_omits_authority_when_no_host() {
+    let req = make_request(Method::GET, "/");
+    let ctx = make_ctx(&req);
+
+    let proto = mutations::request_to_proto_headers(&ctx);
+    let headers = proto.headers.unwrap().headers;
+
+    assert!(
+        headers.iter().all(|h| h.key != ":authority"),
+        "should not include :authority when host header is absent"
+    );
+}
+
+#[test]
 fn request_to_proto_headers_includes_request_headers() {
     let mut req = make_request(Method::GET, "/");
     req.headers.insert("content-type", "application/json".parse().unwrap());

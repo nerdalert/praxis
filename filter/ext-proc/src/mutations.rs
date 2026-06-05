@@ -29,9 +29,10 @@ use crate::Phase;
 
 /// Build [`HttpHeaders`] from the current request context.
 ///
-/// Includes `:method` and `:path` pseudo-headers followed by all
-/// request headers, matching the Envoy `ext_proc` convention that
-/// external processors expect.
+/// Includes `:method`, `:path`, `:scheme`, and `:authority`
+/// pseudo-headers followed by all request headers, matching
+/// the Envoy `ext_proc` convention that external processors
+/// expect.
 pub(crate) fn request_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHeaders {
     let mut headers = Vec::new();
 
@@ -50,6 +51,21 @@ pub(crate) fn request_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHeade
             .to_owned(),
         raw_value: Vec::new(),
     });
+
+    let scheme = if ctx.downstream_tls { "https" } else { "http" };
+    headers.push(HeaderValue {
+        key: ":scheme".to_owned(),
+        value: scheme.to_owned(),
+        raw_value: Vec::new(),
+    });
+
+    if let Some(authority) = ctx.request.headers.get(http::header::HOST) {
+        headers.push(HeaderValue {
+            key: ":authority".to_owned(),
+            value: authority.to_str().unwrap_or_default().to_owned(),
+            raw_value: Vec::new(),
+        });
+    }
 
     for (name, value) in &ctx.request.headers {
         headers.push(HeaderValue {
