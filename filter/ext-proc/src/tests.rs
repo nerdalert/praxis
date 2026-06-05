@@ -1877,10 +1877,21 @@ async fn start_mock_processor(behavior: MockBehavior) -> (SocketAddr, MockServer
             .unwrap();
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_server(addr).await;
 
     let guard = MockServerGuard {
         shutdown: Some(shutdown_tx),
     };
     (addr, guard)
+}
+
+/// Poll until the server accepts a TCP connection.
+async fn wait_for_server(addr: SocketAddr) {
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("mock server at {addr} did not become ready");
 }
