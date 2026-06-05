@@ -5,7 +5,7 @@
 # chosen backend address; Envoy's ORIGINAL_DST cluster forwards there.
 #
 # Run Envoy with --network host so ORIGINAL_DST can reach host-local
-# backends (e.g. the Python mock on 127.0.0.1:18080).
+# backends (e.g. the mock or simulator on 127.0.0.1:18080).
 
 admin:
   address:

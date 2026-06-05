@@ -461,6 +461,69 @@ binary, port 9002) -> ORIGINAL_DST -> mock backend
 (port 18080). EPP uses file-based discovery with
 no Kubernetes.
 
+### Running Extended Benchmarks
+
+For stable median-selected results with longer
+measurement windows and multiple repetitions:
+
+```console
+./benchmarks/llm-d/run-extended-benchmark.sh [DURATION] [WARMUP] [RUNS]
+```
+
+Default: 30s duration, 5s warmup, 3 runs. Runs all
+three profiles sequentially and prints a summary
+table with per-profile medians.
+
+Results go to `target/criterion/llmd-extended/` with
+per-run files (`{profile}-run{n}.json`) and
+`{profile}-median.json` summaries.
+
+### Running with llm-d-inference-sim
+
+Replace the Python mock backend with the real
+`llm-d-inference-sim` for all three profiles:
+
+```console
+./benchmarks/llm-d/run-sim-benchmark.sh [DURATION] [WARMUP] [RUNS]
+```
+
+Requires the `llm-d-inference-sim` binary (builds
+from source via `LLM_D_SIM_REPO` or set
+`LLM_D_SIM_BIN`). Same methodology as the extended
+benchmark. Results go to
+`target/criterion/llmd-sim/`.
+
+### Running Large-Prompt Benchmarks
+
+Test request body handling with configurable prompt
+sizes (default 16 KiB, 64 KiB, 256 KiB):
+
+```console
+./benchmarks/llm-d/run-sim-large-prompt-benchmark.sh [DURATION] [WARMUP] [RUNS]
+```
+
+Results go to
+`target/criterion/llmd-sim-large-prompt/`.
+
+### GuideLLM Benchmarks
+
+GuideLLM provides LLM-specific metrics (TTFT, ITL,
+token throughput) as a second harness alongside
+Vegeta. It does not replace the Vegeta scripts.
+
+```console
+./benchmarks/llm-d/run-guidellm-sim-benchmark.sh [MAX_SECONDS]
+```
+
+GuideLLM runs with `--backend-kwargs
+'{"validate_backend": false}'` and explicit `--model
+test-model`. No proxy config changes are needed.
+Results go to `target/criterion/llmd-guidellm/`.
+
+Supported GuideLLM profiles: `concurrent`, `constant`,
+`poisson`, `sweep`. Configurable via `GUIDELLM_PROFILES`
+environment variable.
+
 ### What These Results Measure
 
 These benchmarks measure Praxis control-path overhead:
