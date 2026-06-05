@@ -990,6 +990,179 @@ fn apply_response_header_mutation_noop_when_no_response() {
 }
 
 // -----------------------------------------------------------------------------
+// Mutation: should_append (via set_response_headers)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn response_header_default_action_appends() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("x-existing", "original".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let hvo = HeaderValueOption {
+        header: Some(HeaderValue {
+            key: "x-existing".to_owned(),
+            value: "appended".to_owned(),
+            raw_value: Vec::new(),
+        }),
+        append: None,
+        append_action: HeaderAppendAction::AppendIfExistsOrAdd as i32,
+    };
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    let resp = ctx.response_header.unwrap();
+    let values: Vec<&str> = resp
+        .headers
+        .get_all("x-existing")
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default())
+        .collect();
+    assert_eq!(values, vec!["original", "appended"], "default action should append");
+}
+
+#[test]
+fn response_header_overwrite_action_replaces() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("x-existing", "original".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let hvo = HeaderValueOption {
+        header: Some(HeaderValue {
+            key: "x-existing".to_owned(),
+            value: "replaced".to_owned(),
+            raw_value: Vec::new(),
+        }),
+        append: None,
+        append_action: HeaderAppendAction::OverwriteIfExistsOrAdd as i32,
+    };
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    let resp = ctx.response_header.unwrap();
+    assert_eq!(
+        resp.headers.get("x-existing").unwrap(),
+        "replaced",
+        "overwrite action should replace the existing value"
+    );
+}
+
+#[test]
+fn response_header_zero_action_with_append_true_appends() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("x-existing", "original".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let hvo = HeaderValueOption {
+        header: Some(HeaderValue {
+            key: "x-existing".to_owned(),
+            value: "appended".to_owned(),
+            raw_value: Vec::new(),
+        }),
+        append: Some(true),
+        append_action: 0,
+    };
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    let resp = ctx.response_header.unwrap();
+    let values: Vec<&str> = resp
+        .headers
+        .get_all("x-existing")
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        values,
+        vec!["original", "appended"],
+        "deprecated append=true should append"
+    );
+}
+
+#[test]
+fn response_header_zero_action_with_append_false_overwrites() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("x-existing", "original".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let hvo = HeaderValueOption {
+        header: Some(HeaderValue {
+            key: "x-existing".to_owned(),
+            value: "replaced".to_owned(),
+            raw_value: Vec::new(),
+        }),
+        append: Some(false),
+        append_action: 0,
+    };
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    let resp = ctx.response_header.unwrap();
+    assert_eq!(
+        resp.headers.get("x-existing").unwrap(),
+        "replaced",
+        "deprecated append=false should overwrite"
+    );
+}
+
+#[test]
+fn response_header_both_unset_defaults_to_append() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("x-existing", "original".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![make_hvo("x-existing", "appended")],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    let resp = ctx.response_header.unwrap();
+    let values: Vec<&str> = resp
+        .headers
+        .get_all("x-existing")
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        values,
+        vec!["original", "appended"],
+        "both fields unset should default to append per proto3 spec"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Mutation: immediate_to_rejection
 // -----------------------------------------------------------------------------
 
