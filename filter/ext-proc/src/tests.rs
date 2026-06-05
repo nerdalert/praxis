@@ -1474,6 +1474,50 @@ async fn grpc_noop_response_returns_continue() {
 }
 
 #[tokio::test]
+async fn grpc_unexpected_response_type_returns_error() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::UnexpectedBodyResponse).await;
+
+    let channel = connect_channel(addr).await;
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+    let timeout = Duration::from_secs(5);
+
+    let result = callout::process_request_headers(channel, &addr.to_string(), timeout, &mut ctx).await;
+
+    assert!(result.is_err(), "unexpected response type should return Err");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("RequestBody"),
+        "error should name the unexpected variant: {err}"
+    );
+    assert!(
+        err.contains("request"),
+        "error should mention the phase: {err}"
+    );
+}
+
+#[tokio::test]
+async fn grpc_phase_mismatched_response_returns_error() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::AlwaysResponseHeaders).await;
+
+    let channel = connect_channel(addr).await;
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+    let timeout = Duration::from_secs(5);
+
+    let result = callout::process_request_headers(channel, &addr.to_string(), timeout, &mut ctx).await;
+
+    assert!(result.is_err(), "phase-mismatched response should return Err");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ResponseHeaders"),
+        "error should name the mismatched variant: {err}"
+    );
+}
+
+#[tokio::test]
 async fn grpc_timeout_returns_error() {
     let (addr, _guard) = start_mock_processor(MockBehavior::Hang).await;
 
@@ -1577,7 +1621,7 @@ use std::{net::SocketAddr, pin::Pin};
 
 use async_trait::async_trait;
 use praxis_proto::envoy::service::ext_proc::v3::{
-    ProcessingRequest, ProcessingResponse,
+    BodyResponse, ProcessingRequest, ProcessingResponse,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
     processing_request, processing_response,
 };
@@ -1598,6 +1642,12 @@ enum MockBehavior {
 
     /// Never respond (for timeout testing).
     Hang,
+
+    /// Return an unexpected `RequestBody` response type.
+    UnexpectedBodyResponse,
+
+    /// Return `ResponseHeaders` regardless of request phase.
+    AlwaysResponseHeaders,
 }
 
 /// Mock implementation of the Envoy `ExternalProcessor` gRPC service.
@@ -1627,6 +1677,8 @@ impl ExternalProcessor for MockProcessor {
             MockBehavior::Noop => build_noop_response(&msg),
             MockBehavior::AddHeader { name, value } => build_add_header_response(&msg, name, value),
             MockBehavior::ImmediateReject { status, body } => build_immediate_response(*status, body),
+            MockBehavior::UnexpectedBodyResponse => build_unexpected_body_response(),
+            MockBehavior::AlwaysResponseHeaders => build_always_response_headers(),
         };
 
         let output = futures::stream::once(async { Ok(response) });
@@ -1685,6 +1737,26 @@ fn build_immediate_response(status: i32, body: &str) -> ProcessingResponse {
             body: body.to_owned(),
             grpc_status: None,
             details: String::new(),
+        })),
+        ..Default::default()
+    }
+}
+
+/// Build a `RequestBody` response to trigger the unexpected-type error path.
+fn build_unexpected_body_response() -> ProcessingResponse {
+    ProcessingResponse {
+        response: Some(processing_response::Response::RequestBody(BodyResponse {
+            response: None,
+        })),
+        ..Default::default()
+    }
+}
+
+/// Build a `ResponseHeaders` response regardless of the request phase.
+fn build_always_response_headers() -> ProcessingResponse {
+    ProcessingResponse {
+        response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+            response: None,
         })),
         ..Default::default()
     }

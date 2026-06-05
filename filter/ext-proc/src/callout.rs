@@ -145,13 +145,14 @@ fn dispatch_response(
         return Ok(FilterAction::Continue);
     };
 
-    match resp {
-        processing_response::Response::RequestHeaders(hr) | processing_response::Response::ResponseHeaders(hr) => {
+    match (resp, phase) {
+        (processing_response::Response::RequestHeaders(hr), Phase::Request)
+        | (processing_response::Response::ResponseHeaders(hr), Phase::Response) => {
             apply_headers_response(hr, ctx, phase);
             Ok(FilterAction::Continue)
         },
-        processing_response::Response::ImmediateResponse(imm) => Ok(immediate_to_rejection(imm)),
-        other => {
+        (processing_response::Response::ImmediateResponse(imm), _) => Ok(immediate_to_rejection(imm)),
+        (other, _) => {
             let variant = response_variant_name(other);
             Err(format!("ext_proc: unexpected response type '{variant}' during {phase} phase").into())
         },
