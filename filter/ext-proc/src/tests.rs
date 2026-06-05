@@ -1013,6 +1013,26 @@ fn apply_response_header_mutation_removes_header() {
 }
 
 #[test]
+fn apply_response_header_mutation_remove_absent_does_not_mark_modified() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![],
+        remove_headers: vec!["x-nonexistent".to_owned()],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        !ctx.response_headers_modified,
+        "removing an absent header should not mark response as modified"
+    );
+}
+
+#[test]
 fn apply_response_header_mutation_skips_pseudo_headers() {
     let req = make_request(Method::GET, "/");
     let mut resp = make_response();
