@@ -948,21 +948,154 @@ fn apply_request_header_mutation_skips_pseudo_headers() {
 }
 
 #[test]
-fn apply_request_header_mutation_skips_removal() {
+fn apply_request_header_mutation_removes_header() {
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert("x-remove-me", "gone".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![],
+        remove_headers: vec!["x-remove-me".to_owned()],
+    };
+
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert_eq!(
+        ctx.request_headers_to_remove.len(),
+        1,
+        "should queue one header for removal"
+    );
+    assert_eq!(
+        ctx.request_headers_to_remove[0].as_str(),
+        "x-remove-me",
+        "removed header name should match"
+    );
+}
+
+#[test]
+fn apply_request_header_mutation_removal_skips_pseudo_headers() {
     let req = make_request(Method::GET, "/");
     let mut ctx = make_ctx(&req);
 
     let mutation = HeaderMutation {
         set_headers: vec![],
-        remove_headers: vec!["content-type".to_owned()],
+        remove_headers: vec![":method".to_owned(), ":path".to_owned()],
+    };
+
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        ctx.request_headers_to_remove.is_empty(),
+        "pseudo-header removals should be skipped"
+    );
+}
+
+#[test]
+fn apply_request_header_mutation_overwrite_uses_set_queue() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert("x-existing", "old".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+
+    let hvo = make_hvo_with_append(
+        "x-existing",
+        "new",
+        HeaderAppendAction::OverwriteIfExistsOrAdd as i32,
+        None,
+    );
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
     };
 
     mutations::apply_request_header_mutation(&mutation, &mut ctx);
 
     assert!(
         ctx.extra_request_headers.is_empty(),
-        "removal should be skipped without error"
+        "overwrite should not use extra_request_headers"
     );
+    assert_eq!(
+        ctx.request_headers_to_set.len(),
+        1,
+        "overwrite should use request_headers_to_set"
+    );
+    assert_eq!(
+        ctx.request_headers_to_set[0].0.as_str(),
+        "x-existing",
+        "name should match"
+    );
+    assert_eq!(ctx.request_headers_to_set[0].1, "new", "value should match");
+}
+
+#[test]
+fn apply_request_header_mutation_overwrite_if_exists_skips_absent() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let hvo = make_hvo_with_append("x-absent", "value", HeaderAppendAction::OverwriteIfExists as i32, None);
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        ctx.request_headers_to_set.is_empty(),
+        "overwrite-if-exists should skip absent headers"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "should not fall through to append"
+    );
+}
+
+#[test]
+fn apply_request_header_mutation_add_if_absent_skips_existing() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert("x-existing", "old".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+
+    let hvo = make_hvo_with_append("x-existing", "new", HeaderAppendAction::AddIfAbsent as i32, None);
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "add-if-absent should skip existing headers"
+    );
+}
+
+#[test]
+fn apply_request_header_mutation_add_if_absent_adds_missing() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let hvo = make_hvo_with_append("x-new", "value", HeaderAppendAction::AddIfAbsent as i32, None);
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert_eq!(
+        ctx.extra_request_headers.len(),
+        1,
+        "add-if-absent should add missing headers"
+    );
+    assert_eq!(ctx.extra_request_headers[0].0, "x-new", "header name should match");
 }
 
 // -----------------------------------------------------------------------------

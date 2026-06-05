@@ -115,30 +115,83 @@ pub(crate) fn apply_headers_response(hr: &HeadersResponse, ctx: &mut HttpFilterC
 
 /// Apply header mutations to the upstream request.
 ///
-/// Adds headers via [`HttpFilterContext::extra_request_headers`].
+/// Maps each [`HeaderAppendAction`] variant to the appropriate
+/// context queue:
+///
+/// - `AppendIfExistsOrAdd` (default) → [`extra_request_headers`]
+/// - `OverwriteIfExistsOrAdd` → [`request_headers_to_set`]
+/// - `OverwriteIfExists` → [`request_headers_to_set`] (only if present)
+/// - `AddIfAbsent` → [`extra_request_headers`] (only if absent)
+///
 /// Pseudo-headers (`:` prefix) are skipped because Praxis sets
-/// method and path through dedicated context fields. Removals
-/// are logged and skipped: request headers are immutable by
-/// filter time in the Praxis pipeline.
+/// method, path, scheme, and authority through dedicated fields.
+///
+/// [`HeaderAppendAction`]: praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction
+/// [`extra_request_headers`]: HttpFilterContext::extra_request_headers
+/// [`request_headers_to_set`]: HttpFilterContext::request_headers_to_set
 pub(crate) fn apply_request_header_mutation(mutation: &HeaderMutation, ctx: &mut HttpFilterContext<'_>) {
-    for hvo in &mutation.set_headers {
-        if let Some(hv) = &hvo.header {
-            if is_pseudo_header(&hv.key) {
-                continue;
-            }
-            let value = header_value_string(hv);
-            ctx.extra_request_headers.push((Cow::Owned(hv.key.clone()), value));
-        }
-    }
+    remove_request_headers(&mutation.remove_headers, ctx);
+    set_request_headers(&mutation.set_headers, ctx);
+}
 
-    for name in &mutation.remove_headers {
+/// Queue request header removals, skipping pseudo-headers.
+fn remove_request_headers(names: &[String], ctx: &mut HttpFilterContext<'_>) {
+    for name in names {
         if is_pseudo_header(name) {
             continue;
         }
-        tracing::debug!(
-            header = %name,
-            "ext_proc: skipping request header removal (request headers are immutable)"
-        );
+        if let Ok(header_name) = http::HeaderName::try_from(name.as_str()) {
+            ctx.request_headers_to_remove.push(header_name);
+        }
+    }
+}
+
+/// Apply set-header mutations to the request context.
+fn set_request_headers(headers: &[HeaderValueOption], ctx: &mut HttpFilterContext<'_>) {
+    for hvo in headers {
+        let Some(hv) = &hvo.header else { continue };
+        if is_pseudo_header(&hv.key) {
+            continue;
+        }
+        let Ok(name) = http::HeaderName::try_from(hv.key.as_str()) else {
+            continue;
+        };
+        dispatch_request_header(hvo, hv, name, ctx);
+    }
+}
+
+/// Route a single request header mutation to the correct context queue.
+fn dispatch_request_header(
+    hvo: &HeaderValueOption,
+    hv: &HeaderValue,
+    name: http::HeaderName,
+    ctx: &mut HttpFilterContext<'_>,
+) {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let value = header_value_string(hv);
+
+    match resolve_append_action(hvo) {
+        HeaderAppendAction::OverwriteIfExistsOrAdd => {
+            if let Ok(v) = http::HeaderValue::try_from(&value) {
+                ctx.request_headers_to_set.push((name, v));
+            }
+        },
+        HeaderAppendAction::OverwriteIfExists => {
+            if ctx.request.headers.contains_key(&name)
+                && let Ok(v) = http::HeaderValue::try_from(&value)
+            {
+                ctx.request_headers_to_set.push((name, v));
+            }
+        },
+        HeaderAppendAction::AddIfAbsent => {
+            if !ctx.request.headers.contains_key(&name) {
+                ctx.extra_request_headers.push((Cow::Owned(hv.key.clone()), value));
+            }
+        },
+        HeaderAppendAction::AppendIfExistsOrAdd => {
+            ctx.extra_request_headers.push((Cow::Owned(hv.key.clone()), value));
+        },
     }
 }
 
@@ -259,21 +312,38 @@ fn proto_header(key: &str, value: &str) -> HeaderValue {
     }
 }
 
-/// Whether the [`HeaderValueOption`] indicates an append operation.
+/// Resolve the [`HeaderAppendAction`] for a [`HeaderValueOption`].
 ///
-/// Uses `append_action` when set (non-zero), falling back to the
-/// deprecated `append` field. Default behaviour (both unset) is
-/// append, matching the proto3 default of `APPEND_IF_EXISTS_OR_ADD`
-/// (enum value 0).
-fn should_append(hvo: &HeaderValueOption) -> bool {
+/// Uses `append_action` when set (non-zero). Falls back to the
+/// deprecated `append` field, mapping `true` / default to
+/// [`AppendIfExistsOrAdd`] and `false` to
+/// [`OverwriteIfExistsOrAdd`], matching proto3 default semantics.
+///
+/// [`HeaderAppendAction`]: praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction
+/// [`AppendIfExistsOrAdd`]: praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction::AppendIfExistsOrAdd
+/// [`OverwriteIfExistsOrAdd`]: praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction::OverwriteIfExistsOrAdd
+fn resolve_append_action(
+    hvo: &HeaderValueOption,
+) -> praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction {
     use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
 
     if hvo.append_action != 0 {
-        return hvo.append_action == HeaderAppendAction::AppendIfExistsOrAdd as i32;
+        return HeaderAppendAction::try_from(hvo.append_action).unwrap_or(HeaderAppendAction::AppendIfExistsOrAdd);
     }
 
     // proto3 default for append_action is 0 (APPEND_IF_EXISTS_OR_ADD).
     // Fall back to deprecated `append`; default to true (append)
     // when neither field is explicitly set.
-    hvo.append.unwrap_or(true)
+    if hvo.append.unwrap_or(true) {
+        HeaderAppendAction::AppendIfExistsOrAdd
+    } else {
+        HeaderAppendAction::OverwriteIfExistsOrAdd
+    }
+}
+
+/// Whether the [`HeaderValueOption`] indicates an append operation.
+fn should_append(hvo: &HeaderValueOption) -> bool {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    resolve_append_action(hvo) == HeaderAppendAction::AppendIfExistsOrAdd
 }
