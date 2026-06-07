@@ -160,7 +160,7 @@ fn dispatch_response(
 }
 
 /// Returns a human-readable name for a [`processing_response::Response`] variant.
-fn response_variant_name(resp: &processing_response::Response) -> &'static str {
+pub(crate) fn response_variant_name(resp: &processing_response::Response) -> &'static str {
     match resp {
         processing_response::Response::RequestHeaders(_) => "RequestHeaders",
         processing_response::Response::ResponseHeaders(_) => "ResponseHeaders",

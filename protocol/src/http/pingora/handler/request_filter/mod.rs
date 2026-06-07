@@ -100,19 +100,8 @@ pub(in crate::http) async fn execute(
     if matches!(caps.request_body_mode, BodyMode::StreamBuffer { .. }) {
         tracing::debug!("pre-reading request body for StreamBuffer inspection");
         match stream_buffer::pre_read_body(pipeline, session, ctx, &request).await {
-            Ok(extra_headers) => {
-                tracing::debug!(count = extra_headers.len(), "injecting promoted headers");
-                for (name, value) in extra_headers {
-                    if let (Ok(hname), Ok(hval)) = (
-                        http::header::HeaderName::from_bytes(name.as_bytes()),
-                        http::header::HeaderValue::from_str(&value),
-                    ) {
-                        let _insert = session.req_header_mut().insert_header(hname.clone(), hval.clone());
-                        request.headers.insert(hname, hval);
-                    } else {
-                        tracing::warn!(header = %name, "skipping invalid promoted header");
-                    }
-                }
+            Ok(mutations) => {
+                apply_pre_read_mutations(session, &mut request, mutations);
             },
             Err(PreReadError::Rejected(rejection)) => {
                 send_rejection(session, rejection).await;
@@ -229,6 +218,57 @@ async fn run_pipeline(
             headers_to_set: Vec::new(),
         }),
         Err(e) => Err(e),
+    }
+}
+
+/// Apply header mutations from body-phase pre-read to the session and
+/// request. Ordering: remove, set, then append/overwrite.
+fn apply_pre_read_mutations(session: &mut Session, request: &mut Request, mutations: stream_buffer::PreReadMutations) {
+    apply_pre_read_mutations_to_request(request, &mutations);
+    apply_pre_read_mutations_to_session(session, mutations);
+}
+
+/// Apply pre-read mutations to the Praxis [`Request`] snapshot.
+///
+/// This is the testable core: ordering is remove, set, then extra.
+/// Extra headers use overwrite semantics (matching Pingora's
+/// `insert_header`) which is correct for the Go EPP's `SetHeaders`
+/// pattern where echoed headers should replace, not duplicate.
+fn apply_pre_read_mutations_to_request(request: &mut Request, mutations: &stream_buffer::PreReadMutations) {
+    for name in &mutations.headers_to_remove {
+        request.headers.remove(name);
+    }
+    for (name, value) in &mutations.headers_to_set {
+        request.headers.insert(name.clone(), value.clone());
+    }
+    for (name, value) in &mutations.extra_headers {
+        if let (Ok(hname), Ok(hval)) = (
+            http::header::HeaderName::from_bytes(name.as_bytes()),
+            http::header::HeaderValue::from_str(value),
+        ) {
+            request.headers.insert(hname, hval);
+        }
+    }
+}
+
+/// Mirror pre-read mutations to the Pingora session headers.
+fn apply_pre_read_mutations_to_session(session: &mut Session, mutations: stream_buffer::PreReadMutations) {
+    let req_headers = session.req_header_mut();
+    for name in &mutations.headers_to_remove {
+        let _remove = req_headers.remove_header(name);
+    }
+    for (name, value) in &mutations.headers_to_set {
+        let _insert = req_headers.insert_header(name.clone(), value.clone());
+    }
+    for (name, value) in mutations.extra_headers {
+        if let (Ok(hname), Ok(hval)) = (
+            http::header::HeaderName::from_bytes(name.as_bytes()),
+            http::header::HeaderValue::from_str(&value),
+        ) {
+            let _insert = req_headers.insert_header(hname, hval);
+        } else {
+            tracing::warn!(header = %name, "skipping invalid promoted header");
+        }
     }
 }
 
@@ -415,6 +455,109 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Pre-Read Mutation Propagation
+    // -------------------------------------------------------------------------
+
+    use std::borrow::Cow;
+
+    #[test]
+    fn pre_read_remove_deletes_from_request() {
+        let mut req = make_request_with_header("x-remove-me", "gone");
+        let mutations = make_mutations_remove("x-remove-me");
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert!(
+            req.headers.get("x-remove-me").is_none(),
+            "removed header should be absent from request"
+        );
+    }
+
+    #[test]
+    fn pre_read_set_overwrites_in_request() {
+        let mut req = make_request_with_header("x-overwrite", "old");
+        let mutations = make_mutations_set("x-overwrite", "new");
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert_eq!(
+            req.headers.get("x-overwrite").unwrap(),
+            "new",
+            "set mutation should overwrite existing value"
+        );
+    }
+
+    #[test]
+    fn pre_read_extra_inserts_into_request() {
+        let mut req = make_request();
+        let mutations = make_mutations_extra("x-added", "value");
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert_eq!(
+            req.headers.get("x-added").unwrap(),
+            "value",
+            "extra mutation should add header"
+        );
+    }
+
+    #[test]
+    fn pre_read_extra_overwrites_existing_in_request() {
+        let mut req = make_request_with_header("x-existing", "old");
+        let mutations = make_mutations_extra("x-existing", "new");
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        let values: Vec<&str> = req
+            .headers
+            .get_all("x-existing")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            vec!["new"],
+            "extra mutation should overwrite existing header (Pingora insert semantics)"
+        );
+    }
+
+    #[test]
+    fn pre_read_ordering_remove_then_set_then_extra() {
+        let mut req = make_request_with_header("x-target", "original");
+        let mutations = stream_buffer::PreReadMutations {
+            extra_headers: vec![(Cow::Borrowed("x-target"), "from-extra".to_owned())],
+            headers_to_remove: vec!["x-target".parse().unwrap()],
+            headers_to_set: vec![("x-target".parse().unwrap(), "from-set".parse().unwrap())],
+        };
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert_eq!(
+            req.headers.get("x-target").unwrap(),
+            "from-extra",
+            "extra (last writer) should win after remove+set+extra sequence"
+        );
+    }
+
+    #[test]
+    fn pre_read_empty_mutations_is_noop() {
+        let mut req = make_request_with_header("x-keep", "kept");
+        let mutations = stream_buffer::PreReadMutations {
+            extra_headers: Vec::new(),
+            headers_to_remove: Vec::new(),
+            headers_to_set: Vec::new(),
+        };
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert_eq!(
+            req.headers.get("x-keep").unwrap(),
+            "kept",
+            "empty mutations should not change request"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
@@ -436,6 +579,47 @@ mod tests {
     fn empty_pipeline() -> FilterPipeline {
         let registry = FilterRegistry::with_builtins();
         FilterPipeline::build(&mut [], &registry).unwrap()
+    }
+
+    /// Create a request with a single header.
+    fn make_request_with_header(name: &str, value: &str) -> Request {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            http::header::HeaderValue::from_str(value).unwrap(),
+        );
+        Request {
+            method: Method::GET,
+            uri: Uri::from_static("/"),
+            headers,
+        }
+    }
+
+    /// Build mutations with a single remove entry.
+    fn make_mutations_remove(name: &str) -> stream_buffer::PreReadMutations {
+        stream_buffer::PreReadMutations {
+            extra_headers: Vec::new(),
+            headers_to_remove: vec![name.parse().unwrap()],
+            headers_to_set: Vec::new(),
+        }
+    }
+
+    /// Build mutations with a single set/overwrite entry.
+    fn make_mutations_set(name: &str, value: &str) -> stream_buffer::PreReadMutations {
+        stream_buffer::PreReadMutations {
+            extra_headers: Vec::new(),
+            headers_to_remove: Vec::new(),
+            headers_to_set: vec![(name.parse().unwrap(), value.parse().unwrap())],
+        }
+    }
+
+    /// Build mutations with a single extra/append entry.
+    fn make_mutations_extra(name: &str, value: &str) -> stream_buffer::PreReadMutations {
+        stream_buffer::PreReadMutations {
+            extra_headers: vec![(Cow::Owned(name.to_owned()), value.to_owned())],
+            headers_to_remove: Vec::new(),
+            headers_to_set: Vec::new(),
+        }
     }
 
     /// Build a pipeline with a single `static_response` filter that rejects.

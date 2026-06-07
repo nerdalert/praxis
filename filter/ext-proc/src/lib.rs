@@ -36,7 +36,9 @@
 #![deny(unreachable_pub)]
 
 mod callout;
+pub mod llmd_external_epp;
 mod mutations;
+pub mod request_phase;
 use std::time::Duration;
 
 use async_trait::async_trait;

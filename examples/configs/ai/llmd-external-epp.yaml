@@ -1,0 +1,44 @@
+# llm-d External EPP (Track B)
+#
+# Requires the ext-proc feature:
+#   cargo build -p praxis --features ext-proc
+#
+# Routes OpenAI-compatible inference requests through the llm-d
+# Go EPP (Endpoint Picker/Proxy) via the Envoy ext_proc gRPC
+# protocol. The EPP selects the best inference backend based on
+# scheduling policy and returns the endpoint in the
+# x-gateway-destination-endpoint header.
+#
+# No static clusters are needed: the filter sets ctx.upstream
+# directly from the EPP-selected endpoint.
+#
+# Prerequisites:
+#   - Go EPP running on gRPC port 9002 with file-based discovery
+#   - Inference backend(s) reachable at the discovered addresses
+#
+# Example request:
+#
+#   curl -X POST http://localhost:8080/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"my-model","messages":[{"role":"user","content":"Hello"}]}'
+#
+# Failure behavior:
+#   - EPP unavailable/timeout: returns status_on_error (503)
+#   - EPP ImmediateResponse: returns the EPP's status/body
+#   - Missing/invalid endpoint: returns status_on_error (503)
+#   - Request body > max_request_body_bytes: returns 413
+
+listeners:
+  - name: gateway
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - epp-routing
+
+filter_chains:
+  - name: epp-routing
+    filters:
+      - filter: llmd_external_epp
+        target: "http://127.0.0.1:9002"
+        request_timeout_ms: 10000
+        max_request_body_bytes: 4194304 # 4 MiB
+        status_on_error: 503

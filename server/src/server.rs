@@ -50,6 +50,17 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 // Server
 // -----------------------------------------------------------------------------
 
+/// Build the default filter registry including feature-gated filters.
+///
+/// Returns [`FilterRegistry::with_builtins`] plus any filters enabled
+/// via Cargo features (e.g. `ext-proc` adds `ext_proc` and
+/// `llmd_external_epp`).
+pub fn build_default_registry() -> FilterRegistry {
+    let mut registry = FilterRegistry::with_builtins();
+    register_feature_gated_filters(&mut registry);
+    registry
+}
+
 /// Build filter pipelines using the built-in registry, register protocols and run the server.
 ///
 /// # Security: Root Check
@@ -61,7 +72,36 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 /// Config is owned for the server's lifetime (never returns).
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
-    run_server_with_registry(config, FilterRegistry::with_builtins(), config_path)
+    run_server_with_registry(config, build_default_registry(), config_path)
+}
+
+/// Register filters that are gated behind Cargo features.
+///
+/// Calls [`fatal`] (process exit) if registration fails, because a
+/// feature-enabled binary without its expected filters is an
+/// invariant failure. This matches the existing convention for
+/// pipeline resolution failures.
+#[allow(unused_variables, reason = "registry unused when no features enabled")]
+fn register_feature_gated_filters(registry: &mut FilterRegistry) {
+    #[cfg(feature = "ext-proc")]
+    register_ext_proc_filters(registry);
+}
+
+/// Register `ext_proc` and `llmd_external_epp` filters.
+#[cfg(feature = "ext-proc")]
+fn register_ext_proc_filters(registry: &mut FilterRegistry) {
+    registry
+        .register(
+            "ext_proc",
+            praxis_filter::http_builtin(praxis_ext_proc::ExtProcFilter::from_config),
+        )
+        .unwrap_or_else(|e| fatal(&format!("ext_proc registration failed: {e}")));
+    registry
+        .register(
+            "llmd_external_epp",
+            praxis_filter::http_builtin(praxis_ext_proc::llmd_external_epp::LlmdExternalEppFilter::from_config),
+        )
+        .unwrap_or_else(|e| fatal(&format!("llmd_external_epp registration failed: {e}")));
 }
 
 /// Build filter pipelines from the given registry, register protocols and run the server.
@@ -444,5 +484,120 @@ mod tests {
         if !std::path::Path::new("praxis.yaml").exists() {
             assert!(path.is_none(), "should return None when praxis.yaml does not exist");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Feature-Gated Filter Registration
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn build_default_registry_succeeds() {
+        let _registry = super::build_default_registry();
+    }
+
+    #[test]
+    #[cfg(feature = "ext-proc")]
+    fn registry_contains_ext_proc() {
+        let registry = super::build_default_registry();
+        let filters = registry.available_filters();
+        assert!(
+            filters.contains(&"ext_proc"),
+            "ext-proc feature should register ext_proc filter, got: {filters:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "ext-proc")]
+    fn registry_contains_llmd_external_epp() {
+        let registry = super::build_default_registry();
+        let filters = registry.available_filters();
+        assert!(
+            filters.contains(&"llmd_external_epp"),
+            "ext-proc feature should register llmd_external_epp filter, got: {filters:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "ext-proc")]
+    fn valid_llmd_external_epp_config_validates() {
+        let config = praxis_core::config::Config::from_yaml(
+            r#"
+listeners:
+  - name: epp
+    address: "127.0.0.1:8080"
+    filter_chains: [epp]
+filter_chains:
+  - name: epp
+    filters:
+      - filter: llmd_external_epp
+        target: "http://127.0.0.1:9002"
+"#,
+        )
+        .unwrap();
+        let registry = super::build_default_registry();
+        let health = praxis_core::health::build_health_registry(&config.clusters);
+        let kv = praxis_core::kv::KvStoreRegistry::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(async { crate::pipelines::resolve_pipelines(&config, &registry, &health, &kv) });
+        assert!(result.is_ok(), "valid llmd_external_epp config should pass");
+    }
+
+    #[test]
+    #[cfg(feature = "ext-proc")]
+    fn ext_proc_config_validates_without_panic() {
+        let config = praxis_core::config::Config::from_yaml(
+            r#"
+listeners:
+  - name: epp
+    address: "127.0.0.1:8080"
+    filter_chains: [epp]
+filter_chains:
+  - name: epp
+    filters:
+      - filter: ext_proc
+        target: "http://127.0.0.1:50051"
+"#,
+        )
+        .unwrap();
+        let registry = super::build_default_registry();
+        let health = praxis_core::health::build_health_registry(&config.clusters);
+        let kv = praxis_core::kv::KvStoreRegistry::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(async { crate::pipelines::resolve_pipelines(&config, &registry, &health, &kv) });
+        assert!(result.is_ok(), "ext_proc config should validate without panic");
+    }
+
+    #[test]
+    #[cfg(feature = "ext-proc")]
+    fn invalid_llmd_external_epp_config_fails() {
+        let config = praxis_core::config::Config::from_yaml(
+            r#"
+listeners:
+  - name: epp
+    address: "127.0.0.1:8080"
+    filter_chains: [epp]
+filter_chains:
+  - name: epp
+    filters:
+      - filter: llmd_external_epp
+        request_timeout_ms: 5000
+"#,
+        )
+        .unwrap();
+        let registry = super::build_default_registry();
+        let health = praxis_core::health::build_health_registry(&config.clusters);
+        let kv = praxis_core::kv::KvStoreRegistry::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(async { crate::pipelines::resolve_pipelines(&config, &registry, &health, &kv) });
+        assert!(result.is_err(), "missing target should fail validation");
     }
 }

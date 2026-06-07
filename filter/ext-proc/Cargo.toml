@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-proto = { workspace = true }
 serde = { workspace = true }
