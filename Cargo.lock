@@ -2524,6 +2524,7 @@ dependencies = [
  "http",
  "praxis-proxy-filter",
  "praxis-proxy-proto",
+ "prost-types",
  "serde",
  "thiserror 2.0.18",
  "tokio",
