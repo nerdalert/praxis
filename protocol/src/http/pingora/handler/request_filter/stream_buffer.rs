@@ -68,6 +68,22 @@ pub(super) fn build_trace_response(session: &Session) -> Rejection {
 // StreamBuffer Pre-Read
 // -----------------------------------------------------------------------------
 
+/// Header mutations collected during body pre-read.
+///
+/// Body-phase filters may produce all three mutation types:
+/// removals, overwrites, and appends. This struct carries them
+/// back to the caller for application to the session and request.
+pub(super) struct PreReadMutations {
+    /// Headers to append to the upstream request.
+    pub(super) extra_headers: Vec<(Cow<'static, str>, String)>,
+
+    /// Headers to remove from the upstream request.
+    pub(super) headers_to_remove: Vec<http::header::HeaderName>,
+
+    /// Headers to set (overwrite) on the upstream request.
+    pub(super) headers_to_set: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
+}
+
 /// Errors that can occur during body pre-reading in `StreamBuffer` mode.
 pub(super) enum PreReadError {
     /// A filter rejected the request during body processing.
@@ -82,9 +98,9 @@ pub(super) enum PreReadError {
 
 /// Pre-read the request body from the session and run body filters.
 ///
-/// Returns any extra headers that body filters promoted (e.g.
-/// `json_body_field` extracting a model name). The accumulated body
-/// is stored in `ctx.pre_read_body` for later forwarding by
+/// Returns header mutations that body filters produced (appends,
+/// overwrites, and removals). The accumulated body is stored in
+/// `ctx.pre_read_body` for later forwarding by
 /// `request_body_filter`.
 #[allow(
     clippy::too_many_lines,
@@ -96,14 +112,20 @@ pub(super) async fn pre_read_body(
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
     request: &Request,
-) -> Result<Vec<(Cow<'static, str>, String)>, PreReadError> {
+) -> Result<PreReadMutations, PreReadError> {
     let caps = pipeline.body_capabilities();
     // Config validation enforces reasonable limits on `max_bytes`.
     // `usize::MAX` here means "no limit at this layer"; the
     // configured cap (or its absence) was already validated.
     let max_bytes = match caps.request_body_mode {
         BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(usize::MAX),
-        _ => return Ok(Vec::new()),
+        _ => {
+            return Ok(PreReadMutations {
+                extra_headers: Vec::new(),
+                headers_to_remove: Vec::new(),
+                headers_to_set: Vec::new(),
+            });
+        },
     };
 
     // Pingora only calls `request_body_filter` after pre-read when its
@@ -114,6 +136,8 @@ pub(super) async fn pre_read_body(
 
     let mut buffer = BodyBuffer::new(max_bytes);
     let mut all_extra_headers = Vec::new();
+    let mut all_headers_to_remove = Vec::new();
+    let mut all_headers_to_set = Vec::new();
     let mut released = false;
     let mut eos_body = None;
     let mut original_body_bytes: u64 = 0;
@@ -167,6 +191,8 @@ pub(super) async fn pre_read_body(
         ctx.filter_metadata = filter_ctx.filter_metadata;
         ctx.filter_results = filter_ctx.filter_results;
         all_extra_headers.extend(filter_ctx.extra_request_headers);
+        all_headers_to_remove.extend(filter_ctx.request_headers_to_remove);
+        all_headers_to_set.extend(filter_ctx.request_headers_to_set);
 
         match action {
             Ok(FilterAction::Continue | FilterAction::BodyDone) => {},
@@ -207,5 +233,9 @@ pub(super) async fn pre_read_body(
 
     ctx.request_body_released = true;
 
-    Ok(all_extra_headers)
+    Ok(PreReadMutations {
+        extra_headers: all_extra_headers,
+        headers_to_remove: all_headers_to_remove,
+        headers_to_set: all_headers_to_set,
+    })
 }

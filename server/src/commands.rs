@@ -30,13 +30,22 @@ pub(crate) fn load_and_validate_for_cli(
 }
 
 /// Validate a parsed configuration by building filter pipelines.
+///
+/// Wraps pipeline resolution in a Tokio runtime because
+/// `ExtProcFilter::from_config` calls tonic's `connect_lazy`
+/// which requires a reactor context. `LlmdExternalEppFilter`
+/// defers channel creation via `OnceCell` and does not require
+/// the runtime, but shares the same validation path.
 pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     praxis_core::logging::validate_log_overrides(config)?;
-    let registry = praxis_filter::FilterRegistry::with_builtins();
+    let registry = praxis::build_default_registry();
     let health_registry = praxis_core::health::build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    praxis::resolve_pipelines(config, &registry, &health_registry, &kv_stores)?;
-    Ok(())
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    rt.block_on(async {
+        praxis::resolve_pipelines(config, &registry, &health_registry, &kv_stores)?;
+        Ok(())
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -158,6 +167,79 @@ filter_chains:
         assert!(
             err.contains("nonexistent_chain"),
             "error should mention the missing chain name: {err}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Feature-gated validation via production path
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "ext-proc")]
+    fn validate_config_for_startup_accepts_llmd_external_epp() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: epp
+    address: "127.0.0.1:8080"
+    filter_chains: [epp]
+filter_chains:
+  - name: epp
+    filters:
+      - filter: llmd_external_epp
+        target: "http://127.0.0.1:9002"
+"#,
+        )
+        .unwrap();
+        let result = validate_config_for_startup(&config);
+        assert!(
+            result.is_ok(),
+            "valid llmd_external_epp config should pass production validation"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "ext-proc")]
+    fn validate_config_for_startup_rejects_invalid_llmd_external_epp() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: epp
+    address: "127.0.0.1:8080"
+    filter_chains: [epp]
+filter_chains:
+  - name: epp
+    filters:
+      - filter: llmd_external_epp
+        request_timeout_ms: 5000
+"#,
+        )
+        .unwrap();
+        let result = validate_config_for_startup(&config);
+        assert!(result.is_err(), "missing target should fail production validation");
+    }
+
+    #[test]
+    #[cfg(feature = "ext-proc")]
+    fn validate_config_for_startup_accepts_ext_proc() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: ep
+    address: "127.0.0.1:8080"
+    filter_chains: [ep]
+filter_chains:
+  - name: ep
+    filters:
+      - filter: ext_proc
+        target: "http://127.0.0.1:50051"
+"#,
+        )
+        .unwrap();
+        let result = validate_config_for_startup(&config);
+        assert!(
+            result.is_ok(),
+            "ext_proc config should validate via production path without panic"
         );
     }
 }

@@ -1,0 +1,26 @@
+# Praxis llm-d benchmark config: praxis-native profile.
+#
+# Uses the native llmd_endpoint_picker filter for llm-d scheduling.
+# Backend is whatever is listening on 127.0.0.1:18080. The smoke script
+# (benchmarks/llm-d/run-smoke.sh) starts a minimal Python mock backend.
+# Endpoint state is static configuration (not scraped metrics).
+
+admin:
+  address: "127.0.0.1:9901"
+
+listeners:
+  - name: default
+    address: "0.0.0.0:18090"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: llmd_endpoint_picker
+        endpoints:
+          - name: sim-1
+            address: "127.0.0.1:18080"
+            models: ["test-model"]
+            running_requests: 0
+            waiting_requests: 0
+            kv_cache_usage_percent: 0.0

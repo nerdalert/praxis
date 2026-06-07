@@ -1760,10 +1760,10 @@ fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
         kv_stores: None,
         request: req,
         request_body_bytes: 0,
-        request_body_mode: praxis_filter::BodyMode::Stream,
+        request_body_mode: BodyMode::Stream,
         request_start: Instant::now(),
         response_body_bytes: 0,
-        response_body_mode: praxis_filter::BodyMode::Stream,
+        response_body_mode: BodyMode::Stream,
         response_header: None,
         response_headers_modified: false,
         rewritten_path: None,
@@ -1817,11 +1817,18 @@ fn minimal_config() -> ExtProcConfig {
 // Mock gRPC Server
 // -----------------------------------------------------------------------------
 
-use std::{net::SocketAddr, pin::Pin};
+use std::{
+    net::SocketAddr,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use praxis_proto::envoy::service::ext_proc::v3::{
-    BodyResponse, ProcessingRequest, ProcessingResponse,
+    BodyMutation, BodyResponse, ProcessingRequest, ProcessingResponse, body_mutation,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
     processing_request, processing_response,
 };
@@ -2013,4 +2020,2076 @@ async fn wait_for_server(addr: SocketAddr) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("mock server at {addr} did not become ready");
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase Tests
+// -----------------------------------------------------------------------------
+
+use praxis_proto::envoy::service::ext_proc::v3::{HttpHeaders, StreamedBodyResponse};
+use tonic::transport::Endpoint;
+
+use crate::request_phase::{self, DESTINATION_ENDPOINT_HEADER, RequestPhaseError};
+
+/// Build minimal [`HttpHeaders`] for request-phase tests.
+fn make_proto_headers() -> HttpHeaders {
+    HttpHeaders {
+        headers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap {
+            headers: vec![
+                HeaderValue {
+                    key: ":method".to_owned(),
+                    value: "POST".to_owned(),
+                    raw_value: Vec::new(),
+                },
+                HeaderValue {
+                    key: ":path".to_owned(),
+                    value: "/v1/completions".to_owned(),
+                    raw_value: Vec::new(),
+                },
+            ],
+        }),
+        end_of_stream: false,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase Mock (multi-message bidirectional stream)
+// -----------------------------------------------------------------------------
+
+/// Scenario-driven behavior for the request-phase mock processor.
+#[derive(Clone)]
+enum RequestPhaseScenario {
+    /// Respond to headers with optional endpoint, then respond to
+    /// body with optional mutation.
+    Normal {
+        endpoint: Option<String>,
+        body_mutation: Option<Vec<u8>>,
+    },
+
+    /// Send `ImmediateResponse` on header request.
+    ImmediateOnHeaders { status: i32, body: String },
+
+    /// Respond normally to headers, send `ImmediateResponse` on body
+    /// request.
+    ImmediateOnBody { status: i32, body: String },
+
+    /// Close stream without sending any response.
+    EmptyStream,
+
+    /// Respond to headers, then close stream without body response.
+    CloseAfterHeaders { endpoint: Option<String> },
+
+    /// Never respond (timeout testing).
+    Hang,
+
+    /// Send wrong response type (`ResponseHeaders`) for header
+    /// request.
+    WrongTypeOnHeaders,
+
+    /// Respond normally to headers, send wrong response type
+    /// (`ResponseHeaders`) for body request.
+    WrongTypeOnBody,
+
+    /// Body response with `ClearBody` mutation.
+    ClearBody,
+
+    /// Verify the mock receives the request body bytes.
+    EchoBodyInMutation,
+
+    /// Single `StreamedResponse` chunk with `end_of_stream=true`.
+    StreamedSingleChunk { body: Vec<u8> },
+
+    /// Multiple `StreamedResponse` chunks reassembled in order.
+    StreamedMultiChunk { chunks: Vec<Vec<u8>> },
+
+    /// Stream closes after streamed chunks without `end_of_stream`.
+    StreamedCloseBeforeEos { chunks: Vec<Vec<u8>> },
+
+    /// Headers with endpoint, then streamed body chunks.
+    NormalStreamed { endpoint: String, chunks: Vec<Vec<u8>> },
+
+    /// One streamed chunk, then `ImmediateResponse`.
+    StreamedThenImmediate { chunk: Vec<u8>, status: i32, body: String },
+
+    /// One streamed chunk without EOS, then a direct `Body` mutation.
+    StreamedThenBody { chunk: Vec<u8>, replacement: Vec<u8> },
+
+    /// One streamed chunk without EOS, then a `ClearBody` mutation.
+    StreamedThenClearBody { chunk: Vec<u8> },
+
+    /// One streamed chunk without EOS, then a no-mutation `RequestBody`.
+    StreamedThenNoMutation { chunk: Vec<u8> },
+}
+
+/// Multi-message mock implementing the full request-phase protocol.
+struct RequestPhaseMock {
+    /// Per-`Process` call counter (shared with test for cardinality assertions).
+    call_count: Arc<AtomicUsize>,
+
+    /// Scenario to execute.
+    scenario: RequestPhaseScenario,
+}
+
+#[async_trait]
+impl ExternalProcessor for RequestPhaseMock {
+    type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+    async fn process(
+        &self,
+        request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+    ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        let req_stream = request.into_inner();
+        let scenario = self.scenario.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ProcessingResponse, tonic::Status>>(4);
+
+        tokio::spawn(async move {
+            run_request_phase_scenario(scenario, req_stream, tx).await;
+        });
+
+        let output = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(tonic::Response::new(Box::pin(output)))
+    }
+}
+
+/// Execute a request-phase scenario in the mock's background task.
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "dispatch match over test scenarios"
+)]
+async fn run_request_phase_scenario(
+    scenario: RequestPhaseScenario,
+    mut req_stream: tonic::Streaming<ProcessingRequest>,
+    tx: tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+) {
+    match scenario {
+        RequestPhaseScenario::Hang => run_hang(&mut req_stream).await,
+        RequestPhaseScenario::EmptyStream => {},
+        RequestPhaseScenario::Normal {
+            endpoint,
+            body_mutation,
+        } => run_normal(&mut req_stream, &tx, endpoint, body_mutation).await,
+        RequestPhaseScenario::ImmediateOnHeaders { status, body } => {
+            run_immediate_on_headers(&mut req_stream, &tx, status, &body).await;
+        },
+        RequestPhaseScenario::ImmediateOnBody { status, body } => {
+            run_immediate_on_body(&mut req_stream, &tx, status, &body).await;
+        },
+        RequestPhaseScenario::CloseAfterHeaders { endpoint } => {
+            run_close_after_headers(&mut req_stream, &tx, endpoint).await;
+        },
+        RequestPhaseScenario::WrongTypeOnHeaders => {
+            run_wrong_type_on_headers(&mut req_stream, &tx).await;
+        },
+        RequestPhaseScenario::WrongTypeOnBody => {
+            run_wrong_type_on_body(&mut req_stream, &tx).await;
+        },
+        RequestPhaseScenario::ClearBody => run_clear_body(&mut req_stream, &tx).await,
+        RequestPhaseScenario::EchoBodyInMutation => run_echo_body(&mut req_stream, &tx).await,
+        RequestPhaseScenario::NormalStreamed { endpoint, chunks } => {
+            run_normal_streamed(&mut req_stream, &tx, endpoint, chunks).await;
+        },
+        RequestPhaseScenario::StreamedSingleChunk { body } => {
+            run_streamed_single(&mut req_stream, &tx, body).await;
+        },
+        RequestPhaseScenario::StreamedMultiChunk { chunks } => {
+            run_streamed_multi(&mut req_stream, &tx, chunks).await;
+        },
+        RequestPhaseScenario::StreamedCloseBeforeEos { chunks } => {
+            run_streamed_close_before_eos(&mut req_stream, &tx, chunks).await;
+        },
+        RequestPhaseScenario::StreamedThenImmediate { chunk, status, body } => {
+            run_streamed_then_immediate(&mut req_stream, &tx, chunk, status, &body).await;
+        },
+        RequestPhaseScenario::StreamedThenBody { chunk, replacement } => {
+            run_streamed_then_body(&mut req_stream, &tx, chunk, replacement).await;
+        },
+        RequestPhaseScenario::StreamedThenClearBody { chunk } => {
+            run_streamed_then_clear(&mut req_stream, &tx, chunk).await;
+        },
+        RequestPhaseScenario::StreamedThenNoMutation { chunk } => {
+            run_streamed_then_no_mutation(&mut req_stream, &tx, chunk).await;
+        },
+    }
+}
+
+/// Hang scenario: read one message then block forever.
+async fn run_hang(req_stream: &mut tonic::Streaming<ProcessingRequest>) {
+    drop(req_stream.message().await);
+    futures::future::pending::<()>().await;
+}
+
+/// Normal scenario: headers response then body response.
+async fn run_normal(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    endpoint: Option<String>,
+    body_mutation: Option<Vec<u8>>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(endpoint))).await);
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_body_phase_response(body_mutation))).await);
+}
+
+/// Immediate response on headers scenario.
+async fn run_immediate_on_headers(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    status: i32,
+    body: &str,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_immediate_response(status, body))).await);
+}
+
+/// Immediate response on body scenario.
+async fn run_immediate_on_body(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    status: i32,
+    body: &str,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_immediate_response(status, body))).await);
+}
+
+/// Close after headers scenario.
+async fn run_close_after_headers(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    endpoint: Option<String>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(endpoint))).await);
+}
+
+/// Wrong type on headers scenario.
+async fn run_wrong_type_on_headers(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_always_response_headers())).await);
+}
+
+/// Wrong type on body scenario.
+async fn run_wrong_type_on_body(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_always_response_headers())).await);
+}
+
+/// Clear body scenario.
+async fn run_clear_body(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_clear_body_response())).await);
+}
+
+/// Echo body scenario: returns the received body as a body mutation.
+async fn run_echo_body(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+
+    if let Ok(Some(msg)) = req_stream.message().await
+        && let Some(processing_request::Request::RequestBody(body)) = msg.request
+    {
+        drop(tx.send(Ok(build_body_phase_response(Some(body.body)))).await);
+    }
+}
+
+/// Normal with endpoint + streamed body chunks.
+async fn run_normal_streamed(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    endpoint: String,
+    chunks: Vec<Vec<u8>>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(Some(endpoint)))).await);
+    drop(req_stream.message().await);
+    let last = chunks.len().saturating_sub(1);
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        drop(tx.send(Ok(build_streamed_body_response(&chunk, i == last))).await);
+    }
+}
+
+/// Single streamed chunk scenario.
+async fn run_streamed_single(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    body: Vec<u8>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_streamed_body_response(&body, true))).await);
+}
+
+/// Multiple streamed chunks scenario.
+async fn run_streamed_multi(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    chunks: Vec<Vec<u8>>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    let last = chunks.len().saturating_sub(1);
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        drop(tx.send(Ok(build_streamed_body_response(&chunk, i == last))).await);
+    }
+}
+
+/// Streamed chunks then stream close without `end_of_stream`.
+async fn run_streamed_close_before_eos(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    chunks: Vec<Vec<u8>>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    for chunk in chunks {
+        drop(tx.send(Ok(build_streamed_body_response(&chunk, false))).await);
+    }
+}
+
+/// Streamed chunk then `ImmediateResponse`.
+async fn run_streamed_then_immediate(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    chunk: Vec<u8>,
+    status: i32,
+    body: &str,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_streamed_body_response(&chunk, false))).await);
+    drop(tx.send(Ok(build_immediate_response(status, body))).await);
+}
+
+/// Streamed chunk then `Body` mutation.
+async fn run_streamed_then_body(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    chunk: Vec<u8>,
+    replacement: Vec<u8>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_streamed_body_response(&chunk, false))).await);
+    drop(tx.send(Ok(build_body_phase_response(Some(replacement)))).await);
+}
+
+/// Streamed chunk then `ClearBody` mutation.
+async fn run_streamed_then_clear(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    chunk: Vec<u8>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_streamed_body_response(&chunk, false))).await);
+    drop(tx.send(Ok(build_clear_body_response())).await);
+}
+
+/// Streamed chunk then no-mutation `RequestBody`.
+async fn run_streamed_then_no_mutation(
+    req_stream: &mut tonic::Streaming<ProcessingRequest>,
+    tx: &tokio::sync::mpsc::Sender<Result<ProcessingResponse, tonic::Status>>,
+    chunk: Vec<u8>,
+) {
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_headers_phase_response(None))).await);
+    drop(req_stream.message().await);
+    drop(tx.send(Ok(build_streamed_body_response(&chunk, false))).await);
+    drop(tx.send(Ok(build_body_phase_response(None))).await);
+}
+
+/// Build a `RequestHeaders` response with optional endpoint header.
+fn build_headers_phase_response(endpoint: Option<String>) -> ProcessingResponse {
+    let mut set_headers = Vec::new();
+    if let Some(ep) = endpoint {
+        set_headers.push(make_hvo(DESTINATION_ENDPOINT_HEADER, &ep));
+    }
+
+    let common = if set_headers.is_empty() {
+        None
+    } else {
+        Some(CommonResponse {
+            status: 0,
+            header_mutation: Some(HeaderMutation {
+                set_headers,
+                remove_headers: vec![],
+            }),
+            body_mutation: None,
+            trailers: None,
+            clear_route_cache: false,
+        })
+    };
+
+    ProcessingResponse {
+        response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+            response: common,
+        })),
+        ..Default::default()
+    }
+}
+
+/// Build a `RequestBody` response with optional body replacement.
+fn build_body_phase_response(body_mutation: Option<Vec<u8>>) -> ProcessingResponse {
+    let common = body_mutation.map(|data| CommonResponse {
+        status: 0,
+        header_mutation: None,
+        body_mutation: Some(BodyMutation {
+            mutation: Some(body_mutation::Mutation::Body(data)),
+        }),
+        trailers: None,
+        clear_route_cache: false,
+    });
+
+    ProcessingResponse {
+        response: Some(processing_response::Response::RequestBody(BodyResponse {
+            response: common,
+        })),
+        ..Default::default()
+    }
+}
+
+/// Build a `RequestBody` response with a `ClearBody` mutation.
+fn build_clear_body_response() -> ProcessingResponse {
+    ProcessingResponse {
+        response: Some(processing_response::Response::RequestBody(BodyResponse {
+            response: Some(CommonResponse {
+                status: 0,
+                header_mutation: None,
+                body_mutation: Some(BodyMutation {
+                    mutation: Some(body_mutation::Mutation::ClearBody(true)),
+                }),
+                trailers: None,
+                clear_route_cache: false,
+            }),
+        })),
+        ..Default::default()
+    }
+}
+
+/// Build a `RequestBody` response with a `StreamedResponse` chunk.
+fn build_streamed_body_response(body: &[u8], end_of_stream: bool) -> ProcessingResponse {
+    ProcessingResponse {
+        response: Some(processing_response::Response::RequestBody(BodyResponse {
+            response: Some(CommonResponse {
+                status: 0,
+                header_mutation: None,
+                body_mutation: Some(BodyMutation {
+                    mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                        body: body.to_vec(),
+                        end_of_stream,
+                    })),
+                }),
+                trailers: None,
+                clear_route_cache: false,
+            }),
+        })),
+        ..Default::default()
+    }
+}
+
+/// Start a request-phase mock server and return address, guard, and call counter.
+async fn start_request_phase_mock(scenario: RequestPhaseScenario) -> (SocketAddr, MockServerGuard, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let call_count = Arc::new(AtomicUsize::new(0));
+
+    let svc = ExternalProcessorServer::new(RequestPhaseMock {
+        call_count: Arc::clone(&call_count),
+        scenario,
+    });
+
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    wait_for_server(addr).await;
+
+    let guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+    (addr, guard, call_count)
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: headers + body round trip
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_headers_then_body_succeeds() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: Some("10.0.0.1:8080".to_owned()),
+        body_mutation: None,
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from(r#"{"model":"llama","prompt":"hi"}"#);
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("request phase should succeed");
+
+    assert!(result.headers_response.is_some(), "should have a headers response");
+    assert_eq!(
+        result.selected_endpoint.as_deref(),
+        Some("10.0.0.1:8080"),
+        "should extract the selected endpoint"
+    );
+    assert!(result.body_response.is_some(), "should have a body response");
+    assert!(result.mutated_body.is_none(), "no body mutation requested");
+    assert!(result.immediate_response.is_none(), "no immediate response expected");
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: body mutation replacement
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_body_mutation_replaces_body() {
+    let replacement = b"replaced-body-content".to_vec();
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: None,
+        body_mutation: Some(replacement.clone()),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("original");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("request phase should succeed");
+
+    assert_eq!(
+        result.mutated_body.as_deref(),
+        Some(replacement.as_slice()),
+        "should contain the replacement body"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: body mutation echo (verifies body is received)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_mock_receives_body_bytes() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::EchoBodyInMutation).await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("echo-this-payload");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("request phase should succeed");
+
+    assert_eq!(
+        result.mutated_body.as_deref(),
+        Some(b"echo-this-payload".as_slice()),
+        "mock should echo back the request body as body mutation"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: clear body mutation
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_clear_body_produces_empty_bytes() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::ClearBody).await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("some-content");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("request phase should succeed");
+
+    assert_eq!(
+        result.mutated_body.as_deref(),
+        Some(b"".as_slice()),
+        "clear_body should produce empty bytes"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: immediate response on headers
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_immediate_response_on_headers() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::ImmediateOnHeaders {
+        status: 429,
+        body: "rate limited".to_owned(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("payload");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("request phase should succeed");
+
+    let imm = result.immediate_response.expect("should have immediate response");
+    assert_eq!(
+        imm.status.expect("should have status").code,
+        429,
+        "immediate response status should match"
+    );
+    assert_eq!(imm.body, "rate limited", "immediate response body should match");
+    assert!(result.headers_response.is_none(), "no headers response when immediate");
+    assert!(
+        result.body_response.is_none(),
+        "no body response when immediate on headers"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: immediate response on body
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_immediate_response_on_body() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::ImmediateOnBody {
+        status: 413,
+        body: "too large".to_owned(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("huge-payload");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("request phase should succeed");
+
+    assert!(
+        result.headers_response.is_some(),
+        "should have headers response before body immediate"
+    );
+    let imm = result.immediate_response.expect("should have immediate response");
+    assert_eq!(
+        imm.status.expect("should have status").code,
+        413,
+        "body immediate response status should match"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: timeout
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_timeout_surfaces_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Hang).await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("payload");
+
+    let err = request_phase::process_request_phase(channel, headers, body, Duration::from_millis(50))
+        .await
+        .expect_err("should timeout");
+
+    assert!(
+        matches!(err, RequestPhaseError::Timeout),
+        "error should be Timeout, got: {err}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: empty stream
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_empty_stream_surfaces_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::EmptyStream).await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("payload");
+
+    let err = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect_err("should get empty stream error");
+
+    assert!(
+        matches!(err, RequestPhaseError::EmptyStream),
+        "error should be EmptyStream, got: {err}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: unexpected response type on headers
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_unexpected_type_on_headers() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::WrongTypeOnHeaders).await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("payload");
+
+    let err = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect_err("should get unexpected response error");
+
+    match &err {
+        RequestPhaseError::UnexpectedResponse(variant) => {
+            assert_eq!(variant, "ResponseHeaders", "should name the unexpected variant");
+        },
+        _ => panic!("expected UnexpectedResponse, got: {err}"),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: unexpected response type on body
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_unexpected_type_on_body() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::WrongTypeOnBody).await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("payload");
+
+    let err = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect_err("should get unexpected response error");
+
+    match &err {
+        RequestPhaseError::UnexpectedResponse(variant) => {
+            assert_eq!(variant, "ResponseHeaders", "should name the unexpected variant");
+        },
+        _ => panic!("expected UnexpectedResponse, got: {err}"),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: missing endpoint is None
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_missing_endpoint_is_none() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: None,
+        body_mutation: None,
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("payload");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("request phase should succeed");
+
+    assert!(
+        result.selected_endpoint.is_none(),
+        "selected_endpoint should be None when EPP does not set the header"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: close after headers (no body response)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_close_after_headers_succeeds() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::CloseAfterHeaders {
+        endpoint: Some("10.0.0.2:9090".to_owned()),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("payload");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("request phase should succeed even without body response");
+
+    assert_eq!(
+        result.selected_endpoint.as_deref(),
+        Some("10.0.0.2:9090"),
+        "endpoint should be extracted from header response"
+    );
+    assert!(
+        result.body_response.is_none(),
+        "no body response when stream closes after headers"
+    );
+    assert!(result.immediate_response.is_none(), "no immediate response");
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: single StreamedResponse chunk
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_streamed_single_chunk() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::StreamedSingleChunk {
+        body: b"streamed-body".to_vec(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("original");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("single streamed chunk should succeed");
+
+    assert_eq!(
+        result.mutated_body.as_deref(),
+        Some(b"streamed-body".as_slice()),
+        "should reassemble single streamed chunk"
+    );
+    assert!(result.body_response.is_some(), "should have a body response");
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: multiple StreamedResponse chunks reassembled
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_streamed_multi_chunk_reassembly() {
+    let chunks = vec![b"chunk-1-".to_vec(), b"chunk-2-".to_vec(), b"chunk-3".to_vec()];
+    let (addr, _guard, _call_count) =
+        start_request_phase_mock(RequestPhaseScenario::StreamedMultiChunk { chunks }).await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("original");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("multi-chunk streamed should succeed");
+
+    assert_eq!(
+        result.mutated_body.as_deref(),
+        Some(b"chunk-1-chunk-2-chunk-3".as_slice()),
+        "should reassemble chunks in order"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: empty StreamedResponse body
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_streamed_empty_body() {
+    let (addr, _guard, _call_count) =
+        start_request_phase_mock(RequestPhaseScenario::StreamedSingleChunk { body: Vec::new() }).await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("original");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("empty streamed chunk should succeed");
+
+    assert_eq!(
+        result.mutated_body.as_deref(),
+        Some(b"".as_slice()),
+        "empty streamed body should produce empty bytes"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: stream close before end_of_stream (fail-closed)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_streamed_close_before_eos_returns_error() {
+    let chunks = vec![b"partial-1-".to_vec(), b"partial-2".to_vec()];
+    let (addr, _guard, _call_count) =
+        start_request_phase_mock(RequestPhaseScenario::StreamedCloseBeforeEos { chunks }).await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("original");
+
+    let err = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect_err("close before EOS should be an error");
+
+    assert!(
+        matches!(err, RequestPhaseError::IncompleteBodyStream(_)),
+        "should be IncompleteBodyStream, got: {err}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: ImmediateResponse after streamed chunk
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_streamed_then_immediate() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::StreamedThenImmediate {
+        chunk: b"partial-data".to_vec(),
+        status: 503,
+        body: "overloaded".to_owned(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("payload");
+
+    let result = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect("streamed then immediate should succeed");
+
+    let imm = result.immediate_response.expect("should have immediate response");
+    assert_eq!(
+        imm.status.expect("should have status").code,
+        503,
+        "immediate response status should match"
+    );
+    assert!(
+        result.mutated_body.is_none(),
+        "partial chunks should not be assembled when immediate response takes precedence"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: streamed chunk then Body mutation (fail-closed)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_streamed_then_body_returns_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::StreamedThenBody {
+        chunk: b"partial".to_vec(),
+        replacement: b"replaced".to_vec(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("original");
+
+    let err = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect_err("streamed then Body should be an error");
+
+    assert!(
+        matches!(err, RequestPhaseError::IncompleteBodyStream(_)),
+        "should be IncompleteBodyStream, got: {err}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: streamed chunk then ClearBody (fail-closed)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_streamed_then_clear_body_returns_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::StreamedThenClearBody {
+        chunk: b"partial".to_vec(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("original");
+
+    let err = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect_err("streamed then ClearBody should be an error");
+
+    assert!(
+        matches!(err, RequestPhaseError::IncompleteBodyStream(_)),
+        "should be IncompleteBodyStream, got: {err}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Request Phase: streamed chunk then no-mutation RequestBody (fail-closed)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_phase_streamed_then_no_mutation_returns_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::StreamedThenNoMutation {
+        chunk: b"partial".to_vec(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+    let headers = make_proto_headers();
+    let body = Bytes::from("original");
+
+    let err = request_phase::process_request_phase(channel, headers, body, Duration::from_secs(5))
+        .await
+        .expect_err("streamed then no-mutation should be an error");
+
+    assert!(
+        matches!(err, RequestPhaseError::IncompleteBodyStream(_)),
+        "should be IncompleteBodyStream, got: {err}"
+    );
+}
+
+// =============================================================================
+// B02: llmd_external_epp filter tests
+// =============================================================================
+
+use praxis_filter::{BodyAccess, BodyMode};
+
+use crate::llmd_external_epp::LlmdExternalEppFilter;
+
+// -----------------------------------------------------------------------------
+// llmd_external_epp: Config Parsing
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn epp_filter_parse_minimal_config() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(r#"target: "http://127.0.0.1:9002""#).unwrap();
+    let filter = LlmdExternalEppFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "llmd_external_epp", "filter name should match");
+}
+
+#[tokio::test]
+async fn epp_filter_parse_full_config() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:9002"
+request_timeout_ms: 10000
+max_request_body_bytes: 8388608
+status_on_error: 503
+"#,
+    )
+    .unwrap();
+    let filter = LlmdExternalEppFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "llmd_external_epp", "filter name should match");
+}
+
+#[tokio::test]
+async fn epp_filter_missing_target_errors() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("request_timeout_ms: 5000").unwrap();
+    let err = LlmdExternalEppFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("target"),
+        "error should mention missing target: {err}"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_invalid_target_errors() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(r#"target: "not valid""#).unwrap();
+    let err = LlmdExternalEppFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("invalid target URI"),
+        "error should mention invalid URI: {err}"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_zero_timeout_errors() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:9002"
+request_timeout_ms: 0
+"#,
+    )
+    .unwrap();
+    let err = LlmdExternalEppFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("request_timeout_ms"),
+        "error should mention timeout: {err}"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_zero_max_body_errors() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:9002"
+max_request_body_bytes: 0
+"#,
+    )
+    .unwrap();
+    let err = LlmdExternalEppFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("max_request_body_bytes"),
+        "error should mention max body: {err}"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_invalid_status_on_error() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:9002"
+status_on_error: 999
+"#,
+    )
+    .unwrap();
+    let err = LlmdExternalEppFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("status_on_error"),
+        "error should mention status_on_error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_unknown_field_errors() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:9002"
+bogus: true
+"#,
+    )
+    .unwrap();
+    let err = LlmdExternalEppFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("unknown field"),
+        "error should mention unknown field: {err}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// llmd_external_epp: Body Access / Mode
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn epp_filter_requests_bounded_body_buffering() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:9002"
+max_request_body_bytes: 1048576
+"#,
+    )
+    .unwrap();
+    let filter = LlmdExternalEppFilter::from_config(&yaml).unwrap();
+
+    assert_eq!(
+        filter.request_body_access(),
+        BodyAccess::ReadWrite,
+        "should request ReadWrite body access"
+    );
+    assert!(
+        matches!(
+            filter.request_body_mode(),
+            BodyMode::StreamBuffer {
+                max_bytes: Some(1_048_576)
+            }
+        ),
+        "should request StreamBuffer with configured max_bytes"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// llmd_external_epp: Fake EPP Integration
+// -----------------------------------------------------------------------------
+
+/// Build an [`LlmdExternalEppFilter`] connected to a mock server.
+fn make_epp_filter(addr: SocketAddr) -> Box<dyn HttpFilter> {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(r#"target: "http://{addr}""#)).unwrap();
+    LlmdExternalEppFilter::from_config(&yaml).unwrap()
+}
+
+/// Build an [`LlmdExternalEppFilter`] with a short timeout.
+fn make_epp_filter_with_timeout(addr: SocketAddr, timeout_ms: u64) -> Box<dyn HttpFilter> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&format!("target: \"http://{addr}\"\nrequest_timeout_ms: {timeout_ms}",)).unwrap();
+    LlmdExternalEppFilter::from_config(&yaml).unwrap()
+}
+
+#[tokio::test]
+async fn epp_filter_selected_endpoint_sets_upstream() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: Some("10.0.0.1:8080".to_owned()),
+        body_mutation: None,
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from(r#"{"model":"llama"}"#));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should succeed");
+
+    assert!(matches!(action, FilterAction::Release), "should return Release");
+    let upstream = ctx.upstream.expect("upstream should be set");
+    assert_eq!(
+        &*upstream.address, "10.0.0.1:8080",
+        "upstream address should match EPP endpoint"
+    );
+    assert!(upstream.tls.is_none(), "TLS should be None for plain endpoint");
+}
+
+#[tokio::test]
+async fn epp_filter_streamed_body_mutation_replaces_body() {
+    let chunks = vec![b"chunk-a-".to_vec(), b"chunk-b".to_vec()];
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::NormalStreamed {
+        endpoint: "10.0.0.2:8080".to_owned(),
+        chunks,
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("original"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should succeed");
+
+    assert!(matches!(action, FilterAction::Release), "should return Release");
+    assert_eq!(
+        body.as_deref(),
+        Some(b"chunk-a-chunk-b".as_slice()),
+        "body should be replaced with reassembled streamed chunks"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_immediate_response_returns_reject() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::ImmediateOnHeaders {
+        status: 429,
+        body: "rate limited".to_owned(),
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should succeed");
+
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+    assert_eq!(rejection.status, 429, "rejection status should match");
+    assert_eq!(
+        rejection.body.unwrap(),
+        Bytes::from("rate limited"),
+        "rejection body should match"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_missing_endpoint_rejects_with_status_on_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: None,
+        body_mutation: None,
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Reject, not Err");
+
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+    assert_eq!(rejection.status, 500, "default status_on_error should be 500");
+}
+
+#[tokio::test]
+async fn epp_filter_invalid_endpoint_rejects_with_status_on_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: Some("no-port-here".to_owned()),
+        body_mutation: None,
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Reject, not Err");
+
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+    assert_eq!(rejection.status, 500, "default status_on_error should be 500");
+}
+
+#[tokio::test]
+async fn epp_filter_timeout_rejects_with_status_on_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Hang).await;
+
+    let filter = make_epp_filter_with_timeout(addr, 50);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Reject, not Err");
+
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+    assert_eq!(rejection.status, 500, "default status_on_error should be 500");
+}
+
+#[tokio::test]
+async fn epp_filter_custom_status_on_error_for_timeout() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Hang).await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "target: \"http://{addr}\"\nrequest_timeout_ms: 50\nstatus_on_error: 503",
+    ))
+    .unwrap();
+    let filter = LlmdExternalEppFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Reject, not Err");
+
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+    assert_eq!(rejection.status, 503, "custom status_on_error should be 503");
+}
+
+#[tokio::test]
+async fn epp_filter_immediate_response_ignores_status_on_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::ImmediateOnHeaders {
+        status: 429,
+        body: "rate limited".to_owned(),
+    })
+    .await;
+
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&format!("target: \"http://{addr}\"\nstatus_on_error: 503",)).unwrap();
+    let filter = LlmdExternalEppFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Reject");
+
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+    assert_eq!(
+        rejection.status, 429,
+        "ImmediateResponse should use EPP status, not status_on_error"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_header_mutation_applied() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: Some("10.0.0.1:8080".to_owned()),
+        body_mutation: None,
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let _action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should succeed");
+
+    let has_endpoint_header = ctx
+        .extra_request_headers
+        .iter()
+        .any(|(k, _)| k == "x-gateway-destination-endpoint");
+    assert!(
+        has_endpoint_header,
+        "EPP-set endpoint header should be in extra_request_headers"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_not_eos_continues() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Hang).await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("chunk"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, false)
+        .await
+        .expect("should succeed");
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-EOS should return Continue"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_max_body_config_propagated() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:9002"
+max_request_body_bytes: 2097152
+"#,
+    )
+    .unwrap();
+    let filter = LlmdExternalEppFilter::from_config(&yaml).unwrap();
+
+    assert!(
+        matches!(
+            filter.request_body_mode(),
+            BodyMode::StreamBuffer {
+                max_bytes: Some(2_097_152)
+            }
+        ),
+        "max_bytes should match configured value"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// llmd_external_epp: Endpoint Validation
+// -----------------------------------------------------------------------------
+
+use crate::llmd_external_epp::validate_endpoint;
+
+#[test]
+fn endpoint_accepts_ipv4() {
+    assert!(
+        validate_endpoint(Some("10.0.0.1:8080")).is_ok(),
+        "IPv4:port should be valid"
+    );
+}
+
+#[test]
+fn endpoint_accepts_dns() {
+    assert!(
+        validate_endpoint(Some("my-backend.svc.cluster.local:8080")).is_ok(),
+        "DNS:port should be valid"
+    );
+}
+
+#[test]
+fn endpoint_accepts_bracketed_ipv6() {
+    assert!(
+        validate_endpoint(Some("[::1]:8080")).is_ok(),
+        "bracketed IPv6:port should be valid"
+    );
+}
+
+#[test]
+fn endpoint_rejects_missing_port() {
+    assert!(
+        validate_endpoint(Some("10.0.0.1")).is_err(),
+        "missing port should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_non_numeric_port() {
+    assert!(
+        validate_endpoint(Some("10.0.0.1:not-a-port")).is_err(),
+        "non-numeric port should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_uri_with_scheme() {
+    assert!(
+        validate_endpoint(Some("http://backend:8080")).is_err(),
+        "URI with scheme should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_comma_separated() {
+    assert!(
+        validate_endpoint(Some("10.0.0.1:8080,10.0.0.2:8080")).is_err(),
+        "comma-separated endpoints should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_empty() {
+    assert!(validate_endpoint(None).is_err(), "None endpoint should be rejected");
+    assert!(
+        validate_endpoint(Some("")).is_err(),
+        "empty endpoint should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_port_zero() {
+    assert!(
+        validate_endpoint(Some("10.0.0.1:0")).is_err(),
+        "port 0 should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_empty_host() {
+    assert!(
+        validate_endpoint(Some(":8080")).is_err(),
+        "empty host should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_whitespace() {
+    assert!(
+        validate_endpoint(Some("bad host:8080")).is_err(),
+        "whitespace in endpoint should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_unbracketed_ipv6() {
+    assert!(
+        validate_endpoint(Some("::1:8080")).is_err(),
+        "unbracketed IPv6 should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_empty_bracketed_ipv6() {
+    assert!(
+        validate_endpoint(Some("[]:8080")).is_err(),
+        "empty brackets should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_accepts_ipv6_full() {
+    assert!(
+        validate_endpoint(Some("[2001:db8::1]:8080")).is_ok(),
+        "full bracketed IPv6:port should be valid"
+    );
+}
+
+#[test]
+fn endpoint_rejects_port_out_of_range() {
+    assert!(
+        validate_endpoint(Some("10.0.0.1:99999")).is_err(),
+        "port >65535 should be rejected"
+    );
+}
+
+// =============================================================================
+// B04: Failure-mode hardening tests
+// =============================================================================
+
+#[tokio::test]
+async fn epp_filter_errors_are_reject_not_filter_error() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: None,
+        body_mutation: None,
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Ok(Reject), not Err");
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "EPP errors must produce Reject (fail-closed via filter action), not FilterError"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_immediate_response_preserves_body() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::ImmediateOnHeaders {
+        status: 429,
+        body: "retry after 60s".to_owned(),
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should succeed");
+
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    };
+    assert_eq!(rejection.status, 429, "ImmediateResponse status preserved");
+    assert_eq!(
+        rejection.body.as_deref(),
+        Some(b"retry after 60s".as_slice()),
+        "ImmediateResponse body preserved"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_max_body_enforced_at_capability_level() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:9002"
+max_request_body_bytes: 100
+"#,
+    )
+    .unwrap();
+    let filter = LlmdExternalEppFilter::from_config(&yaml).unwrap();
+
+    assert!(
+        matches!(
+            filter.request_body_mode(),
+            BodyMode::StreamBuffer { max_bytes: Some(100) }
+        ),
+        "StreamBuffer max_bytes=100 enforces 413 at pipeline level before EPP is called"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_no_epp_call_before_eos() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Hang).await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("chunk"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, false)
+        .await
+        .expect("should succeed");
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "no EPP call should happen before end_of_stream"
+    );
+    assert!(ctx.upstream.is_none(), "upstream should not be set before EOS");
+}
+
+#[tokio::test]
+async fn epp_filter_comma_endpoint_rejects() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: Some("10.0.0.1:8080,10.0.0.2:8080".to_owned()),
+        body_mutation: None,
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Reject");
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "comma-separated endpoints should reject"
+    );
+}
+
+// =============================================================================
+// B04: EPP call cardinality
+// =============================================================================
+
+#[tokio::test]
+async fn epp_filter_exactly_one_process_call_at_eos() {
+    let (addr, _guard, call_count) = start_request_phase_mock(RequestPhaseScenario::Normal {
+        endpoint: Some("10.0.0.1:8080".to_owned()),
+        body_mutation: None,
+    })
+    .await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let _action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should succeed");
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "exactly one Process call should occur at EOS"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_zero_process_calls_before_eos() {
+    let (addr, _guard, call_count) = start_request_phase_mock(RequestPhaseScenario::Hang).await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("chunk1"));
+
+    let _action = filter
+        .on_request_body(&mut ctx, &mut body, false)
+        .await
+        .expect("should succeed");
+
+    let _action = filter
+        .on_request_body(&mut ctx, &mut body, false)
+        .await
+        .expect("should succeed");
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        0,
+        "no Process call should occur before end_of_stream"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_no_retry_after_timeout() {
+    let (addr, _guard, call_count) = start_request_phase_mock(RequestPhaseScenario::Hang).await;
+
+    let filter = make_epp_filter_with_timeout(addr, 50);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let _action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Reject");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "timeout should not cause a retry — exactly one Process call"
+    );
+}
+
+#[tokio::test]
+async fn epp_filter_no_retry_after_epp_error() {
+    let (addr, _guard, call_count) = start_request_phase_mock(RequestPhaseScenario::EmptyStream).await;
+
+    let filter = make_epp_filter(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let _action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Reject");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "empty stream error should not cause a retry"
+    );
+}
+
+// =============================================================================
+// B04: Strengthened endpoint validation
+// =============================================================================
+
+#[test]
+fn endpoint_rejects_not_ipv6_in_brackets() {
+    assert!(
+        validate_endpoint(Some("[not-ipv6]:8080")).is_err(),
+        "non-IPv6 in brackets should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_slash_in_host() {
+    assert!(
+        validate_endpoint(Some("bad/host:8080")).is_err(),
+        "slash in host should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_leading_dash_label() {
+    assert!(
+        validate_endpoint(Some("-bad.example.com:8080")).is_err(),
+        "DNS label starting with dash should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_trailing_dash_label() {
+    assert!(
+        validate_endpoint(Some("bad-.example.com:8080")).is_err(),
+        "DNS label ending with dash should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_empty_dns_label() {
+    assert!(
+        validate_endpoint(Some("bad..example.com:8080")).is_err(),
+        "empty DNS label (double dot) should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_accepts_hyphenated_dns() {
+    assert!(
+        validate_endpoint(Some("my-backend.svc.cluster.local:8080")).is_ok(),
+        "valid hyphenated DNS should be accepted"
+    );
+}
+
+#[test]
+fn endpoint_accepts_single_label_dns() {
+    assert!(
+        validate_endpoint(Some("localhost:8080")).is_ok(),
+        "single-label DNS should be accepted"
+    );
+}
+
+#[test]
+fn endpoint_rejects_label_over_63_bytes() {
+    let long_label = "a".repeat(64);
+    let endpoint = format!("{long_label}.example.com:8080");
+    assert!(
+        validate_endpoint(Some(&endpoint)).is_err(),
+        "DNS label >63 bytes should be rejected"
+    );
+}
+
+#[test]
+fn endpoint_rejects_hostname_over_253_bytes() {
+    let label = "a".repeat(50);
+    let host = format!("{label}.{label}.{label}.{label}.{label}.x");
+    let endpoint = format!("{host}:8080");
+    assert!(
+        validate_endpoint(Some(&endpoint)).is_err(),
+        "hostname >253 bytes should be rejected"
+    );
+}
+
+// =============================================================================
+// B04: Server-observed response-stream cancellation on timeout
+// =============================================================================
+
+/// Mock that holds the response channel open and signals when the
+/// client drops the response receiver (proving the gRPC exchange
+/// was abandoned after timeout).
+///
+/// The inbound request half-stream closes naturally after
+/// `stream::iter` delivers its messages — that is NOT cancellation
+/// evidence. The response `Sender::closed()` future resolves only
+/// when the client drops its end of the response stream, which
+/// happens when `process_request_phase` times out and drops the
+/// tonic `Streaming`.
+struct ResponseCancellationMock {
+    /// Notified when the response channel receiver is dropped.
+    response_abandoned: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ExternalProcessor for ResponseCancellationMock {
+    type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+    async fn process(
+        &self,
+        _request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+    ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+        let abandoned = Arc::clone(&self.response_abandoned);
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ProcessingResponse, tonic::Status>>(1);
+
+        tokio::spawn(async move {
+            tx.closed().await;
+            abandoned.notify_one();
+        });
+
+        let output = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(tonic::Response::new(Box::pin(output)))
+    }
+}
+
+/// Start a response-cancellation mock.
+async fn start_response_cancellation_mock() -> (SocketAddr, MockServerGuard, Arc<tokio::sync::Notify>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let response_abandoned = Arc::new(tokio::sync::Notify::new());
+
+    let svc = ExternalProcessorServer::new(ResponseCancellationMock {
+        response_abandoned: Arc::clone(&response_abandoned),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+    (addr, guard, response_abandoned)
+}
+
+#[tokio::test]
+async fn epp_timeout_causes_server_observed_response_stream_cancellation() {
+    let (addr, _guard, response_abandoned) = start_response_cancellation_mock().await;
+
+    let filter = make_epp_filter_with_timeout(addr, 100);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("should return Reject on timeout");
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "timeout should produce Reject"
+    );
+
+    let abandoned = tokio::time::timeout(Duration::from_secs(2), response_abandoned.notified()).await;
+    assert!(
+        abandoned.is_ok(),
+        "server should observe response-stream receiver drop within 2s after client timeout"
+    );
+}
+
+// =============================================================================
+// B04: failure_mode=open pipeline test
+// =============================================================================
+
+/// Build a pipeline with `llmd_external_epp` and `failure_mode: open`.
+fn build_epp_pipeline(addr: SocketAddr) -> praxis_filter::FilterPipeline {
+    let yaml_str = format!(
+        r#"
+- filter: llmd_external_epp
+  failure_mode: open
+  target: "http://{addr}"
+  request_timeout_ms: 5000
+"#,
+    );
+    let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(&yaml_str).unwrap();
+    let mut registry = praxis_filter::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "llmd_external_epp",
+            praxis_filter::http_builtin(LlmdExternalEppFilter::from_config),
+        )
+        .unwrap();
+    praxis_filter::FilterPipeline::build(&mut entries, &registry).unwrap()
+}
+
+#[tokio::test]
+async fn epp_filter_reject_survives_failure_mode_open_pipeline() {
+    let (addr, _guard, _call_count) = start_request_phase_mock(RequestPhaseScenario::EmptyStream).await;
+
+    let pipeline = build_epp_pipeline(addr);
+    let req = make_request(Method::POST, "/v1/completions");
+    let mut ctx = make_ctx(&req);
+    let mut body = Some(Bytes::from("payload"));
+
+    let action = pipeline.execute_http_request_body(&mut ctx, &mut body, true).await;
+
+    let rejection = match action {
+        Ok(FilterAction::Reject(r)) => r,
+        other => panic!("expected Ok(Reject) even with failure_mode: open, got {other:?}"),
+    };
+    assert_eq!(
+        rejection.status, 500,
+        "default status_on_error should be 500 even with failure_mode: open"
+    );
 }

@@ -1,0 +1,27 @@
+# Praxis llm-d benchmark config: praxis-go-epp profile (Track B).
+#
+# Uses the llmd_external_epp filter to call the Go EPP via ext_proc
+# gRPC for scheduling. The Go EPP selects the backend endpoint via
+# file-based discovery and returns it in x-gateway-destination-endpoint.
+#
+# Requires:
+#   - Go EPP running on gRPC port 9002
+#   - Backend listening at the address configured in EPP file discovery
+#   - Praxis built with --features ext-proc
+
+admin:
+  address: "127.0.0.1:9901"
+
+listeners:
+  - name: default
+    address: "0.0.0.0:18090"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: llmd_external_epp
+        target: "http://127.0.0.1:9002"
+        request_timeout_ms: 10000
+        max_request_body_bytes: 4194304
+        status_on_error: 503
