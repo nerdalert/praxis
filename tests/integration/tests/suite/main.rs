@@ -66,6 +66,8 @@ mod per_listener_pipeline;
 #[cfg(feature = "ai-inference")]
 mod prompt_enrich;
 mod rate_limit;
+#[cfg(feature = "ai-inference")]
+mod responses_routing;
 mod retry;
 mod routing;
 mod security;

@@ -2,7 +2,7 @@
 // Copyright (c) 2024 Shane Utt
 
 //! AI filters for HTTP workloads: inference routing, prompt enrichment,
-//! and agentic protocol classification.
+//! agentic protocol classification, and `OpenAI` API pipelines.
 
 pub(crate) mod agentic;
 #[cfg(feature = "ai-inference")]
@@ -17,6 +17,8 @@ pub use agentic::{A2aFilter, JsonRpcFilter, McpFilter};
 pub use inference::LlmdEndpointPickerFilter;
 #[cfg(feature = "ai-inference")]
 pub use inference::ModelToHeaderFilter;
+#[cfg(feature = "ai-inference")]
+pub use openai::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use openai::ResponsesFormatFilter;
 #[cfg(feature = "ai-inference")]
