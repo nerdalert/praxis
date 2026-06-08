@@ -8,10 +8,7 @@ mod simple;
 mod specialized;
 mod websocket;
 
-pub use echo::{
-    start_echo_backend, start_echo_backend_with_shutdown, start_header_echo_backend,
-    start_header_echo_backend_with_shutdown, start_uri_echo_backend, start_uri_echo_backend_with_shutdown,
-};
+pub use echo::{start_echo_backend, start_header_echo_backend, start_uri_echo_backend};
 pub use simple::{
     Backend, ChunkedBackend, RoutedBackend, start_backend, start_backend_v6, start_backend_with_shutdown,
 };
