@@ -1858,6 +1858,7 @@ fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
         response_headers_modified: false,
         rewritten_path: None,
         selected_endpoint_index: None,
+        time_source: &praxis_core::time::SystemTimeSource,
         upstream: None,
     }
 }
