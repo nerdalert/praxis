@@ -4,9 +4,9 @@
 # and routes follow-up task operations back to the backend cluster that
 # created the task.
 #
-# Local task routing is useful for development, single-process deployments,
-# and proving the routing path. Multi-replica task routing requires the
-# follow-up Redis/ValKey state store.
+# This example uses `local` storage mode. This is useful for development and
+# testing or single-instance deployments of Praxis, but multi-replica task routing
+# requires the an external state store (e.g. Valkey).
 #
 # Flow:
 # 1. SendMessage is routed to agent-a by static router rules.
