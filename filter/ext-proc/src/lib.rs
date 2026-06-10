@@ -196,6 +196,12 @@ struct ExtProcConfig {
     /// HTTP status code returned to the downstream client when the
     /// external processor returns an error, fails to respond, or
     /// cannot be reached. Default: 500.
+    ///
+    /// This takes precedence over the pipeline-level `failure_mode`:
+    /// processor errors are converted to a rejection with this
+    /// status code before the pipeline sees the result, so
+    /// `failure_mode: open` does not produce fail-open behaviour
+    /// for ext_proc callout errors.
     #[serde(default = "default_status_on_error")]
     status_on_error: u16,
 
@@ -545,7 +551,9 @@ impl ExtProcFilter {
     /// On success the action passes through unchanged. On error the
     /// processor failure is logged and a [`FilterAction::Reject`] is
     /// returned with the configured status code, matching Envoy's
-    /// error-handling behaviour.
+    /// error-handling behaviour. Because the error is consumed here,
+    /// the pipeline always sees `Ok(Reject(...))` — the pipeline-level
+    /// `failure_mode` does not apply to ext_proc processor errors.
     ///
     /// [`status_on_error`]: ExtProcConfig::status_on_error
     fn call_or_reject(&self, result: Result<FilterAction, FilterError>) -> FilterAction {
