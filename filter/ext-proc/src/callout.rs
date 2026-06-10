@@ -207,7 +207,17 @@ fn parse_timeout_override(resp: &ProcessingResponse, max_timeout: Option<Duratio
         return None;
     }
 
-    Some(dur.min(max))
+    let clamped = dur.min(max);
+    if clamped < dur {
+        tracing::warn!(
+            requested_ms = dur.as_millis(),
+            clamped_ms = clamped.as_millis(),
+            max_ms = max.as_millis(),
+            "ext_proc: override_message_timeout clamped to max_message_timeout"
+        );
+    }
+
+    Some(clamped)
 }
 
 /// Route a [`ProcessingResponse`] variant to the correct mutation handler.
