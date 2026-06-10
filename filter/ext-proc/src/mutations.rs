@@ -215,8 +215,6 @@ pub(crate) fn apply_response_header_mutation(mutation: &HeaderMutation, ctx: &mu
 
 /// Apply set-header mutations to a response, returning whether any were applied.
 fn set_response_headers(headers: &[HeaderValueOption], resp: &mut praxis_filter::Response) -> bool {
-    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
-
     let mut modified = false;
     for hvo in headers {
         let Some(hv) = &hvo.header else { continue };
@@ -231,37 +229,48 @@ fn set_response_headers(headers: &[HeaderValueOption], resp: &mut praxis_filter:
             continue;
         };
 
-        let applied = match resolve_append_action(hvo) {
-            HeaderAppendAction::AppendIfExistsOrAdd => {
-                resp.headers.append(name, val);
-                true
-            },
-            HeaderAppendAction::OverwriteIfExistsOrAdd => {
-                resp.headers.insert(name, val);
-                true
-            },
-            HeaderAppendAction::OverwriteIfExists => {
-                if resp.headers.contains_key(&name) {
-                    resp.headers.insert(name, val);
-                    true
-                } else {
-                    false
-                }
-            },
-            HeaderAppendAction::AddIfAbsent => {
-                if !resp.headers.contains_key(&name) {
-                    resp.headers.append(name, val);
-                    true
-                } else {
-                    false
-                }
-            },
-        };
-        if applied {
+        if dispatch_response_header(hvo, name, val, resp) {
             modified = true;
         }
     }
     modified
+}
+
+/// Route a single response header mutation, returning whether it was applied.
+fn dispatch_response_header(
+    hvo: &HeaderValueOption,
+    name: http::HeaderName,
+    val: http::HeaderValue,
+    resp: &mut praxis_filter::Response,
+) -> bool {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    match resolve_append_action(hvo) {
+        HeaderAppendAction::AppendIfExistsOrAdd => {
+            resp.headers.append(name, val);
+            true
+        },
+        HeaderAppendAction::OverwriteIfExistsOrAdd => {
+            resp.headers.insert(name, val);
+            true
+        },
+        HeaderAppendAction::OverwriteIfExists => {
+            if resp.headers.contains_key(&name) {
+                resp.headers.insert(name, val);
+                true
+            } else {
+                false
+            }
+        },
+        HeaderAppendAction::AddIfAbsent => {
+            if resp.headers.contains_key(&name) {
+                false
+            } else {
+                resp.headers.append(name, val);
+                true
+            }
+        },
+    }
 }
 
 /// Apply remove-header mutations to a response, returning whether any were applied.
