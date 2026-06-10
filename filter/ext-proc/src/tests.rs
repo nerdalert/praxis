@@ -1204,7 +1204,7 @@ fn apply_response_header_mutation_noop_when_no_response() {
 }
 
 // -----------------------------------------------------------------------------
-// Mutation: should_append (via set_response_headers)
+// Mutation: HeaderAppendAction (via set_response_headers)
 // -----------------------------------------------------------------------------
 
 #[test]
@@ -1349,6 +1349,122 @@ fn response_header_both_unset_defaults_to_append() {
         values,
         vec!["original", "appended"],
         "both fields unset should default to append per proto3 spec"
+    );
+}
+
+#[test]
+fn response_header_overwrite_if_exists_replaces_present() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("x-existing", "original".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let hvo = make_hvo_with_append(
+        "x-existing",
+        "replaced",
+        HeaderAppendAction::OverwriteIfExists as i32,
+        None,
+    );
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    assert!(ctx.response_headers_modified, "should mark as modified");
+    let resp = ctx.response_header.unwrap();
+    assert_eq!(
+        resp.headers.get("x-existing").unwrap(),
+        "replaced",
+        "overwrite-if-exists should replace present header"
+    );
+}
+
+#[test]
+fn response_header_overwrite_if_exists_skips_absent() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let hvo = make_hvo_with_append("x-absent", "value", HeaderAppendAction::OverwriteIfExists as i32, None);
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        !ctx.response_headers_modified,
+        "overwrite-if-exists should not modify when header is absent"
+    );
+    let resp = ctx.response_header.unwrap();
+    assert!(
+        resp.headers.get("x-absent").is_none(),
+        "absent header should remain absent"
+    );
+}
+
+#[test]
+fn response_header_add_if_absent_adds_missing() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let hvo = make_hvo_with_append("x-new", "value", HeaderAppendAction::AddIfAbsent as i32, None);
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    assert!(ctx.response_headers_modified, "should mark as modified");
+    let resp = ctx.response_header.unwrap();
+    assert_eq!(
+        resp.headers.get("x-new").unwrap(),
+        "value",
+        "add-if-absent should add missing header"
+    );
+}
+
+#[test]
+fn response_header_add_if_absent_skips_existing() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("x-existing", "original".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let hvo = make_hvo_with_append("x-existing", "new", HeaderAppendAction::AddIfAbsent as i32, None);
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_response_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        !ctx.response_headers_modified,
+        "add-if-absent should not modify when header exists"
+    );
+    let resp = ctx.response_header.unwrap();
+    assert_eq!(
+        resp.headers.get("x-existing").unwrap(),
+        "original",
+        "existing header should be unchanged"
     );
 }
 

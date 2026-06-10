@@ -215,21 +215,50 @@ pub(crate) fn apply_response_header_mutation(mutation: &HeaderMutation, ctx: &mu
 
 /// Apply set-header mutations to a response, returning whether any were applied.
 fn set_response_headers(headers: &[HeaderValueOption], resp: &mut praxis_filter::Response) -> bool {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
     let mut modified = false;
     for hvo in headers {
-        if let Some(hv) = &hvo.header {
-            if is_pseudo_header(&hv.key) {
-                continue;
-            }
-            let value = header_value_string(hv);
-            if let (Ok(name), Ok(val)) = (http::HeaderName::try_from(&hv.key), http::HeaderValue::try_from(&value)) {
-                if should_append(hvo) {
-                    resp.headers.append(name, val);
-                } else {
+        let Some(hv) = &hvo.header else { continue };
+        if is_pseudo_header(&hv.key) {
+            continue;
+        }
+        let Ok(name) = http::HeaderName::try_from(hv.key.as_str()) else {
+            continue;
+        };
+        let value = header_value_string(hv);
+        let Ok(val) = http::HeaderValue::try_from(&value) else {
+            continue;
+        };
+
+        let applied = match resolve_append_action(hvo) {
+            HeaderAppendAction::AppendIfExistsOrAdd => {
+                resp.headers.append(name, val);
+                true
+            },
+            HeaderAppendAction::OverwriteIfExistsOrAdd => {
+                resp.headers.insert(name, val);
+                true
+            },
+            HeaderAppendAction::OverwriteIfExists => {
+                if resp.headers.contains_key(&name) {
                     resp.headers.insert(name, val);
+                    true
+                } else {
+                    false
                 }
-                modified = true;
-            }
+            },
+            HeaderAppendAction::AddIfAbsent => {
+                if !resp.headers.contains_key(&name) {
+                    resp.headers.append(name, val);
+                    true
+                } else {
+                    false
+                }
+            },
+        };
+        if applied {
+            modified = true;
         }
     }
     modified
@@ -339,11 +368,4 @@ fn resolve_append_action(
     } else {
         HeaderAppendAction::OverwriteIfExistsOrAdd
     }
-}
-
-/// Whether the [`HeaderValueOption`] indicates an append operation.
-fn should_append(hvo: &HeaderValueOption) -> bool {
-    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
-
-    resolve_append_action(hvo) == HeaderAppendAction::AppendIfExistsOrAdd
 }
