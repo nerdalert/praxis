@@ -1054,6 +1054,34 @@ fn apply_request_header_mutation_overwrite_if_exists_skips_absent() {
 }
 
 #[test]
+fn apply_request_header_mutation_overwrite_if_exists_replaces_present() {
+    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert("x-existing", "old".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+
+    let hvo = make_hvo_with_append("x-existing", "new", HeaderAppendAction::OverwriteIfExists as i32, None);
+    let mutation = HeaderMutation {
+        set_headers: vec![hvo],
+        remove_headers: vec![],
+    };
+
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "overwrite-if-exists should not use extra_request_headers"
+    );
+    assert_eq!(
+        ctx.request_headers_to_set.len(),
+        1,
+        "overwrite-if-exists should use request_headers_to_set when present"
+    );
+    assert_eq!(ctx.request_headers_to_set[0].1, "new", "value should match");
+}
+
+#[test]
 fn apply_request_header_mutation_add_if_absent_skips_existing() {
     use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
 
@@ -1929,6 +1957,32 @@ async fn grpc_override_ignored_without_max_timeout() {
         ctx.extra_request_headers.is_empty(),
         "no headers should be added when override is ignored"
     );
+}
+
+#[tokio::test]
+async fn grpc_override_clamped_to_max_timeout() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::OverrideThenRespond {
+        override_ms: 5000,
+        delay_ms: 300,
+        name: "x-late".to_owned(),
+        value: "value".to_owned(),
+    })
+    .await;
+
+    let channel = connect_channel(addr).await;
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+    let timeout = Duration::from_millis(100);
+    // max_timeout is shorter than the server delay, so the clamped
+    // override (200ms) expires before the 300ms delayed response.
+    let max_timeout = Some(Duration::from_millis(200));
+
+    let result = callout::process_request_headers(channel, &addr.to_string(), timeout, max_timeout, &mut ctx).await;
+
+    assert!(result.is_err(), "clamped override should time out");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("timeout"), "error should mention timeout: {err}");
 }
 
 // -----------------------------------------------------------------------------
