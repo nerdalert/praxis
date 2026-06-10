@@ -2006,6 +2006,10 @@ fn make_response() -> praxis_filter::Response {
     }
 }
 
+/// Deterministic ID generator for tests.
+static TEST_ID_GENERATOR: std::sync::LazyLock<praxis_core::id::IdGenerator> =
+    std::sync::LazyLock::new(|| praxis_core::id::IdGenerator::with_seed(0));
+
 /// Build a minimal [`HttpFilterContext`] for unit tests.
 fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
     HttpFilterContext {
@@ -2021,6 +2025,7 @@ fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
         filter_metadata: HashMap::new(),
         filter_results: HashMap::new(),
         health_registry: None,
+        id_generator: &TEST_ID_GENERATOR,
         kv_stores: None,
         request: req,
         request_body_bytes: 0,
