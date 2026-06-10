@@ -98,11 +98,11 @@ pub(crate) async fn process_response_headers(
 
 /// Open a `Process` stream, send one request, and receive one response.
 ///
-/// Each callout opens its own stream. If the processor responds with
-/// `override_message_timeout` and no `response` oneof, the deadline
-/// is extended (clamped to `max_timeout`) and the next message is
-/// read. Without a configured `max_timeout`, override requests are
-/// ignored and the response is returned as-is.
+/// Each callout opens its own stream. The initial timeout covers
+/// stream setup and the first message. If the processor responds
+/// with `override_message_timeout` (and no `response` oneof), a
+/// new deadline replaces the original for the subsequent read,
+/// clamped to `max_timeout`.
 async fn send_and_receive(
     channel: Channel,
     request: ProcessingRequest,
@@ -112,48 +112,60 @@ async fn send_and_receive(
 ) -> Result<ProcessingResponse, FilterError> {
     let deadline = tokio::time::Instant::now() + timeout;
 
-    let result = tokio::time::timeout_at(deadline, async {
+    let open_result = tokio::time::timeout_at(deadline, async {
         let mut client = ExternalProcessorClient::new(channel);
         let request_stream = stream::once(async { request });
         let rpc = client.process(request_stream).await.map_err(CalloutError::Grpc)?;
-        let mut streaming = rpc.into_inner();
-
-        receive_with_override(&mut streaming, max_timeout, target).await
+        Ok::<_, CalloutError>(rpc.into_inner())
     })
     .await;
 
-    match result {
-        Ok(Ok(response)) => Ok(response),
+    let mut streaming = match open_result {
+        Ok(Ok(s)) => s,
         Ok(Err(e)) => {
-            tracing::warn!(target = %target, error = %e, "ext_proc callout failed");
-            Err(e.into())
+            tracing::warn!(target = %target, error = %e, "ext_proc stream open failed");
+            return Err(e.into());
         },
         Err(_elapsed) => {
-            tracing::warn!(target = %target, "ext_proc callout timed out");
-            Err(CalloutError::Timeout.into())
+            tracing::warn!(target = %target, "ext_proc callout timed out during stream open");
+            return Err(CalloutError::Timeout.into());
+        },
+    };
+
+    let result = receive_with_override(&mut streaming, deadline, max_timeout, target).await;
+
+    match result {
+        Ok(response) => Ok(response),
+        Err(e) => {
+            tracing::warn!(target = %target, error = %e, "ext_proc callout failed");
+            Err(e.into())
         },
     }
 }
 
-/// Read messages from the stream, handling `override_message_timeout`.
+/// Read the first response, handling `override_message_timeout`.
 ///
-/// When a response carries `override_message_timeout` but no
-/// `response` oneof, the outer `timeout_at` deadline is extended
-/// and the next message is read. The extension is clamped to
-/// `max_timeout` when configured.
+/// The first read uses the original `deadline`. If the processor
+/// sends `override_message_timeout` with no `response` oneof, a
+/// new absolute deadline is computed from the current time and the
+/// override duration (clamped to `max_timeout`), replacing the
+/// original. Without a configured `max_timeout`, overrides are
+/// ignored and the response is returned as-is.
 async fn receive_with_override(
     streaming: &mut tonic::Streaming<ProcessingResponse>,
+    deadline: tokio::time::Instant,
     max_timeout: Option<Duration>,
     target: &str,
 ) -> Result<ProcessingResponse, CalloutError> {
-    let resp = next_message(streaming).await?;
+    let resp = tokio::time::timeout_at(deadline, next_message(streaming))
+        .await
+        .map_err(|_elapsed| CalloutError::Timeout)??;
 
     if resp.response.is_some() {
         return Ok(resp);
     }
 
     let Some(override_dur) = parse_timeout_override(&resp, max_timeout) else {
-        // No response oneof and no usable override — treat as no-op.
         return Ok(resp);
     };
 
@@ -163,7 +175,8 @@ async fn receive_with_override(
         "ext_proc: processor requested timeout override"
     );
 
-    tokio::time::timeout(override_dur, next_message(streaming))
+    let new_deadline = tokio::time::Instant::now() + override_dur;
+    tokio::time::timeout_at(new_deadline, next_message(streaming))
         .await
         .map_err(|_elapsed| CalloutError::Timeout)?
 }

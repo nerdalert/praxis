@@ -1754,7 +1754,8 @@ status_on_error: 503
 #[tokio::test]
 async fn grpc_override_timeout_extends_deadline() {
     let (addr, _guard) = start_mock_processor(MockBehavior::OverrideThenRespond {
-        override_ms: 500,
+        override_ms: 2000,
+        delay_ms: 200,
         name: "x-after-override".to_owned(),
         value: "extended".to_owned(),
     })
@@ -1764,12 +1765,14 @@ async fn grpc_override_timeout_extends_deadline() {
 
     let req = make_request(Method::GET, "/");
     let mut ctx = make_ctx(&req);
-    let timeout = Duration::from_secs(5);
-    let max_timeout = Some(Duration::from_secs(10));
+    // Original timeout is shorter than the server delay.
+    // Without the override replacing the deadline, this would time out.
+    let timeout = Duration::from_millis(100);
+    let max_timeout = Some(Duration::from_secs(5));
 
     let action = callout::process_request_headers(channel, &addr.to_string(), timeout, max_timeout, &mut ctx)
         .await
-        .expect("callout with override should succeed");
+        .expect("override should extend deadline past the server delay");
 
     assert!(
         matches!(action, FilterAction::Continue),
@@ -1786,6 +1789,7 @@ async fn grpc_override_timeout_extends_deadline() {
 async fn grpc_override_ignored_without_max_timeout() {
     let (addr, _guard) = start_mock_processor(MockBehavior::OverrideThenRespond {
         override_ms: 500,
+        delay_ms: 0,
         name: "x-ignored".to_owned(),
         value: "value".to_owned(),
     })
@@ -1943,6 +1947,7 @@ enum MockBehavior {
     /// Send an `override_message_timeout` first, then the real response.
     OverrideThenRespond {
         override_ms: u64,
+        delay_ms: u64,
         name: String,
         value: String,
     },
@@ -1967,9 +1972,31 @@ impl ExternalProcessor for MockProcessor {
             .await?
             .ok_or_else(|| tonic::Status::internal("empty request stream"))?;
 
-        let responses = build_mock_responses(&self.behavior, &msg).await;
-        let output = futures::stream::iter(responses.into_iter().map(Ok));
-        Ok(tonic::Response::new(Box::pin(output)))
+        match &self.behavior {
+            MockBehavior::OverrideThenRespond {
+                override_ms,
+                delay_ms,
+                name,
+                value,
+            } => {
+                let override_resp = build_override_response(*override_ms);
+                let real_resp = build_add_header_response(&msg, name, value);
+                let delay = Duration::from_millis(*delay_ms);
+                let (tx, rx) = tokio::sync::mpsc::channel(2);
+                tokio::spawn(async move {
+                    drop(tx.send(Ok(override_resp)).await);
+                    tokio::time::sleep(delay).await;
+                    drop(tx.send(Ok(real_resp)).await);
+                });
+                let output = tokio_stream::wrappers::ReceiverStream::new(rx);
+                Ok(tonic::Response::new(Box::pin(output)))
+            },
+            behavior => {
+                let responses = build_mock_responses(behavior, &msg).await;
+                let output = futures::stream::iter(responses.into_iter().map(Ok));
+                Ok(tonic::Response::new(Box::pin(output)))
+            },
+        }
     }
 }
 
@@ -1980,14 +2007,9 @@ async fn build_mock_responses(behavior: &MockBehavior, msg: &ProcessingRequest) 
             futures::future::pending::<()>().await;
             unreachable!("pending future should never resolve");
         },
-        MockBehavior::OverrideThenRespond {
-            override_ms,
-            name,
-            value,
-        } => vec![
-            build_override_response(*override_ms),
-            build_add_header_response(msg, name, value),
-        ],
+        MockBehavior::OverrideThenRespond { .. } => {
+            unreachable!("handled directly in process()")
+        },
         MockBehavior::Noop => vec![build_noop_response(msg)],
         MockBehavior::AddHeader { name, value } => vec![build_add_header_response(msg, name, value)],
         MockBehavior::ImmediateReject { status, body } => vec![build_immediate_response(*status, body)],
