@@ -131,6 +131,7 @@ page.
 | [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Inject system messages into chat completion requests |
 | [full-flow.yaml](configs/ai/openai/responses/full-flow.yaml) | Full Responses API gateway flow |
 | [format-routing.yaml](configs/ai/openai/responses/format-routing.yaml) | Route by AI API format (Responses vs Chat Completions) |
+| [model-rewrite.yaml](configs/ai/openai/responses/model-rewrite.yaml) | Rewrite or inject the model field in Responses API requests |
 | [responses-routing.yaml](configs/ai/openai/responses/responses-routing.yaml) | Route Responses API by mode (stateless vs stateful) |
 | [request-validate.yaml](configs/ai/openai/responses/request-validate.yaml) | Validate Responses API requests and reject invalid parameter combinations |
 | [response-store.yaml](configs/ai/openai/responses/response-store.yaml) | Persist non-streaming Responses API responses to SQLite |

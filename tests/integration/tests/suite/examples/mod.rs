@@ -37,6 +37,8 @@ mod openai_response_store;
 #[cfg(feature = "ai-inference")]
 mod openai_responses_format;
 #[cfg(feature = "ai-inference")]
+mod openai_responses_model_rewrite;
+#[cfg(feature = "ai-inference")]
 mod openai_responses_validate;
 mod p2c;
 mod path_based_routing;

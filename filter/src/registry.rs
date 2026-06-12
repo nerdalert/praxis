@@ -164,6 +164,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
+        "openai_responses_model_rewrite",
+        crate::builtins::ModelRewriteFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
         "openai_responses_validate",
         crate::builtins::OpenaiResponsesValidateFilter::from_config,
     );
@@ -292,6 +298,11 @@ mod tests {
         assert!(
             names.contains(&"openai_responses_format"),
             "openai_responses_format should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"openai_responses_model_rewrite"),
+            "openai_responses_model_rewrite should be registered"
         );
         #[cfg(feature = "ai-inference")]
         assert!(

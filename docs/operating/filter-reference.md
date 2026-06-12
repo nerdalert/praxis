@@ -39,6 +39,7 @@ and the [extensions guide](../filters/extensions.md).
 | `model_to_header` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `prompt_enrich` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `openai_responses_format` | AI / Inference | HTTP (requires `ai-inference` feature) |
+| `openai_responses_model_rewrite` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `openai_responses_validate` | AI / Inference | HTTP (requires `ai-inference` feature) |
 
 ## Router
@@ -862,6 +863,54 @@ On rejection, returns a JSON error body:
 | `responses.stream` | `"true"` or `"false"` (defaults to `"false"`) |
 
 IDs use CSPRNG for cryptographic randomness.
+
+## OpenAI Responses Model Rewrite
+
+Rewrites or injects the top-level `model` field in
+Responses API request bodies. Requires the
+`ai-inference` feature. Must be placed after
+`openai_responses_format` in the filter chain. Skips
+non-Responses API requests and bodyless CRUD requests
+(GET, DELETE). See [model-rewrite.yaml].
+
+[model-rewrite.yaml]: ../../examples/configs/ai/openai/responses/model-rewrite.yaml
+
+```yaml
+- filter: openai_responses_model_rewrite
+  default_model: "llama-3.3-70b"
+  model_aliases:
+    codex-mini-latest: "llama-3.3-70b"
+    gpt-4.1-mini: "qwen-2.5-72b"
+  max_body_bytes: 10485760
+  on_invalid: continue
+  headers:
+    effective_model: x-praxis-ai-effective-model
+    original_model: x-praxis-ai-original-model
+```
+
+| Field | Default | Description |
+| ----- | ------- | ----------- |
+| `default_model` | (none) | Model name to inject when `model` is missing or null |
+| `model_aliases` | (none) | Map from client-facing model names to backend names |
+| `max_body_bytes` | `10485760` (10 MiB) | Maximum request body size for buffering |
+| `on_invalid` | `continue` | `continue` passes invalid JSON through; `reject` returns 400 |
+| `headers.effective_model` | `x-praxis-ai-effective-model` | Header for the post-rewrite model; `null` suppresses |
+| `headers.original_model` | `x-praxis-ai-original-model` | Header for the pre-rewrite model; `null` suppresses |
+
+At least one of `default_model` or `model_aliases` must be
+configured.
+
+**Metadata:**
+
+| Key | Value |
+| --- | ----- |
+| `openai_responses_model_rewrite.effective_model` | Model after alias/default resolution |
+| `openai_responses_model_rewrite.original_model` | Original model before rewrite |
+| `openai_responses_model_rewrite.rewritten` | `"true"` when an alias changed the model |
+| `openai_responses_model_rewrite.default_injected` | `"true"` when the default was inserted |
+
+**Filter results** (for branch conditions):
+`effective_model`, `rewritten`, `default_injected`.
 
 ## Conditions
 

@@ -19,12 +19,16 @@
 
 pub(crate) mod classifier;
 mod config;
+#[cfg(feature = "ai-inference")]
+pub(crate) mod model_rewrite;
 #[allow(
     dead_code,
     reason = "store utilities for GET (#458) and DELETE (#459) response endpoints"
 )]
 pub(crate) mod store;
 
+#[cfg(feature = "ai-inference")]
+pub use model_rewrite::ModelRewriteFilter;
 pub use store::ResponseStoreFilter;
 
 #[cfg(test)]
