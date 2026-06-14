@@ -7,7 +7,7 @@ use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use praxis_core::connectivity::Upstream;
-use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request};
+use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, TrustedHeaderMutation};
 use tokio::sync::OwnedSemaphorePermit;
 
 // -----------------------------------------------------------------------------
@@ -73,6 +73,16 @@ pub struct PingoraRequestCtx {
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
     pub filter_metadata: std::collections::HashMap<String, String>,
 
+    /// Structured per-request metadata that persists across all
+    /// lifecycle phases, supporting nested JSON values. Swapped
+    /// into each [`HttpFilterContext`] and written back after
+    /// filter execution, following the same pattern as
+    /// [`filter_metadata`].
+    ///
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    /// [`filter_metadata`]: Self::filter_metadata
+    pub structured_metadata: std::collections::HashMap<String, serde_json::Value>,
+
     /// Post-mutation request body length produced during `StreamBuffer`
     /// pre-read.
     ///
@@ -80,12 +90,43 @@ pub struct PingoraRequestCtx {
     /// before Pingora sends headers to the backend.
     pub mutated_request_body_len: Option<usize>,
 
+    /// Pipeline pinned for this request's entire lifecycle.
+    ///
+    /// Set once during `request_filter` by cloning the [`Arc`] from the
+    /// listener's [`ArcSwap`]. All subsequent hooks (request body, response,
+    /// response body, logging) use this reference instead of re-loading
+    /// from the [`ArcSwap`], ensuring that a hot configuration reload
+    /// cannot change the pipeline mid-request.
+    ///
+    /// [`ArcSwap`]: arc_swap::ArcSwap
+    pub pinned_pipeline: Option<Arc<FilterPipeline>>,
+
+    /// Ordered trusted mutations from body pre-read filters.
+    ///
+    /// Preserves remove/set/add operations with original
+    /// cross-chunk ordering so the normal request pipeline can
+    /// resolve processor-produced header values without
+    /// consulting original client headers. Cleared after the
+    /// normal request pipeline completes.
+    pub pre_read_mutations: Vec<TrustedHeaderMutation>,
+
     /// Filter results from body pre-read. Carried into the next
     /// [`HttpFilterContext`] so that branch chains attached to the
     /// first `on_request` filter can evaluate body-derived results.
     ///
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
     pub filter_results: std::collections::HashMap<&'static str, praxis_filter::FilterResultSet>,
+
+    /// Typed per-filter state that persists across all lifecycle
+    /// phases. Keyed by stable filter invocation ID, unique within
+    /// the request's pinned [`FilterPipeline`]. Swapped into each
+    /// [`HttpFilterContext`] and written back after filter execution,
+    /// following the same pattern as [`filter_metadata`].
+    ///
+    /// [`FilterPipeline`]: praxis_filter::FilterPipeline
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    /// [`filter_metadata`]: Self::filter_metadata
+    pub filter_state: std::collections::HashMap<usize, Box<dyn std::any::Any + Send + Sync>>,
 
     /// Cluster name snapshot retained for metrics emission in the
     /// `logging()` hook, after `cluster` has been consumed by filter
@@ -199,13 +240,17 @@ macro_rules! filter_context {
             branch_iterations: std::collections::HashMap::new(),
             client_addr: $ctx.client_addr,
             cluster: $ctx.cluster.take(),
+            current_filter_id: None,
             downstream_tls: $ctx.downstream_tls,
             executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
             filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
+            structured_metadata: std::mem::take(&mut $ctx.structured_metadata),
             filter_results: std::mem::take(&mut $ctx.filter_results),
+            filter_state: std::mem::take(&mut $ctx.filter_state),
+            pre_read_mutations: std::mem::take(&mut $ctx.pre_read_mutations),
             health_registry: $pipeline.health_registry(),
             id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
@@ -294,6 +339,45 @@ impl PingoraRequestCtx {
         let request = self.request_snapshot.as_ref()?;
         Some(filter_context!(self, pipeline, request, response_header))
     }
+
+    /// Pin the current pipeline for this request's entire lifecycle.
+    ///
+    /// Clones the [`Arc`] from the [`ArcSwap`] and stores it in
+    /// [`pinned_pipeline`]. All subsequent hooks should call
+    /// [`pipeline`] instead of re-loading from the [`ArcSwap`].
+    ///
+    /// Called once by `request_filter` in both body-capable and
+    /// no-body handlers.
+    ///
+    /// [`ArcSwap`]: arc_swap::ArcSwap
+    /// [`pinned_pipeline`]: Self::pinned_pipeline
+    /// [`pipeline`]: Self::pipeline
+    pub fn pin_pipeline(&mut self, swap: &arc_swap::ArcSwap<FilterPipeline>) -> Arc<FilterPipeline> {
+        if let Some(ref existing) = self.pinned_pipeline {
+            return Arc::clone(existing);
+        }
+        let pipeline = swap.load_full();
+        self.pinned_pipeline = Some(Arc::clone(&pipeline));
+        pipeline
+    }
+
+    /// Return the pinned pipeline, falling back to a fresh
+    /// [`ArcSwap`] load when no pipeline was pinned.
+    ///
+    /// The fallback covers early-failure paths where a lifecycle
+    /// hook runs before `request_filter` (e.g. after
+    /// `early_request_filter` rejection triggers `logging`).
+    ///
+    /// Per-body-chunk hooks (`request_body_filter`,
+    /// `response_body_filter`) call this on every chunk,
+    /// incurring one [`Arc::clone`] per invocation.
+    ///
+    /// [`ArcSwap`]: arc_swap::ArcSwap
+    pub fn pipeline(&self, swap: &arc_swap::ArcSwap<FilterPipeline>) -> Arc<FilterPipeline> {
+        self.pinned_pipeline
+            .as_ref()
+            .map_or_else(|| swap.load_full(), Arc::clone)
+    }
 }
 
 impl Default for PingoraRequestCtx {
@@ -311,8 +395,12 @@ impl Default for PingoraRequestCtx {
             connection_upgraded: false,
             downstream_tls: false,
             filter_metadata: std::collections::HashMap::new(),
+            structured_metadata: std::collections::HashMap::new(),
             mutated_request_body_len: None,
+            pinned_pipeline: None,
+            pre_read_mutations: Vec::new(),
             filter_results: std::collections::HashMap::new(),
+            filter_state: std::collections::HashMap::new(),
             metrics_cluster: None,
             metrics_cluster_shared: None,
             pre_read_body: None,
@@ -348,6 +436,7 @@ impl Default for PingoraRequestCtx {
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::significant_drop_tightening,
+    clippy::too_many_lines,
     reason = "tests"
 )]
 mod tests {
@@ -662,6 +751,236 @@ mod tests {
         ctx.filter_metadata = fctx.filter_metadata;
         assert_eq!(ctx.filter_metadata.get("token.input").map(String::as_str), Some("42"));
         assert_eq!(ctx.filter_metadata.get("token.total").map(String::as_str), Some("60"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Hot-Reload Pipeline Pinning (via production helpers)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn pin_pipeline_captures_current_arc() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline_a = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        let swap = arc_swap::ArcSwap::from(Arc::clone(&pipeline_a));
+
+        let mut ctx = default_ctx();
+        let pinned = ctx.pin_pipeline(&swap);
+        assert!(
+            Arc::ptr_eq(&pinned, &pipeline_a),
+            "pin_pipeline should return the current pipeline"
+        );
+        assert!(
+            Arc::ptr_eq(ctx.pinned_pipeline.as_ref().unwrap(), &pipeline_a),
+            "pinned_pipeline should be stored in ctx"
+        );
+    }
+
+    #[test]
+    fn pipeline_returns_pinned_after_reload() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline_a = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        let swap = arc_swap::ArcSwap::from(Arc::clone(&pipeline_a));
+
+        let mut ctx = default_ctx();
+        ctx.pin_pipeline(&swap);
+
+        let pipeline_b = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        swap.store(pipeline_b);
+
+        let later = ctx.pipeline(&swap);
+        assert!(
+            Arc::ptr_eq(&later, &pipeline_a),
+            "later hooks should still return pipeline A after reload"
+        );
+    }
+
+    #[test]
+    fn new_request_after_reload_pins_new_pipeline() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline_a = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        let swap = arc_swap::ArcSwap::from(Arc::clone(&pipeline_a));
+
+        let mut ctx_a = default_ctx();
+        ctx_a.pin_pipeline(&swap);
+
+        let pipeline_b = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        swap.store(Arc::clone(&pipeline_b));
+
+        let mut ctx_b = default_ctx();
+        ctx_b.pin_pipeline(&swap);
+
+        assert!(
+            Arc::ptr_eq(&ctx_a.pipeline(&swap), &pipeline_a),
+            "request A should use old pipeline"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx_b.pipeline(&swap), &pipeline_b),
+            "request B should use new pipeline"
+        );
+    }
+
+    #[test]
+    fn old_pipeline_drops_after_ctx_drops() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline_a = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        let weak_a = Arc::downgrade(&pipeline_a);
+        let swap = arc_swap::ArcSwap::from(pipeline_a);
+
+        let mut ctx = default_ctx();
+        ctx.pin_pipeline(&swap);
+
+        swap.store(Arc::new(FilterPipeline::build(&mut [], &registry).unwrap()));
+
+        assert!(weak_a.upgrade().is_some(), "old pipeline alive while ctx exists");
+
+        drop(ctx);
+
+        assert!(weak_a.upgrade().is_none(), "old pipeline drops with ctx");
+    }
+
+    #[test]
+    fn pipeline_helper_returns_pinned_for_every_phase() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline_a = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        let swap = arc_swap::ArcSwap::from(Arc::clone(&pipeline_a));
+
+        let mut ctx = default_ctx();
+        ctx.pin_pipeline(&swap);
+
+        swap.store(Arc::new(FilterPipeline::build(&mut [], &registry).unwrap()));
+
+        for phase in ["request_body", "response", "response_body", "logging"] {
+            let p = ctx.pipeline(&swap);
+            assert!(
+                Arc::ptr_eq(&p, &pipeline_a),
+                "{phase}: should still return pinned pipeline A"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_fallback_when_not_pinned() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline_a = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        let swap = arc_swap::ArcSwap::from(Arc::clone(&pipeline_a));
+
+        let ctx = default_ctx();
+
+        let loaded = ctx.pipeline(&swap);
+        assert!(
+            Arc::ptr_eq(&loaded, &pipeline_a),
+            "unpinned ctx should fall back to current ArcSwap value"
+        );
+    }
+
+    #[test]
+    fn pin_pipeline_is_idempotent_after_reload() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline_a = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        let swap = arc_swap::ArcSwap::from(Arc::clone(&pipeline_a));
+
+        let mut ctx = default_ctx();
+        ctx.pin_pipeline(&swap);
+
+        let pipeline_b = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+        swap.store(pipeline_b);
+
+        let second_pin = ctx.pin_pipeline(&swap);
+        assert!(
+            Arc::ptr_eq(&second_pin, &pipeline_a),
+            "repeated pin_pipeline after reload should return the original pin"
+        );
+    }
+
+    #[test]
+    fn filter_state_isolated_across_pipelines_with_same_numeric_ids() {
+        use praxis_core::config::FilterEntry;
+
+        let registry = FilterRegistry::with_builtins();
+        let entry = || FilterEntry {
+            branch_chains: None,
+            conditions: vec![],
+            config: serde_yaml::from_str("{}").unwrap(),
+            failure_mode: praxis_core::config::FailureMode::default(),
+            filter_type: "request_id".to_owned(),
+            name: None,
+            response_conditions: vec![],
+        };
+
+        let pipeline_a = Arc::new(FilterPipeline::build(&mut [entry()], &registry).unwrap());
+        let pipeline_b = Arc::new(FilterPipeline::build(&mut [entry()], &registry).unwrap());
+        let swap = arc_swap::ArcSwap::from(Arc::clone(&pipeline_a));
+
+        let request = Request {
+            method: Method::GET,
+            uri: "/".parse::<Uri>().unwrap(),
+            headers: HeaderMap::new(),
+        };
+
+        let mut ctx_a = default_ctx();
+        ctx_a.pin_pipeline(&swap);
+        ctx_a.request_snapshot = Some(request.clone());
+        let mut fctx_a = ctx_a.build_filter_context(&pipeline_a, &request, None);
+        fctx_a.current_filter_id = Some(0);
+        fctx_a.insert_filter_state(String::from("belongs_to_a"));
+        ctx_a.filter_state = fctx_a.filter_state;
+
+        swap.store(Arc::clone(&pipeline_b));
+
+        let mut ctx_b = default_ctx();
+        ctx_b.pin_pipeline(&swap);
+        ctx_b.request_snapshot = Some(request.clone());
+        let fctx_b = ctx_b.build_filter_context(&pipeline_b, &request, None);
+
+        assert!(
+            fctx_b.filter_state.is_empty(),
+            "request B should have independent empty state"
+        );
+
+        let fctx_a2 = ctx_a.filter_context_for(&pipeline_a, None).unwrap();
+        assert_eq!(
+            fctx_a2.filter_state.get(&0).and_then(|v| v.downcast_ref::<String>()),
+            Some(&String::from("belongs_to_a")),
+            "request A should still read its own state after reload"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Structured Metadata Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn structured_metadata_roundtrip_through_filter_context() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let request = Request {
+            method: Method::GET,
+            uri: "/".parse::<Uri>().unwrap(),
+            headers: HeaderMap::new(),
+        };
+
+        let mut ctx = default_ctx();
+        ctx.structured_metadata.insert(
+            "ext_proc".to_owned(),
+            serde_json::json!({"model": "gpt-4", "scores": [0.9]}),
+        );
+
+        let fctx = ctx.build_filter_context(&pipeline, &request, None);
+        assert_eq!(
+            fctx.get_structured_metadata("ext_proc", "model"),
+            Some(&serde_json::json!("gpt-4")),
+            "structured metadata should be accessible in filter context"
+        );
+        assert_eq!(
+            fctx.get_structured_metadata("ext_proc", "scores"),
+            Some(&serde_json::json!([0.9])),
+            "nested array values should round-trip through filter context"
+        );
+
+        assert!(
+            ctx.structured_metadata.is_empty(),
+            "structured_metadata should be taken from PingoraRequestCtx during build"
+        );
     }
 
     // -------------------------------------------------------------------------

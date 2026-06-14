@@ -33,14 +33,15 @@ pub use builtins::ResponseStoreRegistry;
 #[cfg(feature = "ai-inference")]
 pub use builtins::ResponsesFormatFilter;
 pub use builtins::{
-    CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction,
-    GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind,
-    has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig, normalize_rewritten_path,
+    CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointSelectorFilter,
+    GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter,
+    RuleTargetKind, has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig,
+    normalize_rewritten_path,
 };
 #[cfg(feature = "ai-inference")]
 pub use builtins::{TokenUsage, TokenUsageProvider, extract_token_usage};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
-pub use context::{HttpFilterContext, Request, Response};
+pub use context::{HttpFilterContext, Request, Response, TrustedHeaderMutation};
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::FilterPipeline;
@@ -263,19 +264,24 @@ pub(crate) mod test_utils {
         }
     }
 
+    #[allow(clippy::too_many_lines, reason = "test utility enumerates all context fields")]
     pub(crate) fn make_filter_context(req: &Request) -> HttpFilterContext<'_> {
         HttpFilterContext {
             body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: None,
             cluster: None,
+            current_filter_id: None,
             downstream_tls: false,
             executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
             filter_metadata: std::collections::HashMap::new(),
+            structured_metadata: std::collections::HashMap::new(),
+            pre_read_mutations: Vec::new(),
             filter_results: std::collections::HashMap::new(),
+            filter_state: std::collections::HashMap::new(),
             health_registry: None,
             id_generator: &TEST_ID_GENERATOR,
             kv_stores: None,

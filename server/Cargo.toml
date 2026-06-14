@@ -26,6 +26,7 @@ clap = { workspace = true }
 notify = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
+praxis-proxy-ext-proc = { path = "../filter/ext-proc", optional = true }
 praxis-protocol = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -43,5 +44,5 @@ tempfile = { workspace = true }
 [features]
 default = ["ai-inference"]
 ai-inference = ["praxis-filter/ai-inference", "praxis-protocol/ai-inference"]
-ext-proc = ["praxis-filter/ext-proc"]
+ext-proc = ["praxis-filter/ext-proc", "dep:praxis-proxy-ext-proc"]
 

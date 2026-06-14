@@ -33,6 +33,7 @@ pingora-http = { workspace = true }
 pingora-proxy = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
+serde_json = { workspace = true }
 praxis-tls = { workspace = true, features = ["hot-reload"] }
 rustls = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
@@ -41,7 +42,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }
-serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }

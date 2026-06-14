@@ -110,9 +110,9 @@ impl FilterRegistry {
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
         A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
-        CsrfFilter, ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter,
-        JsonRpcFilter, McpFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
-        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
+        CsrfFilter, EndpointSelectorFilter, ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter,
+        JsonBodyFieldFilter, JsonRpcFilter, McpFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter,
+        RequestIdFilter, StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
     };
 
     register_http(factories, "a2a", A2aFilter::from_config);
@@ -126,6 +126,7 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         "credential_injection",
         CredentialInjectionFilter::from_config,
     );
+    register_http(factories, "endpoint_selector", EndpointSelectorFilter::from_config);
     register_http(factories, "headers", HeaderFilter::from_config);
     register_http(factories, "forwarded_headers", ForwardedHeadersFilter::from_config);
     register_http(factories, "grpc_detection", GrpcDetectionFilter::from_config);
@@ -242,6 +243,10 @@ mod tests {
         assert!(
             names.contains(&"credential_injection"),
             "credential_injection should be registered"
+        );
+        assert!(
+            names.contains(&"endpoint_selector"),
+            "endpoint_selector should be registered"
         );
         assert!(
             names.contains(&"forwarded_headers"),

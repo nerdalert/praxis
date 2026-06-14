@@ -28,6 +28,9 @@ tokio = { workspace = true, features = ["process", "fs", "io-util", "net", "time
 tracing = { workspace = true }
 
 [dev-dependencies]
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
 criterion = { workspace = true }
 http = { workspace = true }
 praxis-core = { workspace = true }

@@ -72,6 +72,20 @@ fn main() {
     let config = praxis::load_config(explicit.as_deref()).unwrap_or_else(|e| praxis::fatal(&e));
     praxis::init_tracing(&config).unwrap_or_else(|e| praxis::fatal(&e));
     info!("starting server");
+
+    #[cfg(feature = "ext-proc")]
+    {
+        let mut registry = praxis_filter::FilterRegistry::with_builtins();
+        registry
+            .register(
+                "ext_proc",
+                praxis_filter::http_builtin(praxis_ext_proc::ExtProcFilter::from_config),
+            )
+            .unwrap_or_else(|e| praxis::fatal(&e));
+        praxis::run_server_with_registry(config, registry, config_path)
+    }
+
+    #[cfg(not(feature = "ext-proc"))]
     praxis::run_server(config, config_path)
 }
 

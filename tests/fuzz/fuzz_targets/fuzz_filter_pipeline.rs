@@ -62,6 +62,8 @@ fuzz_target!(|data: &str| {
             executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
             filter_metadata: std::collections::HashMap::new(),
+            structured_metadata: std::collections::HashMap::new(),
+            pre_read_mutations: Vec::new(),
             filter_results: std::collections::HashMap::new(),
             health_registry: None,
             id_generator: &FUZZ_ID_GENERATOR,

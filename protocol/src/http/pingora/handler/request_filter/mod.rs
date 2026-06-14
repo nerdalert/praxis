@@ -100,19 +100,9 @@ pub(in crate::http) async fn execute(
     if matches!(caps.request_body_mode, BodyMode::StreamBuffer { .. }) {
         tracing::debug!("pre-reading request body for StreamBuffer inspection");
         match stream_buffer::pre_read_body(pipeline, session, ctx, &request).await {
-            Ok(extra_headers) => {
-                tracing::debug!(count = extra_headers.len(), "injecting promoted headers");
-                for (name, value) in extra_headers {
-                    if let (Ok(hname), Ok(hval)) = (
-                        http::header::HeaderName::from_bytes(name.as_bytes()),
-                        http::header::HeaderValue::from_str(&value),
-                    ) {
-                        let _insert = session.req_header_mut().insert_header(hname.clone(), hval.clone());
-                        request.headers.insert(hname, hval);
-                    } else {
-                        tracing::warn!(header = %name, "skipping invalid promoted header");
-                    }
-                }
+            Ok(mutations) => {
+                apply_pre_read_mutations(session, &mut request, &mutations.mutations);
+                ctx.pre_read_mutations = mutations.mutations;
             },
             Err(PreReadError::Rejected(rejection)) => {
                 send_rejection(session, rejection).await;
@@ -127,13 +117,23 @@ pub(in crate::http) async fn execute(
         }
     }
 
-    match run_pipeline(pipeline, request, ctx).await {
+    let result = run_pipeline(pipeline, request, ctx).await;
+    ctx.pre_read_mutations.clear();
+    match result {
         Ok(PipelineResult {
             action: FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone,
             extra_headers,
             headers_to_remove,
             headers_to_set,
         }) => {
+            if let Some(ref mut snapshot) = ctx.request_snapshot {
+                for name in &headers_to_remove {
+                    snapshot.headers.remove(name);
+                }
+                for (name, value) in &headers_to_set {
+                    snapshot.headers.insert(name.clone(), value.clone());
+                }
+            }
             let req_headers = session.req_header_mut();
             for name in &headers_to_remove {
                 let _remove = req_headers.remove_header(name);
@@ -186,6 +186,8 @@ async fn run_pipeline(
         request_body_mode,
         selected_endpoint_index,
         filter_metadata,
+        structured_metadata,
+        filter_state,
     ) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
@@ -201,11 +203,15 @@ async fn run_pipeline(
             filter_ctx.request_body_mode,
             filter_ctx.selected_endpoint_index,
             filter_ctx.filter_metadata,
+            filter_ctx.structured_metadata,
+            filter_ctx.filter_state,
         )
     };
 
     ctx.request_snapshot = Some(request);
     ctx.filter_metadata = filter_metadata;
+    ctx.structured_metadata = structured_metadata;
+    ctx.filter_state = filter_state;
     ctx.metrics_cluster_shared = cluster.as_ref().map(|c| ::metrics::SharedString::from(Arc::clone(c)));
     ctx.metrics_cluster = cluster.clone();
 
@@ -230,6 +236,74 @@ async fn run_pipeline(
             headers_to_set: Vec::new(),
         }),
         Err(e) => Err(e),
+    }
+}
+
+/// Apply trusted pre-read mutations to the session and request in
+/// operation order.
+fn apply_pre_read_mutations(
+    session: &mut Session,
+    request: &mut Request,
+    mutations: &[praxis_filter::TrustedHeaderMutation],
+) {
+    apply_pre_read_mutations_to_request(request, mutations);
+    apply_pre_read_mutations_to_session(session, mutations);
+}
+
+/// Apply ordered pre-read mutations to the Praxis [`Request`].
+///
+/// Both [`Set`] and [`Add`] use overwrite (insert) semantics.
+/// [`resolve_trusted_header`] treats [`Add`] as append for
+/// ambiguity detection, but promoted request headers use
+/// overwrite to match Pingora's `insert_header` and the Go
+/// EPP's `SetHeaders` convention.
+///
+/// [`Set`]: praxis_filter::TrustedHeaderMutation::Set
+/// [`Add`]: praxis_filter::TrustedHeaderMutation::Add
+/// [`resolve_trusted_header`]: praxis_filter::HttpFilterContext::resolve_trusted_header
+fn apply_pre_read_mutations_to_request(request: &mut Request, mutations: &[praxis_filter::TrustedHeaderMutation]) {
+    for mutation in mutations {
+        match mutation {
+            praxis_filter::TrustedHeaderMutation::Remove(name) => {
+                request.headers.remove(name);
+            },
+            praxis_filter::TrustedHeaderMutation::Set(name, value) => {
+                request.headers.insert(name.clone(), value.clone());
+            },
+            praxis_filter::TrustedHeaderMutation::Add(name, value) => {
+                if let Ok(hval) = http::header::HeaderValue::from_str(value) {
+                    request.headers.insert(name.clone(), hval);
+                }
+            },
+        }
+    }
+}
+
+/// Mirror ordered pre-read mutations to the Pingora session.
+///
+/// Both [`Set`] and [`Add`] use overwrite semantics to match
+/// the request application and Pingora's `insert_header`.
+///
+/// [`Set`]: praxis_filter::TrustedHeaderMutation::Set
+/// [`Add`]: praxis_filter::TrustedHeaderMutation::Add
+fn apply_pre_read_mutations_to_session(session: &mut Session, mutations: &[praxis_filter::TrustedHeaderMutation]) {
+    let req_headers = session.req_header_mut();
+    for mutation in mutations {
+        match mutation {
+            praxis_filter::TrustedHeaderMutation::Remove(name) => {
+                let _remove = req_headers.remove_header(name);
+            },
+            praxis_filter::TrustedHeaderMutation::Set(name, value) => {
+                let _insert = req_headers.insert_header(name.clone(), value.clone());
+            },
+            praxis_filter::TrustedHeaderMutation::Add(name, value) => {
+                if let Ok(hval) = http::header::HeaderValue::from_str(value) {
+                    let _insert = req_headers.insert_header(name.clone(), hval);
+                } else {
+                    tracing::warn!(header = %name, "skipping invalid promoted header");
+                }
+            },
+        }
     }
 }
 
@@ -270,6 +344,7 @@ mod tests {
     use std::net::IpAddr;
 
     use http::{HeaderMap, Method, Uri};
+    use pingora_core::upstreams::peer::Peer;
     use praxis_core::config::FailureMode;
     use praxis_filter::{BodyMode, FilterAction, FilterPipeline, FilterRegistry, Request};
 
@@ -504,6 +579,223 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Pre-Read Mutation Propagation
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn pre_read_remove_deletes_from_request() {
+        let mut req = make_request_with_header("x-remove-me", "gone");
+        let mutations = make_mutations_remove("x-remove-me");
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert!(
+            req.headers.get("x-remove-me").is_none(),
+            "removed header should be absent from request"
+        );
+    }
+
+    #[test]
+    fn pre_read_set_overwrites_in_request() {
+        let mut req = make_request_with_header("x-overwrite", "old");
+        let mutations = make_mutations_set("x-overwrite", "new");
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert_eq!(
+            req.headers.get("x-overwrite").unwrap(),
+            "new",
+            "set mutation should overwrite existing value"
+        );
+    }
+
+    #[test]
+    fn pre_read_add_inserts_into_request() {
+        let mut req = make_request();
+        let mutations = make_mutations_add("x-added", "value");
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert_eq!(
+            req.headers.get("x-added").unwrap(),
+            "value",
+            "add mutation should add header"
+        );
+    }
+
+    #[test]
+    fn pre_read_add_overwrites_existing_in_request() {
+        let mut req = make_request_with_header("x-existing", "old");
+        let mutations = make_mutations_add("x-existing", "new");
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert_eq!(
+            req.headers.get("x-existing").unwrap(),
+            "new",
+            "add mutation should overwrite existing header"
+        );
+    }
+
+    #[test]
+    fn pre_read_ordered_remove_then_set_then_add() {
+        let mut req = make_request_with_header("x-target", "original");
+        let mutations = vec![
+            praxis_filter::TrustedHeaderMutation::Remove("x-target".parse().unwrap()),
+            praxis_filter::TrustedHeaderMutation::Set("x-target".parse().unwrap(), "from-set".parse().unwrap()),
+            praxis_filter::TrustedHeaderMutation::Add("x-target".parse().unwrap(), "from-add".to_owned()),
+        ];
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert_eq!(
+            req.headers.get("x-target").unwrap(),
+            "from-add",
+            "add (last writer) should win after remove+set+add sequence"
+        );
+    }
+
+    #[test]
+    fn pre_read_empty_mutations_is_noop() {
+        let mut req = make_request_with_header("x-keep", "kept");
+        let mutations: Vec<praxis_filter::TrustedHeaderMutation> = Vec::new();
+
+        apply_pre_read_mutations_to_request(&mut req, &mutations);
+
+        assert_eq!(
+            req.headers.get("x-keep").unwrap(),
+            "kept",
+            "empty mutations should not change request"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Production Lifecycle Tests
+    //
+    // Stop condition: `request_filter::execute` and
+    // `stream_buffer::pre_read_body` require a live `pingora_proxy::Session`
+    // created by Pingora's internal networking stack. `Session` is an opaque
+    // type that cannot be constructed outside a real HTTP connection
+    // lifecycle (see `convert.rs` doc comments). These tests therefore
+    // exercise the nearest testable production helpers — `run_pipeline`
+    // for request-phase execution, plus `execute()` snapshot stripping
+    // logic and `upstream_peer::execute` for peer selection — without
+    // manually reproducing their internal logic.
+    //
+    // The remaining Session-dependent boundary (pre-read body I/O,
+    // session header promotion, session-level stripping) is closed by
+    // the unchanged-Go-EPP local smoke test.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn lifecycle_provenance_through_selector_strip_and_peer() {
+        let registry = FilterRegistry::with_builtins();
+        let config: serde_yaml::Value = serde_yaml::from_str(
+            "source_header: x-gateway-dest\nrequired: true\nstrip_header: true\nstatus_on_required_failure: 503",
+        )
+        .unwrap();
+        let mut entries = vec![praxis_filter::FilterEntry {
+            branch_chains: None,
+            filter_type: "endpoint_selector".into(),
+            config,
+            conditions: vec![],
+            name: None,
+            response_conditions: vec![],
+            failure_mode: FailureMode::default(),
+        }];
+        let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+
+        let mut req = make_request();
+        req.headers
+            .insert("x-gateway-dest", "evil.client:6666".parse().unwrap());
+
+        let mut ctx = make_ctx();
+        ctx.pre_read_mutations = vec![
+            praxis_filter::TrustedHeaderMutation::Remove("x-gateway-dest".parse().unwrap()),
+            praxis_filter::TrustedHeaderMutation::Add("x-gateway-dest".parse().unwrap(), "127.0.0.1:8080".to_owned()),
+        ];
+
+        let result = run_pipeline(&pipeline, req, &mut ctx).await.unwrap();
+        ctx.pre_read_mutations.clear();
+
+        assert!(
+            matches!(result.action, FilterAction::Continue),
+            "pipeline should continue after selecting endpoint"
+        );
+
+        assert_eq!(
+            ctx.upstream.as_ref().map(|u| &*u.address),
+            Some("127.0.0.1:8080"),
+            "upstream should be the trusted EPP destination, not the client header"
+        );
+
+        assert!(
+            ctx.pre_read_mutations.is_empty(),
+            "provenance must be empty after normal pipeline"
+        );
+
+        if let Some(ref mut snapshot) = ctx.request_snapshot {
+            for name in &result.headers_to_remove {
+                snapshot.headers.remove(name);
+            }
+        }
+
+        let snapshot = ctx.request_snapshot.as_ref().expect("snapshot should be stored");
+        assert!(
+            snapshot.headers.get("x-gateway-dest").is_none(),
+            "routing header must be absent from snapshot after stripping"
+        );
+
+        let peer = super::super::upstream_peer::execute(&mut ctx).await.unwrap();
+        assert_eq!(
+            peer.address().to_string(),
+            "127.0.0.1:8080",
+            "peer selection must consume the endpoint_selector upstream"
+        );
+
+        assert!(
+            ctx.upstream.is_none(),
+            "upstream should be moved to upstream_for_retry after peer selection"
+        );
+        assert!(
+            ctx.upstream_for_retry.is_some(),
+            "upstream_for_retry should hold the selected upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_required_503_when_epp_omits_destination() {
+        let registry = FilterRegistry::with_builtins();
+        let config: serde_yaml::Value =
+            serde_yaml::from_str("source_header: x-gateway-dest\nrequired: true\nstatus_on_required_failure: 503")
+                .unwrap();
+        let mut entries = vec![praxis_filter::FilterEntry {
+            branch_chains: None,
+            filter_type: "endpoint_selector".into(),
+            config,
+            conditions: vec![],
+            name: None,
+            response_conditions: vec![],
+            failure_mode: FailureMode::default(),
+        }];
+        let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+
+        let mut req = make_request();
+        req.headers
+            .insert("x-gateway-dest", "evil.client:9999".parse().unwrap());
+
+        let mut ctx = make_ctx();
+
+        let result = run_pipeline(&pipeline, req, &mut ctx).await.unwrap();
+
+        assert!(
+            matches!(result.action, FilterAction::Reject(ref r) if r.status == 503),
+            "required mode with no trusted destination must reject with 503"
+        );
+        assert!(ctx.upstream.is_none(), "no upstream should be set on routing failure");
+    }
+
+    // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
@@ -525,6 +817,41 @@ mod tests {
     fn empty_pipeline() -> FilterPipeline {
         let registry = FilterRegistry::with_builtins();
         FilterPipeline::build(&mut [], &registry).unwrap()
+    }
+
+    /// Create a request with a single header.
+    fn make_request_with_header(name: &str, value: &str) -> Request {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            http::header::HeaderValue::from_str(value).unwrap(),
+        );
+        Request {
+            method: Method::GET,
+            uri: Uri::from_static("/"),
+            headers,
+        }
+    }
+
+    /// Build mutations with a single remove entry.
+    fn make_mutations_remove(name: &str) -> Vec<praxis_filter::TrustedHeaderMutation> {
+        vec![praxis_filter::TrustedHeaderMutation::Remove(name.parse().unwrap())]
+    }
+
+    /// Build mutations with a single set/overwrite entry.
+    fn make_mutations_set(name: &str, value: &str) -> Vec<praxis_filter::TrustedHeaderMutation> {
+        vec![praxis_filter::TrustedHeaderMutation::Set(
+            name.parse().unwrap(),
+            value.parse().unwrap(),
+        )]
+    }
+
+    /// Build mutations with a single add/append entry.
+    fn make_mutations_add(name: &str, value: &str) -> Vec<praxis_filter::TrustedHeaderMutation> {
+        vec![praxis_filter::TrustedHeaderMutation::Add(
+            name.parse().unwrap(),
+            value.to_owned(),
+        )]
     }
 
     /// Build a pipeline with a single `static_response` filter that rejects.

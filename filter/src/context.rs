@@ -3,14 +3,49 @@
 
 //! Transport-agnostic HTTP request/response metadata and per-request filter context.
 
-use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
+use std::{any::Any, borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
-use http::{HeaderMap, Method, StatusCode, Uri};
+use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
 use praxis_core::{
     connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
 };
 
 use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResultSet};
+
+// -----------------------------------------------------------------------------
+// TrustedHeaderMutation
+// -----------------------------------------------------------------------------
+
+/// A single header mutation from a trusted pre-read filter.
+///
+/// Operations are stored in execution order. Within each body
+/// callback, the canonical ordering is remove → set → add.
+/// Across callbacks, operations are appended chronologically.
+#[derive(Debug, Clone)]
+pub enum TrustedHeaderMutation {
+    /// Remove the header (clears all prior values).
+    Remove(HeaderName),
+
+    /// Set/overwrite the header to a single value.
+    ///
+    /// Stores the raw [`HeaderValue`] to preserve non-text bytes
+    /// for generic mutation forwarding.
+    ///
+    /// [`HeaderValue`]: http::header::HeaderValue
+    Set(HeaderName, http::header::HeaderValue),
+
+    /// Append a value for the header.
+    Add(HeaderName, String),
+}
+
+impl TrustedHeaderMutation {
+    /// Whether this mutation operates on the given header name.
+    pub fn matches_header(&self, name: &HeaderName) -> bool {
+        match self {
+            Self::Remove(n) | Self::Set(n, _) | Self::Add(n, _) => n == name,
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // HttpFilterContext
@@ -35,6 +70,18 @@ pub struct HttpFilterContext<'a> {
     /// The cluster name selected by the router filter.
     pub cluster: Option<Arc<str>>,
 
+    /// Stable invocation ID of the filter currently executing.
+    ///
+    /// Assigned at pipeline build time and unique within the
+    /// request's pinned [`FilterPipeline`]. Set by the pipeline
+    /// executor before each filter hook call and cleared after.
+    /// Filter state accessors use this as the storage key so
+    /// that multiple instances of the same filter type — including
+    /// filters in branch chains — get independent state.
+    ///
+    /// [`FilterPipeline`]: crate::FilterPipeline
+    pub current_filter_id: Option<usize>,
+
     /// Whether the downstream connection uses TLS.
     ///
     /// Set by the protocol layer from the connection's SSL
@@ -53,10 +100,10 @@ pub struct HttpFilterContext<'a> {
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
 
     /// Headers to remove from the upstream request.
-    pub request_headers_to_remove: Vec<http::header::HeaderName>,
+    pub request_headers_to_remove: Vec<HeaderName>,
 
     /// Headers to set (overwrite) on the upstream request.
-    pub request_headers_to_set: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
+    pub request_headers_to_set: Vec<(HeaderName, http::header::HeaderValue)>,
 
     /// Durable per-request metadata that persists across all
     /// Pingora lifecycle phases (request, request-body, response,
@@ -70,6 +117,21 @@ pub struct HttpFilterContext<'a> {
     /// [`filter_results`]: Self::filter_results
     pub filter_metadata: HashMap<String, String>,
 
+    /// Structured per-request metadata that persists across all
+    /// Pingora lifecycle phases, like [`filter_metadata`], but
+    /// supports nested JSON values (objects, arrays, strings,
+    /// numbers, booleans, null).
+    ///
+    /// Organized by namespace to prevent key collisions between
+    /// independent filters. Each namespace maps to a JSON object
+    /// whose keys are set individually via [`set_structured_metadata`]
+    /// or merged in bulk via [`merge_structured_metadata`].
+    ///
+    /// [`filter_metadata`]: Self::filter_metadata
+    /// [`set_structured_metadata`]: Self::set_structured_metadata
+    /// [`merge_structured_metadata`]: Self::merge_structured_metadata
+    pub structured_metadata: HashMap<String, serde_json::Value>,
+
     /// Filter result map: `filter_name` -> result entries.
     ///
     /// Filters write string key-value pairs here during
@@ -77,6 +139,19 @@ pub struct HttpFilterContext<'a> {
     /// reads these to evaluate branch conditions. Cleared
     /// after branch evaluation at each filter.
     pub filter_results: HashMap<&'static str, FilterResultSet>,
+
+    /// Typed per-filter state that persists across all lifecycle
+    /// phases (request, request-body, response, response-body).
+    ///
+    /// Keyed by stable filter invocation ID, unique within the
+    /// request's pinned [`FilterPipeline`]. Swapped into each
+    /// `HttpFilterContext` from the protocol-layer request context
+    /// and written back after filter execution, following the same
+    /// pattern as [`filter_metadata`].
+    ///
+    /// [`FilterPipeline`]: crate::FilterPipeline
+    /// [`filter_metadata`]: Self::filter_metadata
+    pub filter_state: HashMap<usize, Box<dyn Any + Send + Sync>>,
 
     /// Shared health registry for endpoint health lookups.
     pub health_registry: Option<&'a HealthRegistry>,
@@ -133,6 +208,14 @@ pub struct HttpFilterContext<'a> {
 
     /// Wall-clock time source for timestamp generation.
     pub time_source: &'a dyn TimeSource,
+
+    /// Ordered trusted mutations from body pre-read filters.
+    ///
+    /// Available in the normal request pipeline for
+    /// security-sensitive header resolution that must distinguish
+    /// processor-produced mutations from original client headers.
+    /// Cleared after the normal request pipeline completes.
+    pub pre_read_mutations: Vec<TrustedHeaderMutation>,
 
     /// Rewritten URI path for the upstream request.
     ///
@@ -196,6 +279,43 @@ impl HttpFilterContext<'_> {
         self.filter_metadata.insert(key, value);
     }
 
+    /// Set a structured metadata value under a namespace.
+    ///
+    /// Each namespace is stored as a JSON object; `key` becomes
+    /// a field within that object. If the namespace does not yet
+    /// exist, a new empty object is created first.
+    pub fn set_structured_metadata(&mut self, namespace: &str, key: &str, value: serde_json::Value) {
+        let ns = self
+            .structured_metadata
+            .entry(namespace.to_owned())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(map) = ns {
+            map.insert(key.to_owned(), value);
+        }
+    }
+
+    /// Get a structured metadata value from a namespace.
+    ///
+    /// Returns `None` when the namespace is absent, when it is
+    /// not a JSON object, or when `key` is not present within it.
+    pub fn get_structured_metadata(&self, namespace: &str, key: &str) -> Option<&serde_json::Value> {
+        self.structured_metadata.get(namespace)?.as_object()?.get(key)
+    }
+
+    /// Merge a complete namespace object, overwriting existing keys.
+    ///
+    /// Keys already present in the namespace are overwritten;
+    /// keys absent from `values` are left untouched.
+    pub fn merge_structured_metadata(&mut self, namespace: &str, values: serde_json::Map<String, serde_json::Value>) {
+        let ns = self
+            .structured_metadata
+            .entry(namespace.to_owned())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(map) = ns {
+            map.extend(values);
+        }
+    }
+
     /// Upgrade the request body delivery mode for this request.
     ///
     /// Merges `mode` into the current mode using ratchet-up
@@ -212,6 +332,188 @@ impl HttpFilterContext<'_> {
     /// [`set_request_body_mode`]: Self::set_request_body_mode
     pub fn set_response_body_mode(&mut self, mode: BodyMode) {
         merge_body_mode(&mut self.response_body_mode, mode);
+    }
+
+    /// Store typed per-request state for the currently executing filter.
+    ///
+    /// Uses [`current_filter_id`] as the storage key, so multiple
+    /// instances of the same filter type get independent state.
+    ///
+    /// No-op if called outside of pipeline execution (when
+    /// [`current_filter_id`] is `None`).
+    ///
+    /// [`current_filter_id`]: Self::current_filter_id
+    pub fn insert_filter_state<T: Any + Send + Sync>(&mut self, state: T) {
+        let Some(idx) = self.current_filter_id else {
+            tracing::warn!("insert_filter_state called outside pipeline execution");
+            return;
+        };
+        self.filter_state.insert(idx, Box::new(state));
+    }
+
+    /// Retrieve a shared reference to the typed state stored by the
+    /// currently executing filter.
+    ///
+    /// Returns `None` when no state is stored, when the stored type
+    /// does not match `T`, or when called outside pipeline execution.
+    pub fn get_filter_state<T: Any + Send + Sync>(&self) -> Option<&T> {
+        let idx = self.current_filter_id?;
+        self.filter_state.get(&idx)?.downcast_ref()
+    }
+
+    /// Retrieve a mutable reference to the typed state stored by the
+    /// currently executing filter.
+    ///
+    /// Returns `None` under the same conditions as
+    /// [`get_filter_state`].
+    ///
+    /// [`get_filter_state`]: Self::get_filter_state
+    pub fn get_filter_state_mut<T: Any + Send + Sync>(&mut self) -> Option<&mut T> {
+        let idx = self.current_filter_id?;
+        self.filter_state.get_mut(&idx)?.downcast_mut()
+    }
+
+    /// Remove and return the typed state stored by the currently
+    /// executing filter.
+    ///
+    /// Returns `None` when no state is stored, when the stored type
+    /// does not match `T`, or when called outside pipeline execution.
+    /// A type mismatch does not destroy the stored entry.
+    pub fn remove_filter_state<T: Any + Send + Sync>(&mut self) -> Option<T> {
+        let idx = self.current_filter_id?;
+        if !self.filter_state.get(&idx)?.as_ref().is::<T>() {
+            return None;
+        }
+        let boxed = self.filter_state.remove(&idx)?;
+        Some(*boxed.downcast::<T>().ok()?)
+    }
+
+    /// Resolve a header's effective value from the trusted pre-read
+    /// mutation log.
+    ///
+    /// Walks mutations in order applying exact semantics:
+    /// [`Remove`] clears all values, [`Set`] overwrites to one
+    /// value, [`Add`] appends. After all mutations, returns the
+    /// single effective value or `None` if absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if multiple distinct values remain after
+    /// applying all mutations (ambiguous destination).
+    ///
+    /// [`Remove`]: TrustedHeaderMutation::Remove
+    /// [`Set`]: TrustedHeaderMutation::Set
+    /// [`Add`]: TrustedHeaderMutation::Add
+    pub fn resolve_trusted_header(&self, name: &HeaderName) -> Result<Option<String>, String> {
+        let mut values: Vec<String> = Vec::new();
+
+        for mutation in &self.pre_read_mutations {
+            match mutation {
+                TrustedHeaderMutation::Remove(n) if n == name => {
+                    values.clear();
+                },
+                TrustedHeaderMutation::Set(n, v) if n == name => {
+                    let text = v
+                        .to_str()
+                        .map_err(|_err| format!("non-text trusted value for header '{name}'"))?
+                        .to_owned();
+                    values.clear();
+                    values.push(text);
+                },
+                TrustedHeaderMutation::Add(n, v) if n == name => {
+                    values.push(v.clone());
+                },
+                _ => {},
+            }
+        }
+
+        match values.first() {
+            None => Ok(None),
+            Some(first) if values.iter().all(|v| v == first) => Ok(values.into_iter().next()),
+            Some(_) => Err(format!(
+                "ambiguous: multiple distinct trusted values for header '{name}'"
+            )),
+        }
+    }
+
+    /// Resolve the effective value of a request header from pending
+    /// mutations only (trusted filter/processor values).
+    ///
+    /// Resolution order:
+    /// 1. If removed, return `None`.
+    /// 2. Check [`request_headers_to_set`] for an overwrite.
+    /// 3. Check [`extra_request_headers`] for appended values.
+    ///
+    /// Does NOT fall back to original request headers. This
+    /// prevents a client-supplied value from being used when a
+    /// trusted processor mutation is expected.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if multiple distinct values are pending for
+    /// the same header (ambiguous).
+    ///
+    /// [`request_headers_to_set`]: Self::request_headers_to_set
+    /// [`extra_request_headers`]: Self::extra_request_headers
+    pub fn pending_header_value(&self, name: &HeaderName) -> Result<Option<String>, String> {
+        let removed = self.request_headers_to_remove.contains(name);
+        let mut found: Option<String> = None;
+
+        for (set_name, set_value) in &self.request_headers_to_set {
+            if set_name == name {
+                let val = set_value.to_str().unwrap_or_default().to_owned();
+                if let Some(ref existing) = found {
+                    if *existing != val {
+                        return Err(format!("ambiguous: multiple values for header '{name}'"));
+                    }
+                } else {
+                    found = Some(val);
+                }
+            }
+        }
+
+        let name_str = name.as_str();
+        for (extra_name, extra_value) in &self.extra_request_headers {
+            if extra_name.eq_ignore_ascii_case(name_str) {
+                if let Some(ref existing) = found {
+                    if *existing != *extra_value {
+                        return Err(format!("ambiguous: multiple values for header '{name}'"));
+                    }
+                } else {
+                    found = Some(extra_value.clone());
+                }
+            }
+        }
+
+        if removed && found.is_none() {
+            return Ok(None);
+        }
+
+        Ok(found)
+    }
+
+    /// Resolve the effective value of a request header, including
+    /// original request headers as a fallback.
+    ///
+    /// Resolution order:
+    /// 1. If removed, return `None`.
+    /// 2. Check [`request_headers_to_set`].
+    /// 3. Check [`extra_request_headers`].
+    /// 4. Check original [`request`] headers.
+    ///
+    /// [`request_headers_to_set`]: Self::request_headers_to_set
+    /// [`extra_request_headers`]: Self::extra_request_headers
+    /// [`request`]: Self::request
+    pub fn effective_header_value(&self, name: &HeaderName) -> Option<String> {
+        if self.request_headers_to_remove.contains(name) {
+            return self.pending_header_value(name).ok().flatten();
+        }
+
+        if let Ok(Some(v)) = self.pending_header_value(name) {
+            return Some(v);
+        }
+
+        self.request.headers.get(name)?.to_str().ok().map(str::to_owned)
     }
 
     /// Store token usage counts in [`filter_metadata`] so that downstream
@@ -702,5 +1004,407 @@ mod tests {
         assert_eq!(ctx.get_metadata("token.input"), Some("200"));
         assert_eq!(ctx.get_metadata("token.output"), Some("80"));
         assert_eq!(ctx.get_metadata("token.total"), Some("280"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Filter State Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn insert_and_get_filter_state_returns_typed_value() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(42u64);
+        assert_eq!(
+            ctx.get_filter_state::<u64>(),
+            Some(&42u64),
+            "should return the inserted value"
+        );
+    }
+
+    #[test]
+    fn get_filter_state_returns_none_when_empty() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        assert!(
+            ctx.get_filter_state::<u64>().is_none(),
+            "should return None when no state stored"
+        );
+    }
+
+    #[test]
+    fn get_filter_state_returns_none_for_wrong_type() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(42u64);
+        assert!(
+            ctx.get_filter_state::<String>().is_none(),
+            "should return None for type mismatch"
+        );
+    }
+
+    #[test]
+    fn get_filter_state_returns_none_when_no_index() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.filter_state.insert(0, Box::new(42u64));
+        assert!(
+            ctx.get_filter_state::<u64>().is_none(),
+            "should return None when current_filter_id is None"
+        );
+    }
+
+    #[test]
+    fn get_filter_state_mut_allows_mutation() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(10u64);
+        *ctx.get_filter_state_mut::<u64>().unwrap() += 5;
+        assert_eq!(
+            ctx.get_filter_state::<u64>(),
+            Some(&15u64),
+            "mutation through get_mut should be visible"
+        );
+    }
+
+    #[test]
+    fn remove_filter_state_takes_ownership() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state("hello".to_owned());
+        let removed = ctx.remove_filter_state::<String>();
+        assert_eq!(removed.as_deref(), Some("hello"), "should return the stored value");
+        assert!(
+            ctx.get_filter_state::<String>().is_none(),
+            "state should be gone after remove"
+        );
+    }
+
+    #[test]
+    fn remove_filter_state_returns_none_for_wrong_type() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(42u64);
+        assert!(
+            ctx.remove_filter_state::<String>().is_none(),
+            "type mismatch should return None"
+        );
+        assert!(
+            ctx.get_filter_state::<u64>().is_some(),
+            "type mismatch remove should not destroy the entry"
+        );
+    }
+
+    #[test]
+    fn different_indices_do_not_collide() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(100u64);
+        ctx.current_filter_id = Some(1);
+        ctx.insert_filter_state(200u64);
+
+        ctx.current_filter_id = Some(0);
+        assert_eq!(ctx.get_filter_state::<u64>(), Some(&100u64), "index 0 state");
+
+        ctx.current_filter_id = Some(1);
+        assert_eq!(ctx.get_filter_state::<u64>(), Some(&200u64), "index 1 state");
+    }
+
+    #[test]
+    fn insert_filter_state_is_noop_without_index() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.insert_filter_state(42u64);
+        assert!(ctx.filter_state.is_empty(), "state map should remain empty");
+    }
+
+    // -------------------------------------------------------------------------
+    // Structured Metadata Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn set_and_get_structured_metadata() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_structured_metadata("ext_proc", "model", serde_json::json!("gpt-4"));
+        assert_eq!(
+            ctx.get_structured_metadata("ext_proc", "model"),
+            Some(&serde_json::json!("gpt-4")),
+            "get should return the value set by set_structured_metadata"
+        );
+    }
+
+    #[test]
+    fn merge_structured_metadata_overwrites_existing() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_structured_metadata("ns", "key", serde_json::json!("old"));
+
+        let mut merge = serde_json::Map::new();
+        merge.insert("key".to_owned(), serde_json::json!("new"));
+        merge.insert("extra".to_owned(), serde_json::json!(42));
+        ctx.merge_structured_metadata("ns", merge);
+
+        assert_eq!(
+            ctx.get_structured_metadata("ns", "key"),
+            Some(&serde_json::json!("new")),
+            "merge should overwrite existing key"
+        );
+        assert_eq!(
+            ctx.get_structured_metadata("ns", "extra"),
+            Some(&serde_json::json!(42)),
+            "merge should add new key"
+        );
+    }
+
+    #[test]
+    fn get_structured_metadata_returns_none_for_absent() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert!(
+            ctx.get_structured_metadata("missing_ns", "key").is_none(),
+            "get should return None for absent namespace"
+        );
+    }
+
+    #[test]
+    fn structured_metadata_independent_of_string_metadata() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("ns.key", "string_val");
+        ctx.set_structured_metadata("ns", "key", serde_json::json!({"nested": true}));
+
+        assert_eq!(
+            ctx.get_metadata("ns.key"),
+            Some("string_val"),
+            "string metadata should be unaffected by structured metadata"
+        );
+        assert_eq!(
+            ctx.get_structured_metadata("ns", "key"),
+            Some(&serde_json::json!({"nested": true})),
+            "structured metadata should be unaffected by string metadata"
+        );
+    }
+
+    #[test]
+    fn structured_metadata_supports_nested_values() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let nested = serde_json::json!({
+            "scores": [0.95, 0.87],
+            "labels": {"category": "safe"},
+            "count": 42,
+            "active": true,
+            "extra": null
+        });
+        ctx.set_structured_metadata("guardrails", "result", nested.clone());
+        assert_eq!(
+            ctx.get_structured_metadata("guardrails", "result"),
+            Some(&nested),
+            "structured metadata should preserve nested objects, arrays, and scalar types"
+        );
+    }
+
+    #[test]
+    fn structured_metadata_namespace_isolation() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_structured_metadata("ns_a", "key", serde_json::json!("value_a"));
+        ctx.set_structured_metadata("ns_b", "key", serde_json::json!("value_b"));
+
+        assert_eq!(
+            ctx.get_structured_metadata("ns_a", "key"),
+            Some(&serde_json::json!("value_a")),
+            "namespace A should have its own value"
+        );
+        assert_eq!(
+            ctx.get_structured_metadata("ns_b", "key"),
+            Some(&serde_json::json!("value_b")),
+            "namespace B should have its own value"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Trusted Header Mutation Resolution Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn resolve_trusted_header_absent() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            None,
+            "absent header should resolve to None"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_single_add() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host:8080".to_owned(),
+        ));
+
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("host:8080".to_owned()),
+            "single add should resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_single_set() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+            "x-dest".parse().unwrap(),
+            "set-host:9090".parse().unwrap(),
+        ));
+
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("set-host:9090".to_owned()),
+            "single set should resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_remove_clears() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations
+            .push(TrustedHeaderMutation::Remove("x-dest".parse().unwrap()));
+
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            None,
+            "remove after add should clear"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_set_overrides_add() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "first:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+            "x-dest".parse().unwrap(),
+            "override:9090".parse().unwrap(),
+        ));
+
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("override:9090".to_owned()),
+            "set should override earlier add"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_remove_then_add() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations
+            .push(TrustedHeaderMutation::Remove("x-dest".parse().unwrap()));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "later:7070".to_owned(),
+        ));
+
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("later:7070".to_owned()),
+            "add after remove should select the later value"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_distinct_duplicates_rejected() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host-a:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host-b:9090".to_owned(),
+        ));
+
+        assert!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).is_err(),
+            "distinct duplicate values must be rejected"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_identical_duplicates_accepted() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "same:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "same:8080".to_owned(),
+        ));
+
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("same:8080".to_owned()),
+            "identical duplicates should be accepted"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_unrelated_headers_ignored() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-other".parse().unwrap(),
+            "other:1234".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+            "x-dest".parse().unwrap(),
+            "target:5678".parse().unwrap(),
+        ));
+
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("target:5678".to_owned()),
+            "unrelated header mutations should be ignored"
+        );
+    }
+
+    #[test]
+    fn matches_header_reports_correctly() {
+        let add = TrustedHeaderMutation::Add("x-dest".parse().unwrap(), "val".to_owned());
+        let set = TrustedHeaderMutation::Set("x-dest".parse().unwrap(), "val".parse().unwrap());
+        let remove = TrustedHeaderMutation::Remove("x-dest".parse().unwrap());
+        let other = TrustedHeaderMutation::Add("x-other".parse().unwrap(), "val".to_owned());
+        let target: HeaderName = "x-dest".parse().unwrap();
+
+        assert!(add.matches_header(&target), "Add should match");
+        assert!(set.matches_header(&target), "Set should match");
+        assert!(remove.matches_header(&target), "Remove should match");
+        assert!(!other.matches_header(&target), "different header should not match");
     }
 }

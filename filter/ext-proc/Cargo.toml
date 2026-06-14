@@ -23,15 +23,18 @@ futures = { workspace = true }
 http = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-proto = { workspace = true }
+prost-types = { workspace = true }
+prost-wkt-types = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+sync_wrapper = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 praxis-core = { workspace = true }
-prost-types = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
-tokio-stream = { workspace = true }

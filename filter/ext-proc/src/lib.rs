@@ -36,13 +36,20 @@
 #![deny(unreachable_pub)]
 
 mod callout;
+pub(crate) mod duplex;
 mod mutations;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config};
+use bytes::Bytes;
+use praxis_filter::{
+    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config,
+};
+use praxis_proto::envoy::service::ext_proc::v3::{ProcessingRequest, processing_request};
 use serde::Deserialize;
 use tonic::transport::{Channel, Endpoint};
+
+use crate::duplex::{ExchangeConfig, ExchangeError, ExchangeEvent, ExtProcExchange};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -56,6 +63,9 @@ const DEFAULT_STATUS_ON_ERROR: u16 = 500;
 
 /// Default deferred close timeout in milliseconds (observability mode).
 const DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS: u64 = 5000;
+
+/// Default lifecycle timeout in milliseconds for coalesced drain.
+const DEFAULT_LIFECYCLE_TIMEOUT_MS: u64 = 5000;
 
 // -----------------------------------------------------------------------------
 // Phase
@@ -161,6 +171,13 @@ struct ExtProcConfig {
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     forward_rules: Option<ForwardRulesConfig>,
 
+    /// Maximum time in milliseconds to wait for deferred processor
+    /// lifecycle responses in full-duplex coalesced mode. Default:
+    /// 5000 (5 seconds). Covers the entire drain at request body
+    /// EOS, not individual messages.
+    #[serde(default = "default_lifecycle_timeout_ms")]
+    lifecycle_timeout_ms: u64,
+
     /// Upper bound in milliseconds for `override_message_timeout`
     /// values sent by the external processor. When set, the server
     /// may extend the per-message timeout up to this limit.
@@ -222,6 +239,11 @@ fn default_status_on_error() -> u16 {
 /// Returns the default deferred close timeout in milliseconds.
 fn default_deferred_close_timeout_ms() -> u64 {
     DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS
+}
+
+/// Returns the default lifecycle timeout in milliseconds.
+fn default_lifecycle_timeout_ms() -> u64 {
+    DEFAULT_LIFECYCLE_TIMEOUT_MS
 }
 
 // -----------------------------------------------------------------------------
@@ -306,7 +328,7 @@ impl HeaderSendMode {
 /// Controls whether and how the message body is forwarded.
 #[derive(Debug, Default, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
-enum BodySendMode {
+pub(crate) enum BodySendMode {
     /// Do not send the body. This is the default.
     #[default]
     None,
@@ -333,6 +355,30 @@ impl std::fmt::Display for BodySendMode {
             Self::BufferedPartial => f.write_str("buffered_partial"),
             Self::FullDuplexStreamed => f.write_str("full_duplex_streamed"),
         }
+    }
+}
+
+impl BodySendMode {
+    /// Convert to the proto [`BodySendMode`] enum integer value.
+    ///
+    /// Uses the generated proto enum names so the mapping stays
+    /// correct if proto field numbers change.
+    ///
+    /// [`BodySendMode`]: praxis_proto::envoy::service::ext_proc::v3::BodySendMode
+    pub(crate) fn to_proto_i32(self) -> i32 {
+        use praxis_proto::envoy::service::ext_proc::v3::BodySendMode as ProtoMode;
+        match self {
+            Self::None => ProtoMode::None as i32,
+            Self::Streamed => ProtoMode::Streamed as i32,
+            Self::Buffered => ProtoMode::Buffered as i32,
+            Self::BufferedPartial => ProtoMode::BufferedPartial as i32,
+            Self::FullDuplexStreamed => ProtoMode::FullDuplexStreamed as i32,
+        }
+    }
+
+    /// Whether this mode is full-duplex streamed.
+    pub(crate) fn is_full_duplex(self) -> bool {
+        self == Self::FullDuplexStreamed
     }
 }
 
@@ -418,6 +464,7 @@ fn validate_config(cfg: &ExtProcConfig) -> Result<(), FilterError> {
 }
 
 /// Validate core numeric fields.
+#[allow(clippy::too_many_lines, reason = "sequential field validation")]
 fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
     if !(100..=599).contains(&cfg.status_on_error) {
         let code = cfg.status_on_error;
@@ -427,6 +474,9 @@ fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
     }
     if cfg.message_timeout_ms == 0 {
         return Err("ext_proc: message_timeout_ms must be greater than 0".into());
+    }
+    if cfg.lifecycle_timeout_ms == 0 {
+        return Err("ext_proc: lifecycle_timeout_ms must be greater than 0".into());
     }
     if cfg.deferred_close_timeout_ms > 0 && cfg.deferred_close_timeout_ms < cfg.message_timeout_ms {
         let close = cfg.deferred_close_timeout_ms;
@@ -450,23 +500,50 @@ fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
 }
 
 /// Reject unsupported [`ProcessingModeConfig`] values.
+///
+/// Accepts `request_body_mode: full_duplex_streamed` alongside the
+/// existing `none` default. Other body modes (`streamed`, `buffered`,
+/// `buffered_partial`) remain unsupported.
+///
+/// For the partial request-routing milestone, full-duplex mode
+/// requires `response_header_mode: skip` and rejects
+/// `request_trailer_mode: send` because Pingora has no
+/// request-trailer hooks.
+#[allow(
+    clippy::too_many_lines,
+    reason = "sequential mode validation with full-duplex contract"
+)]
 fn validate_processing_mode(pm: ProcessingModeConfig) -> Result<(), FilterError> {
     if pm.request_header_mode == HeaderSendMode::Skip {
         return Err("ext_proc: request_header_mode 'skip' is not yet supported".into());
     }
-    if pm.response_header_mode == HeaderSendMode::Skip {
+    if pm.request_body_mode.is_full_duplex() {
+        if pm.response_header_mode == HeaderSendMode::Send {
+            return Err(
+                "ext_proc: full-duplex request mode requires response_header_mode 'skip' until response lifecycle is implemented".into()
+            );
+        }
+    } else if pm.response_header_mode == HeaderSendMode::Skip {
         return Err("ext_proc: response_header_mode 'skip' is not yet supported".into());
     }
-    if pm.request_body_mode != BodySendMode::None {
+    if !matches!(
+        pm.request_body_mode,
+        BodySendMode::None | BodySendMode::FullDuplexStreamed
+    ) {
         let mode = pm.request_body_mode;
-        return Err(format!("ext_proc: request_body_mode '{mode}' is not yet supported (only 'none')").into());
+        return Err(format!(
+            "ext_proc: request_body_mode '{mode}' is not yet supported (only 'none' or 'full_duplex_streamed')"
+        )
+        .into());
     }
     if pm.response_body_mode != BodySendMode::None {
         let mode = pm.response_body_mode;
         return Err(format!("ext_proc: response_body_mode '{mode}' is not yet supported (only 'none')").into());
     }
     if pm.request_trailer_mode == HeaderSendMode::Send {
-        return Err("ext_proc: request_trailer_mode 'send' is not yet supported".into());
+        return Err(
+            "ext_proc: request_trailer_mode 'send' is not yet supported (Pingora has no request-trailer hooks)".into(),
+        );
     }
     if pm.response_trailer_mode == HeaderSendMode::Send {
         return Err("ext_proc: response_trailer_mode 'send' is not yet supported".into());
@@ -497,10 +574,21 @@ fn validate_processing_mode(pm: ProcessingModeConfig) -> Result<(), FilterError>
 ///   request_body_mode: none
 ///   response_body_mode: none
 /// ```
-#[derive(Debug)]
 pub struct ExtProcFilter {
-    /// Lazily-connecting gRPC channel to the external processor.
-    channel: Channel,
+    /// Parsed gRPC endpoint for deferred channel construction.
+    ///
+    /// The channel is created lazily via [`channel`] on the first
+    /// request, inside the Tokio runtime that will drive I/O.
+    /// Constructing it eagerly in `from_config` would bind it to
+    /// the pipeline-construction runtime, which may differ from
+    /// the request-processing runtime (e.g. Pingora).
+    ///
+    /// [`channel`]: Self::channel
+    endpoint: Endpoint,
+
+    /// Lazily-initialized gRPC channel, created on first use
+    /// inside the request-processing Tokio runtime.
+    lazy_channel: std::sync::OnceLock<Channel>,
 
     /// Per-message timeout for gRPC calls.
     message_timeout: Duration,
@@ -508,11 +596,40 @@ pub struct ExtProcFilter {
     /// Upper bound for processor-requested timeout overrides.
     max_message_timeout: Option<Duration>,
 
+    /// Timeout for the initial gRPC stream handshake.
+    ///
+    /// Defaults to [`message_timeout`] until a dedicated config
+    /// field is added.
+    ///
+    /// [`message_timeout`]: Self::message_timeout
+    open_timeout: Duration,
+
+    /// Bounded lifecycle timeout for coalesced drain at request
+    /// body EOS. Separate from per-message timeout.
+    lifecycle_timeout: Duration,
+
+    /// How the request body is forwarded to the processor.
+    request_body_mode: BodySendMode,
+
+    /// How the response body is forwarded to the processor.
+    response_body_mode: BodySendMode,
+
     /// HTTP status code returned on processor errors.
     status_on_error: u16,
 
     /// gRPC endpoint URI (retained for diagnostics).
     target: String,
+}
+
+impl std::fmt::Debug for ExtProcFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtProcFilter")
+            .field("target", &self.target)
+            .field("message_timeout", &self.message_timeout)
+            .field("request_body_mode", &self.request_body_mode)
+            .field("status_on_error", &self.status_on_error)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ExtProcFilter {
@@ -530,17 +647,23 @@ impl ExtProcFilter {
         let cfg: ExtProcConfig = parse_filter_config("ext_proc", config)?;
         validate_config(&cfg)?;
 
-        let endpoint: Endpoint = cfg.target.parse().map_err(|e| -> FilterError {
+        let target_uri: http::Uri = cfg.target.parse().map_err(|e| -> FilterError {
             let target = &cfg.target;
             format!("ext_proc: invalid target URI '{target}': {e}").into()
         })?;
+        let endpoint = Channel::builder(target_uri);
 
-        let channel = endpoint.connect_lazy();
+        let message_timeout = Duration::from_millis(cfg.message_timeout_ms);
 
         Ok(Box::new(Self {
-            channel,
+            endpoint,
+            lazy_channel: std::sync::OnceLock::new(),
+            lifecycle_timeout: Duration::from_millis(cfg.lifecycle_timeout_ms),
             max_message_timeout: cfg.max_message_timeout_ms.map(Duration::from_millis),
-            message_timeout: Duration::from_millis(cfg.message_timeout_ms),
+            message_timeout,
+            open_timeout: message_timeout,
+            request_body_mode: cfg.processing_mode.request_body_mode,
+            response_body_mode: cfg.processing_mode.response_body_mode,
             status_on_error: cfg.status_on_error,
             target: cfg.target,
         }))
@@ -570,18 +693,329 @@ impl ExtProcFilter {
             },
         }
     }
+
+    /// Get the gRPC channel, creating it eagerly on first use.
+    ///
+    /// Uses [`OnceLock`] so initialization happens exactly once,
+    /// inside whichever Tokio runtime context the first request
+    /// runs in. Returns `None` if the initial connection fails.
+    ///
+    /// [`OnceLock`]: std::sync::OnceLock
+    fn channel(&self) -> Channel {
+        self.lazy_channel.get_or_init(|| self.endpoint.connect_lazy()).clone()
+    }
+
+    /// Build a [`ProcessingRequest`] with protocol configuration
+    /// attached. Pre-loaded into the channel before the Process RPC
+    /// is initiated so the server has data when the stream opens.
+    fn build_first_message(&self, request: processing_request::Request) -> ProcessingRequest {
+        use praxis_proto::envoy::service::ext_proc::v3::ProtocolConfiguration;
+
+        ProcessingRequest {
+            request: Some(request),
+            protocol_config: Some(ProtocolConfiguration {
+                request_body_mode: self.request_body_mode.to_proto_i32(),
+                response_body_mode: self.response_body_mode.to_proto_i32(),
+                send_body_without_waiting_for_header_response: false,
+            }),
+            metadata_context: None,
+            attributes: std::collections::HashMap::new(),
+            observability_mode: false,
+        }
+    }
+
+    /// Convert an [`ExchangeError`] into a [`FilterError`].
+    fn exchange_err(e: ExchangeError) -> FilterError {
+        Box::new(e)
+    }
+
+    /// Build the [`ExchangeConfig`] for opening a duplex exchange.
+    fn exchange_config(&self) -> ExchangeConfig {
+        ExchangeConfig {
+            open_timeout: self.open_timeout,
+            message_timeout: self.message_timeout,
+            max_message_timeout: self.max_message_timeout,
+            request_body_mode: self.request_body_mode,
+            response_body_mode: self.response_body_mode,
+        }
+    }
+
+    /// Ensure the per-request exchange is open and request headers
+    /// have been sent. Idempotent — returns immediately if headers
+    /// were already sent.
+    ///
+    /// Stores [`ExtProcState`] in [`HttpFilterContext::filter_state`]
+    /// so the exchange persists across `on_request` and
+    /// `on_request_body` phases.
+    fn ensure_exchange_and_send_headers(&self, ctx: &mut HttpFilterContext<'_>) -> Result<(), FilterError> {
+        if ctx.get_filter_state::<ExtProcState>().is_some_and(|s| s.headers_sent) {
+            return Ok(());
+        }
+
+        let headers = mutations::request_to_proto_headers(ctx);
+        let headers_request = processing_request::Request::RequestHeaders(headers);
+        let first_msg = self.build_first_message(headers_request.clone());
+
+        let mut exchange = ExtProcExchange::open(self.channel(), &self.exchange_config(), Some(first_msg))
+            .map_err(Self::exchange_err)?;
+
+        exchange
+            .commit_preloaded_send(&headers_request)
+            .map_err(Self::exchange_err)?;
+
+        let state = ExtProcState {
+            exchange,
+            headers_sent: true,
+        };
+
+        ctx.insert_filter_state(state);
+        Ok(())
+    }
+
+    /// Drain the exchange after request body EOS: receive the
+    /// deferred request-headers response, then all body responses.
+    ///
+    /// Applies header mutations from the headers response and
+    /// coalesces streamed body response chunks into a single
+    /// [`Bytes`] value that replaces `body`.
+    ///
+    /// Handles [`ImmediateResponse`] at any point by converting to
+    /// [`FilterAction::Reject`].
+    ///
+    /// The exchange is temporarily removed from `filter_state` to
+    /// satisfy the borrow checker — `receive()` needs `&mut exchange`
+    /// while mutation helpers need `&mut ctx`. The exchange is
+    /// reinserted before returning.
+    ///
+    /// [`ImmediateResponse`]: praxis_proto::envoy::service::ext_proc::v3::ImmediateResponse
+    async fn drain_exchange(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<FilterAction, FilterError> {
+        // Take the exchange out of filter_state to avoid borrow
+        // conflicts between `exchange.receive()` and `ctx` mutations.
+        let mut state = ctx
+            .remove_filter_state::<ExtProcState>()
+            .ok_or_else(|| -> FilterError { "ext_proc: missing exchange state during drain".into() })?;
+
+        let result = Self::drain_exchange_inner(&mut state, ctx, body).await;
+
+        // Reinsert the exchange for potential later phases.
+        ctx.insert_filter_state(state);
+
+        result
+    }
+
+    /// Inner drain logic operating on an owned [`ExtProcState`].
+    async fn drain_exchange_inner(
+        state: &mut ExtProcState,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<FilterAction, FilterError> {
+        if let Some(action) = Self::drain_header_response(state, ctx).await? {
+            state.exchange.finish_sending();
+            state.exchange.drain_trailing().await;
+            return Ok(action);
+        }
+
+        let result = Self::drain_body_responses(state, ctx, body).await;
+        state.exchange.finish_sending();
+        state.exchange.drain_trailing().await;
+        result
+    }
+
+    /// Receive and apply the deferred request-headers response.
+    ///
+    /// Returns `Some(FilterAction)` for terminal events
+    /// ([`ImmediateResponse`]), `None` to continue draining.
+    ///
+    /// [`ImmediateResponse`]: praxis_proto::envoy::service::ext_proc::v3::ImmediateResponse
+    async fn drain_header_response(
+        state: &mut ExtProcState,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<Option<FilterAction>, FilterError> {
+        let event = state.exchange.receive().await.map_err(Self::exchange_err)?;
+
+        match event {
+            ExchangeEvent::RequestHeaders { response, metadata } => {
+                apply_dynamic_metadata(metadata, ctx);
+                mutations::apply_headers_response(&response, ctx, Phase::Request);
+                Ok(None)
+            },
+            ExchangeEvent::Immediate { response, metadata } => {
+                apply_dynamic_metadata(metadata, ctx);
+                Ok(Some(mutations::immediate_to_rejection(&response)))
+            },
+            other => Err(format!("ext_proc: expected RequestHeaders or Immediate during drain, got {other:?}").into()),
+        }
+    }
+
+    /// Receive body responses until EOS, coalescing chunks.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "body response loop with EOS and mutation extraction"
+    )]
+    async fn drain_body_responses(
+        state: &mut ExtProcState,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<FilterAction, FilterError> {
+        let mut coalesced = Vec::new();
+        loop {
+            let event = state.exchange.receive().await.map_err(Self::exchange_err)?;
+            match event {
+                ExchangeEvent::RequestBody { response, metadata } => {
+                    apply_dynamic_metadata(metadata, ctx);
+                    if let Some(ref common) = response.response
+                        && let Some(ref mutation) = common.header_mutation
+                    {
+                        mutations::apply_request_header_mutation(mutation, ctx);
+                    }
+                    let (chunk, is_eos) = extract_streamed_body(&response);
+                    coalesced.extend_from_slice(&chunk);
+                    if is_eos {
+                        break;
+                    }
+                },
+                ExchangeEvent::Immediate { response, metadata } => {
+                    apply_dynamic_metadata(metadata, ctx);
+                    return Ok(mutations::immediate_to_rejection(&response));
+                },
+                other => {
+                    return Err(
+                        format!("ext_proc: expected RequestBody or Immediate during drain, got {other:?}").into(),
+                    );
+                },
+            }
+        }
+
+        *body = if coalesced.is_empty() {
+            None
+        } else {
+            Some(Bytes::from(coalesced))
+        };
+        Ok(FilterAction::Continue)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// ExtProcState
+// -----------------------------------------------------------------------------
+
+/// Per-request state stored in [`HttpFilterContext::filter_state`].
+///
+/// Tracks the persistent duplex exchange and whether request
+/// headers have been sent to the processor.
+struct ExtProcState {
+    /// Bidirectional exchange with the external processor.
+    exchange: ExtProcExchange,
+
+    /// Whether request headers have been committed to the exchange.
+    headers_sent: bool,
+}
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+
+/// Apply `dynamic_metadata` from a processor response to the filter
+/// context's structured metadata under the `ext_proc` namespace.
+fn apply_dynamic_metadata(metadata: Option<prost_wkt_types::Struct>, ctx: &mut HttpFilterContext<'_>) {
+    if let Some(md) = metadata {
+        for (key, value) in md.fields {
+            let json_value = proto_value_to_json(&value);
+            ctx.set_structured_metadata("ext_proc", &key, json_value);
+        }
+    }
+}
+
+/// Convert a protobuf [`Value`] to a [`serde_json::Value`].
+///
+/// [`Value`]: prost_wkt_types::Value
+fn proto_value_to_json(value: &prost_wkt_types::Value) -> serde_json::Value {
+    match &value.kind {
+        Some(prost_wkt_types::value::Kind::NumberValue(n)) => serde_json::json!(n),
+        Some(prost_wkt_types::value::Kind::StringValue(s)) => serde_json::Value::String(s.clone()),
+        Some(prost_wkt_types::value::Kind::BoolValue(b)) => serde_json::Value::Bool(*b),
+        Some(prost_wkt_types::value::Kind::StructValue(s)) => {
+            let map: serde_json::Map<String, serde_json::Value> = s
+                .fields
+                .iter()
+                .map(|(k, v)| (k.clone(), proto_value_to_json(v)))
+                .collect();
+            serde_json::Value::Object(map)
+        },
+        Some(prost_wkt_types::value::Kind::ListValue(l)) => {
+            let arr: Vec<serde_json::Value> = l.values.iter().map(proto_value_to_json).collect();
+            serde_json::Value::Array(arr)
+        },
+        Some(prost_wkt_types::value::Kind::NullValue(_)) | None => serde_json::Value::Null,
+    }
+}
+
+/// Extract the body bytes and EOS flag from a
+/// [`BodyResponse`] containing a [`StreamedBodyResponse`].
+///
+/// Returns empty bytes and `true` EOS when no streamed mutation
+/// is present.
+///
+/// [`BodyResponse`]: praxis_proto::envoy::service::ext_proc::v3::BodyResponse
+/// [`StreamedBodyResponse`]: praxis_proto::envoy::service::ext_proc::v3::StreamedBodyResponse
+fn extract_streamed_body(response: &praxis_proto::envoy::service::ext_proc::v3::BodyResponse) -> (Vec<u8>, bool) {
+    let Some(common) = &response.response else {
+        return (Vec::new(), true);
+    };
+    let Some(bm) = &common.body_mutation else {
+        return (Vec::new(), true);
+    };
+    match &bm.mutation {
+        Some(praxis_proto::envoy::service::ext_proc::v3::body_mutation::Mutation::StreamedResponse(sr)) => {
+            (sr.body.clone(), sr.end_of_stream)
+        },
+        _ => (Vec::new(), true),
+    }
 }
 
 #[async_trait]
+#[allow(
+    clippy::too_many_lines,
+    reason = "HttpFilter trait requires all hooks in one impl block"
+)]
 impl HttpFilter for ExtProcFilter {
     fn name(&self) -> &'static str {
         "ext_proc"
     }
 
+    fn request_body_access(&self) -> BodyAccess {
+        if self.request_body_mode.is_full_duplex() {
+            BodyAccess::ReadWrite
+        } else {
+            BodyAccess::None
+        }
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        if self.request_body_mode.is_full_duplex() {
+            BodyMode::StreamBuffer { max_bytes: None }
+        } else {
+            BodyMode::Stream
+        }
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if self.request_body_mode.is_full_duplex() {
+            // Full-duplex: bootstrap the exchange and send headers,
+            // then return Continue. Body processing happens in
+            // on_request_body.
+            let result = self.ensure_exchange_and_send_headers(ctx);
+            return Ok(self.call_or_reject(result.map(|()| FilterAction::Continue)));
+        }
+
+        // Header-only mode: use the existing one-shot callout.
         Ok(self.call_or_reject(
             callout::process_request_headers(
-                self.channel.clone(),
+                self.channel(),
                 &self.target,
                 self.message_timeout,
                 self.max_message_timeout,
@@ -591,10 +1025,95 @@ impl HttpFilter for ExtProcFilter {
         ))
     }
 
+    async fn on_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if !self.request_body_mode.is_full_duplex() {
+            return Ok(FilterAction::Continue);
+        }
+
+        // Idempotent bootstrap — handles the case where
+        // StreamBuffer pre-read invokes on_request_body before
+        // on_request.
+        let bootstrap_result = self.ensure_exchange_and_send_headers(ctx);
+        if let Err(e) = bootstrap_result {
+            return Ok(self.call_or_reject(Err(e)));
+        }
+
+        if !end_of_stream {
+            // Intermediate chunk: forward bytes to the processor.
+            let chunk_bytes = body.as_ref().map_or_else(Vec::new, |b| b.to_vec());
+            let send_result = {
+                let state = ctx
+                    .get_filter_state_mut::<ExtProcState>()
+                    .ok_or_else(|| -> FilterError { "ext_proc: missing exchange state".into() })?;
+                state
+                    .exchange
+                    .send(processing_request::Request::RequestBody(
+                        praxis_proto::envoy::service::ext_proc::v3::HttpBody {
+                            body: chunk_bytes,
+                            end_of_stream: false,
+                        },
+                    ))
+                    .await
+                    .map_err(Self::exchange_err)
+            };
+            return Ok(self.call_or_reject(send_result.map(|()| FilterAction::Continue)));
+        }
+
+        // Synthetic EOS: send an empty terminal body marker.
+        // The accumulated body was already sent incrementally
+        // during pre-read. Do NOT resend it.
+        let eos_result = {
+            let state = ctx
+                .get_filter_state_mut::<ExtProcState>()
+                .ok_or_else(|| -> FilterError { "ext_proc: missing exchange state".into() })?;
+            state
+                .exchange
+                .send(processing_request::Request::RequestBody(
+                    praxis_proto::envoy::service::ext_proc::v3::HttpBody {
+                        body: Vec::new(),
+                        end_of_stream: true,
+                    },
+                ))
+                .await
+                .map_err(Self::exchange_err)
+        };
+        if eos_result.is_err() {
+            tracing::debug!(
+                target = %self.target,
+                "ext_proc: EOS body send failed (outbound closed); proceeding to drain"
+            );
+        }
+
+        // Drain responses with a bounded lifecycle timeout.
+        let drain_timeout = self.lifecycle_timeout;
+        let drain_result = tokio::time::timeout(drain_timeout, self.drain_exchange(ctx, body)).await;
+
+        match drain_result {
+            Ok(Ok(action)) => Ok(action),
+            Ok(Err(e)) => Ok(self.call_or_reject(Err(e))),
+            Err(_elapsed) => {
+                tracing::warn!(
+                    target = %self.target,
+                    timeout_ms = drain_timeout.as_millis(),
+                    "ext_proc: lifecycle timeout during response drain"
+                );
+                Ok(FilterAction::Reject(Rejection::status(self.status_on_error)))
+            },
+        }
+    }
+
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if self.request_body_mode.is_full_duplex() {
+            return Ok(FilterAction::Continue);
+        }
         Ok(self.call_or_reject(
             callout::process_response_headers(
-                self.channel.clone(),
+                self.channel(),
                 &self.target,
                 self.message_timeout,
                 self.max_message_timeout,

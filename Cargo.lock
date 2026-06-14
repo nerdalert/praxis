@@ -333,6 +333,9 @@ checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 name = "benchmarks"
 version = "0.3.1"
 dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bytes",
  "chrono",
  "criterion",
  "http",
@@ -2487,6 +2490,7 @@ dependencies = [
  "nix 0.31.3",
  "notify",
  "praxis-proxy-core",
+ "praxis-proxy-ext-proc",
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "serde",
@@ -2526,7 +2530,10 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-proto",
  "prost-types",
+ "prost-wkt-types",
  "serde",
+ "serde_json",
+ "sync_wrapper",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

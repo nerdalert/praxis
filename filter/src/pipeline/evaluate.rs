@@ -112,7 +112,10 @@ async fn execute_branch_filters(
         if !should_execute(&pf.conditions, ctx.request) {
             continue;
         }
-        match http_filter.on_request(ctx).await {
+        ctx.current_filter_id = Some(pf.filter_id);
+        let result = http_filter.on_request(ctx).await;
+        ctx.current_filter_id = None;
+        match result {
             Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {},
             Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
             Err(e) => return Err(e),
@@ -421,6 +424,7 @@ mod tests {
     async fn nested_branch_terminal_propagates() {
         let inner_branch = make_branch("inner", None, RejoinTarget::Terminal, None, vec![]);
         let outer_filter = PipelineFilter {
+            filter_id: 100,
             branches: vec![inner_branch],
             conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -541,6 +545,174 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Filter State in Branches
+    // -------------------------------------------------------------------------
+
+    type ObsLog = Arc<std::sync::Mutex<Vec<(u64, &'static str)>>>;
+
+    /// Filter that stores its id as typed state and records observations.
+    struct BranchStatefulFilter {
+        id: u64,
+        log: ObsLog,
+    }
+
+    #[async_trait]
+    impl HttpFilter for BranchStatefulFilter {
+        fn name(&self) -> &'static str {
+            "branch_stateful"
+        }
+
+        async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            ctx.insert_filter_state(self.id);
+            self.log.lock().unwrap().push((self.id, "insert"));
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    fn stateful_pf(id: u64, log: &ObsLog) -> PipelineFilter {
+        PipelineFilter {
+            filter_id: NEXT_TEST_ID.fetch_add(1, Ordering::SeqCst),
+            branches: vec![],
+            conditions: vec![],
+            failure_mode: FailureMode::default(),
+            filter: AnyFilter::Http(Box::new(BranchStatefulFilter {
+                id,
+                log: Arc::clone(log),
+            })),
+            name: None,
+            response_conditions: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn branch_filter_can_insert_and_read_own_state() {
+        let log: ObsLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let branch_pf_id = NEXT_TEST_ID.fetch_add(1, Ordering::SeqCst);
+        let branch_pf = PipelineFilter {
+            filter_id: branch_pf_id,
+            branches: vec![],
+            conditions: vec![],
+            failure_mode: FailureMode::default(),
+            filter: AnyFilter::Http(Box::new(BranchStatefulFilter {
+                id: 42,
+                log: Arc::clone(&log),
+            })),
+            name: None,
+            response_conditions: vec![],
+        };
+        let branches = vec![make_branch(
+            "state_branch",
+            None,
+            RejoinTarget::Next,
+            None,
+            vec![branch_pf],
+        )];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        evaluate_branches(&branches, &mut ctx).await.unwrap();
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(recorded, vec![(42, "insert")], "branch filter should insert state");
+        assert!(
+            ctx.filter_state.contains_key(&branch_pf_id),
+            "state should exist at the branch filter's unique id"
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_filter_state_does_not_collide_with_parent() {
+        let log: ObsLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let parent_id = NEXT_TEST_ID.fetch_add(1, Ordering::SeqCst);
+        let branch_id = NEXT_TEST_ID.fetch_add(1, Ordering::SeqCst);
+        let branch_pf = PipelineFilter {
+            filter_id: branch_id,
+            branches: vec![],
+            conditions: vec![],
+            failure_mode: FailureMode::default(),
+            filter: AnyFilter::Http(Box::new(BranchStatefulFilter {
+                id: 99,
+                log: Arc::clone(&log),
+            })),
+            name: None,
+            response_conditions: vec![],
+        };
+        let branches = vec![make_branch(
+            "state_branch",
+            None,
+            RejoinTarget::Next,
+            None,
+            vec![branch_pf],
+        )];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.filter_state.insert(parent_id, Box::new(77u64));
+        evaluate_branches(&branches, &mut ctx).await.unwrap();
+        let parent_state = ctx.filter_state.get(&parent_id).unwrap().downcast_ref::<u64>().unwrap();
+        let branch_state = ctx.filter_state.get(&branch_id).unwrap().downcast_ref::<u64>().unwrap();
+        assert_eq!(*parent_state, 77, "parent state should be unchanged");
+        assert_eq!(*branch_state, 99, "branch filter should have its own state");
+    }
+
+    #[tokio::test]
+    async fn two_branch_filters_of_same_type_get_independent_state() {
+        let log: ObsLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pf_a = stateful_pf(100, &log);
+        let pf_b = stateful_pf(200, &log);
+        let id_a = pf_a.filter_id;
+        let id_b = pf_b.filter_id;
+        let branches = vec![make_branch("dual", None, RejoinTarget::Next, None, vec![pf_a, pf_b])];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        evaluate_branches(&branches, &mut ctx).await.unwrap();
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![(100, "insert"), (200, "insert")],
+            "both branch filters should insert"
+        );
+        let state_a = ctx.filter_state.get(&id_a).unwrap().downcast_ref::<u64>().unwrap();
+        let state_b = ctx.filter_state.get(&id_b).unwrap().downcast_ref::<u64>().unwrap();
+        assert_eq!(*state_a, 100, "first branch filter state");
+        assert_eq!(*state_b, 200, "second branch filter state");
+    }
+
+    #[tokio::test]
+    async fn identity_is_none_after_branch_evaluation() {
+        let branches = vec![make_branch(
+            "check",
+            None,
+            RejoinTarget::Next,
+            None,
+            vec![counting_pf(Arc::new(AtomicUsize::new(0)))],
+        )];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        evaluate_branches(&branches, &mut ctx).await.unwrap();
+        assert!(
+            ctx.current_filter_id.is_none(),
+            "current_filter_id should be None after branch evaluation"
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_is_none_after_branch_rejection() {
+        let branches = vec![make_branch(
+            "reject_branch",
+            None,
+            RejoinTarget::Next,
+            None,
+            vec![reject_pf(403)],
+        )];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
+        assert!(matches!(outcome, BranchOutcome::Reject(_)), "should reject");
+        assert!(
+            ctx.current_filter_id.is_none(),
+            "current_filter_id should be None after branch rejection"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
@@ -591,9 +763,13 @@ mod tests {
         }
     }
 
+    /// Monotonic counter for test filter IDs.
+    static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(1000);
+
     /// Build a counting [`PipelineFilter`].
     fn counting_pf(counter: Arc<AtomicUsize>) -> PipelineFilter {
         PipelineFilter {
+            filter_id: NEXT_TEST_ID.fetch_add(1, Ordering::SeqCst),
             branches: vec![],
             conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -606,6 +782,7 @@ mod tests {
     /// Build a rejecting [`PipelineFilter`].
     fn reject_pf(status: u16) -> PipelineFilter {
         PipelineFilter {
+            filter_id: NEXT_TEST_ID.fetch_add(1, Ordering::SeqCst),
             branches: vec![],
             conditions: vec![],
             failure_mode: FailureMode::default(),
