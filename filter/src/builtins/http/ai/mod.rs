@@ -11,6 +11,8 @@ mod anthropic;
 #[cfg(feature = "ai-inference")]
 pub(crate) mod classifier;
 #[cfg(feature = "ai-inference")]
+mod guardrails;
+#[cfg(feature = "ai-inference")]
 mod inference;
 #[cfg(feature = "ai-inference")]
 pub(crate) mod openai;
@@ -34,6 +36,8 @@ pub use anthropic::AnthropicStreamEventsFilter;
 pub use anthropic::AnthropicToOpenaiFilter;
 #[cfg(feature = "ai-inference")]
 pub use anthropic::AnthropicValidateFilter;
+#[cfg(feature = "ai-inference")]
+pub use guardrails::AiGuardrailsFilter;
 #[cfg(feature = "ai-inference")]
 pub use inference::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
