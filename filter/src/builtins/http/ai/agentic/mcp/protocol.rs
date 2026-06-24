@@ -62,7 +62,7 @@ impl ProtocolProfile {
 }
 
 // -----------------------------------------------------------------------------
-// Profile-Aware Helpers
+// Profile Helpers
 // -----------------------------------------------------------------------------
 
 /// Returns the default protocol version for the given profile.
@@ -241,6 +241,29 @@ mod tests {
         assert!(
             !is_supported_version_for_profile(ProtocolProfile::Current, PROTOCOL_VERSION_STATELESS_2026_07_28),
             "2026-07-28 should not be supported by current profile"
+        );
+    }
+
+    #[test]
+    fn supported_versions_equals_union_of_all_profiles() {
+        let mut union: Vec<&str> = Vec::new();
+        union.extend_from_slice(SUPPORTED_VERSIONS_CURRENT);
+        union.extend_from_slice(SUPPORTED_VERSIONS_STATELESS);
+        union.sort_unstable();
+        union.dedup();
+
+        let mut global = SUPPORTED_VERSIONS.to_vec();
+        global.sort_unstable();
+
+        assert_eq!(
+            global, union,
+            "SUPPORTED_VERSIONS must equal the union of all per-profile version arrays"
+        );
+
+        assert_eq!(
+            global.len(),
+            union.len(),
+            "SUPPORTED_VERSIONS must not contain duplicates or extras"
         );
     }
 

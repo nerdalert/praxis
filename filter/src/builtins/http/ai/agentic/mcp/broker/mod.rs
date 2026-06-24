@@ -69,6 +69,33 @@ const BASE64_SENTINEL_SUFFIX: &str = "?=";
 /// MCP static catalog filter that aggregates tool catalogs from multiple backend
 /// MCP servers and handles `initialize`, `tools/list`, `tools/call`, `ping`,
 /// and `notifications/initialized` directly as a static broker.
+///
+/// The broker serves configured catalog operations locally while backend tool
+/// routing is not implemented. It deliberately returns `-32601` for
+/// `tools/call` rather than forwarding a request whose target is unresolved.
+///
+/// # YAML
+///
+/// ```yaml
+/// filter: mcp
+/// path: /mcp
+/// max_body_bytes: 65536
+/// servers:
+///   - name: weather
+///     cluster: weather-mcp
+///     path: /mcp
+///     tool_prefix: weather_
+///     tools:
+///       - name: get_weather
+///         description: Get current weather
+///   - name: calendar
+///     cluster: calendar-mcp
+///     path: /mcp
+///     tool_prefix: cal_
+///     tools:
+///       - name: create_event
+///         description: Create a calendar event
+/// ```
 pub(crate) struct McpBrokerFilter {
     /// Cache scope for stateless responses.
     cache_scope: CacheScope,
@@ -135,7 +162,7 @@ impl McpBrokerFilter {
     ) -> Result<FilterAction, FilterError> {
         match self.protocol_profile {
             ProtocolProfile::Current => self.dispatch_current(ctx, value, envelope, method_str),
-            ProtocolProfile::Stateless => self.dispatch_stateless(ctx, value, envelope, method_str),
+            ProtocolProfile::Stateless => Ok(self.dispatch_stateless(ctx, value, envelope, method_str)),
         }
     }
 
@@ -180,32 +207,35 @@ impl McpBrokerFilter {
         value: &serde_json::Value,
         envelope: &JsonRpcEnvelope,
         method_str: &str,
-    ) -> Result<FilterAction, FilterError> {
+    ) -> FilterAction {
         if method_str.starts_with("notifications/") {
-            return Ok(handle_notification(envelope));
+            return handle_notification(envelope);
         }
 
         if !has_valid_request_id(envelope) {
-            return Ok(invalid_request_action(envelope));
+            return invalid_request_action(envelope);
         }
 
         if let Some(action) = self.validate_stateless_headers(value, &ctx.request.headers, envelope, method_str) {
-            return Ok(action);
+            return action;
         }
 
-        let action = match method_str {
+        match method_str {
             "server/discover" => self.handle_server_discover(envelope),
-            "tools/list" => self.handle_stateless_tools_list(envelope)?,
+            "tools/list" => self.handle_stateless_tools_list(envelope),
             "tools/call" => json_rpc_error_action_with_status(envelope, 404, -32601, "method not yet supported"),
             "ping" => handle_ping(envelope),
-            "initialize" => json_rpc_error_action_with_status(envelope, 404, -32601, "method not found"),
+            "initialize" => json_rpc_error_action_with_status(
+                envelope,
+                404,
+                -32601,
+                "method not found: use server/discover for stateless profiles",
+            ),
             _ => {
                 debug!(method_len = method_str.len(), "unsupported MCP method");
                 json_rpc_error_action_with_status(envelope, 404, -32601, "method not found")
             },
-        };
-
-        Ok(action)
+        }
     }
 
     /// Profile-aware DELETE handler.
@@ -223,7 +253,6 @@ impl McpBrokerFilter {
     /// Validates stateless request metadata headers.
     ///
     /// Returns `Some(FilterAction)` if validation fails, `None` if it passes.
-    #[expect(clippy::too_many_lines, reason = "linear validation pipeline")]
     fn validate_stateless_headers(
         &self,
         value: &serde_json::Value,
@@ -231,11 +260,33 @@ impl McpBrokerFilter {
         envelope: &JsonRpcEnvelope,
         method_str: &str,
     ) -> Option<FilterAction> {
-        let header_version = header_str(request_headers, "mcp-protocol-version");
         let header_method = header_str(request_headers, "mcp-method");
         let header_name = header_str(request_headers, "mcp-name");
-
         let params_meta = value.get("params").and_then(|p| p.get("_meta"));
+
+        if let Some(action) = self.validate_protocol_version(params_meta, request_headers, envelope) {
+            return Some(action);
+        }
+
+        if let Some(action) = validate_mcp_method(header_method, envelope, method_str) {
+            return Some(action);
+        }
+
+        if let Some(msg) = validate_params_meta(params_meta) {
+            return Some(header_mismatch_action(envelope, msg));
+        }
+
+        validate_mcp_name_header(value, envelope, method_str, header_name)
+    }
+
+    /// Validates `MCP-Protocol-Version` header and `params._meta` version.
+    fn validate_protocol_version(
+        &self,
+        params_meta: Option<&serde_json::Value>,
+        request_headers: &http::HeaderMap,
+        envelope: &JsonRpcEnvelope,
+    ) -> Option<FilterAction> {
+        let header_version = header_str(request_headers, "mcp-protocol-version");
 
         let body_version = params_meta
             .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
@@ -267,26 +318,7 @@ impl McpBrokerFilter {
             ));
         }
 
-        if let Some(msg) = validate_client_info(params_meta) {
-            return Some(header_mismatch_action(envelope, msg));
-        }
-
-        if let Some(msg) = validate_client_capabilities(params_meta) {
-            return Some(header_mismatch_action(envelope, msg));
-        }
-
-        let Some(header_method) = header_method else {
-            return Some(header_mismatch_action(envelope, "missing Mcp-Method header"));
-        };
-
-        if header_method != method_str {
-            return Some(header_mismatch_action(
-                envelope,
-                "Mcp-Method header does not match JSON-RPC method",
-            ));
-        }
-
-        validate_mcp_name_header(value, envelope, method_str, header_name)
+        None
     }
 
     // -----------------------------------------------------------------
@@ -295,42 +327,55 @@ impl McpBrokerFilter {
 
     /// `server/discover` response for the stateless profile.
     fn handle_server_discover(&self, envelope: &JsonRpcEnvelope) -> FilterAction {
-        let id_json = format_id_json(envelope);
-        let versions_json: Vec<&str> = self.supported_versions.iter().map(String::as_str).collect();
-        let versions_str = serde_json::to_string(&versions_json).unwrap_or_else(|_| "[]".to_owned());
-
-        let body = format!(
-            r#"{{"jsonrpc":"2.0","id":{id_json},"result":{{"cacheScope":"{cache_scope}","capabilities":{{"tools":{{"listChanged":false}}}},"resultType":"complete","serverInfo":{{"name":"{SERVER_NAME}","version":"{SERVER_VERSION}"}},"supportedVersions":{versions_str},"ttlMs":{ttl}}}}}"#,
-            cache_scope = self.cache_scope.as_str(),
-            ttl = self.cache_ttl_ms,
-        );
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id_value(envelope),
+            "result": {
+                "cacheScope": self.cache_scope.as_str(),
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                },
+                "resultType": "complete",
+                "serverInfo": {
+                    "name": SERVER_NAME,
+                    "version": SERVER_VERSION,
+                },
+                "supportedVersions": self.supported_versions,
+                "ttlMs": self.cache_ttl_ms,
+            },
+        });
 
         trace!("serving server/discover");
 
         FilterAction::Reject(
             Rejection::status(200)
                 .with_header("content-type", "application/json")
-                .with_body(Bytes::from(body)),
+                .with_body(Bytes::from(response.to_string())),
         )
     }
 
     /// `tools/list` response for the stateless profile with cache metadata.
-    fn handle_stateless_tools_list(&self, envelope: &JsonRpcEnvelope) -> Result<FilterAction, FilterError> {
-        let tools_json = serialize_catalog(&self.catalog)?;
-        let id_json = format_id_json(envelope);
-        let response_body = format!(
-            r#"{{"jsonrpc":"2.0","id":{id_json},"result":{{"cacheScope":"{cache_scope}","resultType":"complete","tools":{tools_json},"ttlMs":{ttl}}}}}"#,
-            cache_scope = self.cache_scope.as_str(),
-            ttl = self.cache_ttl_ms,
-        );
+    fn handle_stateless_tools_list(&self, envelope: &JsonRpcEnvelope) -> FilterAction {
+        let tools: Vec<serde_json::Value> = self.catalog.iter().map(catalog_tool_to_json).collect();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id_value(envelope),
+            "result": {
+                "cacheScope": self.cache_scope.as_str(),
+                "resultType": "complete",
+                "tools": tools,
+                "ttlMs": self.cache_ttl_ms,
+            },
+        });
 
         trace!(tool_count = self.catalog.len(), "serving stateless tools/list");
 
-        Ok(FilterAction::Reject(
+        FilterAction::Reject(
             Rejection::status(200)
                 .with_header("content-type", "application/json")
-                .with_body(Bytes::from(response_body)),
-        ))
+                .with_body(Bytes::from(response.to_string())),
+        )
     }
 }
 
@@ -467,6 +512,35 @@ fn validate_mcp_name_header(
     None
 }
 
+/// Validates the `Mcp-Method` transport header.
+fn validate_mcp_method(
+    header_method: Option<&str>,
+    envelope: &JsonRpcEnvelope,
+    method_str: &str,
+) -> Option<FilterAction> {
+    let Some(header_method) = header_method else {
+        return Some(header_mismatch_action(envelope, "missing Mcp-Method header"));
+    };
+
+    if header_method != method_str {
+        return Some(header_mismatch_action(
+            envelope,
+            "Mcp-Method header does not match JSON-RPC method",
+        ));
+    }
+
+    None
+}
+
+/// Validates required `params._meta` client metadata fields.
+fn validate_params_meta(params_meta: Option<&serde_json::Value>) -> Option<&'static str> {
+    if let Some(msg) = validate_client_info(params_meta) {
+        return Some(msg);
+    }
+
+    validate_client_capabilities(params_meta)
+}
+
 /// Validates `params._meta["io.modelcontextprotocol/clientInfo"]` is an object
 /// with string `name` and `version` fields.
 fn validate_client_info(params_meta: Option<&serde_json::Value>) -> Option<&'static str> {
@@ -516,11 +590,19 @@ fn extract_body_name<'a>(value: &'a serde_json::Value, method_str: &str) -> Opti
     }
 }
 
+/// Failure modes for MCP `=?base64?...?=` sentinel decoding.
+enum McpNameDecodeError {
+    /// Invalid base64 payload.
+    Base64,
+    /// Decoded bytes are not valid UTF-8.
+    Utf8,
+}
+
 /// Decode MCP `=?base64?...?=` sentinel values.
 ///
 /// Returns `Ok(Some(decoded))` for valid sentinels, `Ok(None)` for
 /// non-sentinel values, and `Err` for malformed sentinels.
-fn decode_mcp_name(value: &str) -> Result<Option<String>, base64::DecodeError> {
+fn decode_mcp_name(value: &str) -> Result<Option<String>, McpNameDecodeError> {
     use base64::Engine as _;
 
     let Some(inner) = value
@@ -530,11 +612,13 @@ fn decode_mcp_name(value: &str) -> Result<Option<String>, base64::DecodeError> {
         return Ok(None);
     };
 
-    let bytes = base64::engine::general_purpose::STANDARD.decode(inner)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(inner)
+        .map_err(|_e| McpNameDecodeError::Base64)?;
 
     String::from_utf8(bytes)
         .map(Some)
-        .map_err(|e| base64::DecodeError::InvalidByte(0, e.as_bytes().first().copied().unwrap_or(0)))
+        .map_err(|_e| McpNameDecodeError::Utf8)
 }
 
 /// Gets a header value as a `&str`.
@@ -548,32 +632,35 @@ fn header_str<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
 
 /// Builds a header-mismatch error response (HTTP 400, JSON-RPC -32020).
 fn header_mismatch_action(envelope: &JsonRpcEnvelope, message: &str) -> FilterAction {
-    let id_json = format_id_json(envelope);
-    let message_json = serde_json::to_string(message).unwrap_or_else(|_| "\"header mismatch\"".to_owned());
-    let body = Bytes::from(format!(
-        r#"{{"jsonrpc":"2.0","error":{{"code":{ERR_HEADER_MISMATCH},"message":{message_json}}},"id":{id_json}}}"#,
-    ));
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": { "code": ERR_HEADER_MISMATCH, "message": message },
+        "id": id_value(envelope),
+    });
 
     FilterAction::Reject(
         Rejection::status(400)
             .with_header("content-type", "application/json")
-            .with_body(body),
+            .with_body(Bytes::from(response.to_string())),
     )
 }
 
 /// Builds an unsupported-version error response (HTTP 400, JSON-RPC -32022).
 fn unsupported_version_action(envelope: &JsonRpcEnvelope, requested: &str, supported: &[String]) -> FilterAction {
-    let id_json = format_id_json(envelope);
-    let supported_json = serde_json::to_string(supported).unwrap_or_else(|_| "[]".to_owned());
-    let requested_json = serde_json::to_string(requested).unwrap_or_else(|_| "\"\"".to_owned());
-    let body = Bytes::from(format!(
-        r#"{{"jsonrpc":"2.0","error":{{"code":{ERR_UNSUPPORTED_VERSION},"data":{{"requested":{requested_json},"supported":{supported_json}}},"message":"unsupported protocol version"}},"id":{id_json}}}"#,
-    ));
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": {
+            "code": ERR_UNSUPPORTED_VERSION,
+            "data": { "requested": requested, "supported": supported },
+            "message": "unsupported protocol version",
+        },
+        "id": id_value(envelope),
+    });
 
     FilterAction::Reject(
         Rejection::status(400)
             .with_header("content-type", "application/json")
-            .with_body(body),
+            .with_body(Bytes::from(response.to_string())),
     )
 }
 
@@ -679,6 +766,10 @@ fn record_client_protocol_version(ctx: &mut HttpFilterContext<'_>, value: &serde
 }
 
 /// Build the initialize response from the configured protocol version.
+///
+/// `serverInfo` intentionally omits `version` to preserve the established
+/// current-profile response shape; stateless clients get version from
+/// `server/discover` instead.
 fn initialize_response_body(envelope: &JsonRpcEnvelope, protocol_version: &str) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -783,15 +874,16 @@ fn json_rpc_error_action_with_status(
     code: i32,
     message: &str,
 ) -> FilterAction {
-    let id_json = format_id_json(envelope);
-    let message_json = serde_json::to_string(message).unwrap_or_else(|_| "\"internal error\"".to_owned());
-    let body = Bytes::from(format!(
-        r#"{{"jsonrpc":"2.0","error":{{"code":{code},"message":{message_json}}},"id":{id_json}}}"#,
-    ));
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": { "code": code, "message": message },
+        "id": id_value(envelope),
+    });
+
     FilterAction::Reject(
         Rejection::status(http_status)
             .with_header("content-type", "application/json")
-            .with_body(body),
+            .with_body(Bytes::from(response.to_string())),
     )
 }
 

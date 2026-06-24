@@ -9,8 +9,9 @@ use super::{
     config::{McpBrokerConfig, build_config},
     *,
 };
-use crate::builtins::http::ai::agentic::mcp::protocol::{
-    PROTOCOL_VERSION_CURRENT, PROTOCOL_VERSION_STATELESS_2026_07_28, ProtocolProfile,
+use crate::builtins::http::ai::agentic::mcp::{
+    config::DEFAULT_MAX_BODY_BYTES,
+    protocol::{PROTOCOL_VERSION_CURRENT, PROTOCOL_VERSION_STATELESS_2026_07_28, ProtocolProfile},
 };
 
 // -----------------------------------------------------------------------------
@@ -947,7 +948,7 @@ fn body_mode_is_stream_buffer() {
     assert_eq!(
         filter.request_body_mode(),
         BodyMode::StreamBuffer {
-            max_bytes: Some(config::DEFAULT_MAX_BODY_BYTES)
+            max_bytes: Some(DEFAULT_MAX_BODY_BYTES)
         },
         "Praxis should use StreamBuffer body mode"
     );
@@ -1507,6 +1508,69 @@ servers: []
     assert!(result.is_err(), "unknown cache_scope should fail at parse time");
 }
 
+#[test]
+fn current_profile_rejects_explicit_cache_scope_private() {
+    let yaml = r#"
+protocol_profile: current
+cache_scope: private
+servers: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = build_config(cfg);
+    assert!(result.is_err(), "current profile should reject cache_scope");
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("cache_scope requires protocol_profile 'stateless'"),
+        "error should mention stateless requirement"
+    );
+}
+
+#[test]
+fn current_profile_rejects_explicit_cache_scope_public() {
+    let yaml = r#"
+protocol_profile: current
+cache_scope: public
+servers: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = build_config(cfg);
+    assert!(
+        result.is_err(),
+        "current profile should reject cache_scope even when public"
+    );
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("cache_scope requires protocol_profile 'stateless'"),
+        "error should mention stateless requirement"
+    );
+}
+
+#[test]
+fn current_profile_rejects_explicit_cache_ttl_ms() {
+    let yaml = r#"
+protocol_profile: current
+cache_ttl_ms: 60000
+servers: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = build_config(cfg);
+    assert!(result.is_err(), "current profile should reject cache_ttl_ms");
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("cache_ttl_ms requires protocol_profile 'stateless'"),
+        "error should mention stateless requirement"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Current-Profile Regression Tests
 // -----------------------------------------------------------------------------
@@ -1704,6 +1768,10 @@ async fn stateless_initialize_returns_method_not_found_without_session_header() 
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
             assert_eq!(parsed["error"]["code"], -32601, "should return method not found");
+            assert_eq!(
+                parsed["error"]["message"], "method not found: use server/discover for stateless profiles",
+                "should guide clients to server/discover"
+            );
             assert!(
                 !rejection.headers.iter().any(|(k, _)| k == "mcp-session-id"),
                 "stateless initialize must not return mcp-session-id"

@@ -5,7 +5,10 @@
 
 use serde::Deserialize;
 
-use super::super::protocol::{self, ProtocolProfile};
+use super::super::{
+    config::DEFAULT_MAX_BODY_BYTES,
+    protocol::{self, ProtocolProfile},
+};
 use crate::{
     FilterError,
     builtins::http::{ai::config_validation::validate_max_body_bytes, transformation::has_dot_dot_traversal},
@@ -14,9 +17,6 @@ use crate::{
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
-
-/// Default maximum request body size for `StreamBuffer` mode (64 `KiB`).
-pub(super) const DEFAULT_MAX_BODY_BYTES: usize = 65_536; // 64 KiB
 
 /// Default cache TTL in milliseconds (5 minutes).
 pub(super) const DEFAULT_CACHE_TTL_MS: u64 = 300_000; // 5 min
@@ -115,10 +115,9 @@ pub(super) struct McpServerConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct McpBrokerConfig {
-    /// Cache scope for stateless responses.
-    #[serde(default)]
-    pub cache_scope: CacheScope,
-    /// Cache TTL in milliseconds for stateless responses.
+    /// Cache scope for stateless responses. Requires `protocol_profile: stateless`.
+    pub cache_scope: Option<CacheScope>,
+    /// Cache TTL in milliseconds for stateless responses. Requires `protocol_profile: stateless`.
     pub cache_ttl_ms: Option<u64>,
     /// Fallback MCP protocol version. When omitted, derived from the profile.
     pub default_version: Option<String>,
@@ -211,11 +210,14 @@ fn default_max_body_bytes() -> usize {
 // -----------------------------------------------------------------------------
 
 /// Validate configuration and build the static tool catalog.
-#[expect(clippy::too_many_lines, reason = "sequential normalization and validation pipeline")]
 pub(super) fn build_config(cfg: McpBrokerConfig) -> Result<(ValidatedBrokerConfig, Vec<CatalogTool>), FilterError> {
     validate_max_body_bytes("mcp_broker", cfg.max_body_bytes)?;
 
     let profile = cfg.protocol_profile;
+
+    validate_cache_fields_for_profile(profile, &cfg)?;
+
+    let catalog = validate_and_build_catalog(&cfg)?;
 
     let default_version = cfg
         .default_version
@@ -228,20 +230,13 @@ pub(super) fn build_config(cfg: McpBrokerConfig) -> Result<(ValidatedBrokerConfi
             .collect()
     });
 
+    let cache_scope = cfg.cache_scope.unwrap_or(CacheScope::Public);
     let cache_ttl_ms = cfg.cache_ttl_ms.unwrap_or(DEFAULT_CACHE_TTL_MS);
 
     validate_versions(profile, &supported_versions, &default_version)?;
-    validate_path("mcp", &cfg.path)?;
-    validate_unique_server_names(&cfg.servers)?;
-    validate_server_clusters(&cfg.servers)?;
-    validate_server_paths(&cfg.servers)?;
-    validate_tool_names(&cfg.servers)?;
-
-    let catalog = build_catalog(&cfg.servers, cfg.invalid_tool_policy)?;
-    validate_unique_exposed_names(&catalog)?;
 
     let validated = ValidatedBrokerConfig {
-        cache_scope: cfg.cache_scope,
+        cache_scope,
         cache_ttl_ms,
         default_version,
         max_body_bytes: cfg.max_body_bytes,
@@ -251,6 +246,33 @@ pub(super) fn build_config(cfg: McpBrokerConfig) -> Result<(ValidatedBrokerConfi
     };
 
     Ok((validated, catalog))
+}
+
+/// Validate server definitions and build the static tool catalog.
+fn validate_and_build_catalog(cfg: &McpBrokerConfig) -> Result<Vec<CatalogTool>, FilterError> {
+    validate_path("mcp", &cfg.path)?;
+    validate_unique_server_names(&cfg.servers)?;
+    validate_server_clusters(&cfg.servers)?;
+    validate_server_paths(&cfg.servers)?;
+    validate_tool_names(&cfg.servers)?;
+
+    let catalog = build_catalog(&cfg.servers, cfg.invalid_tool_policy)?;
+    validate_unique_exposed_names(&catalog)?;
+
+    Ok(catalog)
+}
+
+/// Reject explicit cache config on profiles that do not use it.
+fn validate_cache_fields_for_profile(profile: ProtocolProfile, cfg: &McpBrokerConfig) -> Result<(), FilterError> {
+    if profile == ProtocolProfile::Current {
+        if cfg.cache_scope.is_some() {
+            return Err("mcp: cache_scope requires protocol_profile 'stateless'".into());
+        }
+        if cfg.cache_ttl_ms.is_some() {
+            return Err("mcp: cache_ttl_ms requires protocol_profile 'stateless'".into());
+        }
+    }
+    Ok(())
 }
 
 /// Validate that every configured version is implemented by this build,

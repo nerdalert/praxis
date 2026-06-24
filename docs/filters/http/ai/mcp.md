@@ -15,6 +15,8 @@ Methods requiring a name selector (`tools/call`, `resources/read`, `prompts/get`
 
 Writes `mcp.*` and `json_rpc.*` entries to the filter result set for branch chain conditions.
 
+The broker serves configured catalog operations locally while backend tool routing is not implemented. It deliberately returns `-32601` for `tools/call` rather than forwarding a request whose target is unresolved.
+
 Supports two protocol profiles: `current` (session-based, default) and `stateless` (MCP 2026-07-28, opt-in). Version and cache fields are derived from the selected profile when omitted.
 
 ## Configuration
@@ -32,8 +34,8 @@ Supports two protocol profiles: `current` (session-based, default) and `stateles
 | `headers.session_present` | string | no | Header name for MCP session presence (e.g. `x-praxis-mcp-session-present`). |
 | `max_body_bytes` | usize | no | Maximum body size in bytes for `StreamBuffer`. |
 | `on_invalid` | `continue` \| `reject` \| `error` | no | Invalid input handling behavior. |
-| `cache_scope` | `public` \| `private` | no | Cache scope for stateless responses. |
-| `cache_ttl_ms` | u64 | no | Cache TTL in milliseconds for stateless responses. |
+| `cache_scope` | `public` \| `private` | no | Cache scope for stateless responses. Requires `protocol_profile: stateless`. |
+| `cache_ttl_ms` | u64 | no | Cache TTL in milliseconds for stateless responses. Requires `protocol_profile: stateless`. |
 | `default_version` | string | no | Fallback MCP protocol version. When omitted, derived from the profile. |
 | `invalid_tool_policy` | `reject_server` \| `filter_out` | no | Behavior when a tool has an invalid schema. |
 | `path` | string | no | Public MCP path handled by Praxis. |
@@ -73,4 +75,27 @@ headers:
   kind: x-praxis-mcp-kind
   protocol_version: x-praxis-mcp-protocol-version
   session_present: x-praxis-mcp-session-present
+```
+
+### Example 3
+
+```yaml
+filter: mcp
+path: /mcp
+max_body_bytes: 65536
+servers:
+  - name: weather
+    cluster: weather-mcp
+    path: /mcp
+    tool_prefix: weather_
+    tools:
+      - name: get_weather
+        description: Get current weather
+  - name: calendar
+    cluster: calendar-mcp
+    path: /mcp
+    tool_prefix: cal_
+    tools:
+      - name: create_event
+        description: Create a calendar event
 ```
