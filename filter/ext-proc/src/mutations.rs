@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 
 use bytes::Bytes;
-use praxis_filter::{FilterAction, HttpFilterContext, Rejection};
+use praxis_filter::{FilterAction, HttpFilterContext, Rejection, TrustedHeaderMutation};
 use praxis_proto::envoy::service::{
     common::v3::{HeaderValue, HeaderValueOption},
     ext_proc::v3::{HeaderMutation, HeadersResponse, HttpHeaders, ImmediateResponse},
@@ -126,14 +126,15 @@ pub(crate) fn apply_request_header_mutation(mutation: &HeaderMutation, ctx: &mut
     set_request_headers(&mutation.set_headers, ctx);
 }
 
-/// Queue request header removals, skipping pseudo-headers.
+/// Queue request header removals, skipping pseudo-headers and `Host`.
 fn remove_request_headers(names: &[String], ctx: &mut HttpFilterContext<'_>) {
     for name in names {
-        if is_pseudo_header(name) {
+        if is_pseudo_header(name) || is_request_authority(name) {
             continue;
         }
         if let Ok(header_name) = http::HeaderName::try_from(name.as_str()) {
-            ctx.request_headers_to_remove.push(header_name);
+            ctx.request_headers_to_remove.push(header_name.clone());
+            ctx.pre_read_mutations.push(TrustedHeaderMutation::Remove(header_name));
         }
     }
 }
@@ -142,7 +143,7 @@ fn remove_request_headers(names: &[String], ctx: &mut HttpFilterContext<'_>) {
 fn set_request_headers(headers: &[HeaderValueOption], ctx: &mut HttpFilterContext<'_>) {
     for hvo in headers {
         let Some(hv) = &hvo.header else { continue };
-        if is_pseudo_header(&hv.key) {
+        if is_pseudo_header(&hv.key) || is_request_authority(&hv.key) {
             continue;
         }
         let Ok(name) = http::HeaderName::try_from(hv.key.as_str()) else {
@@ -166,23 +167,29 @@ fn dispatch_request_header(
     match resolve_append_action(hvo) {
         HeaderAppendAction::OverwriteIfExistsOrAdd => {
             if let Ok(v) = http::HeaderValue::try_from(&value) {
-                ctx.request_headers_to_set.push((name, v));
+                ctx.request_headers_to_set.push((name.clone(), v.clone()));
+                ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(name, v));
             }
         },
         HeaderAppendAction::OverwriteIfExists => {
             if ctx.request.headers.contains_key(&name)
                 && let Ok(v) = http::HeaderValue::try_from(&value)
             {
-                ctx.request_headers_to_set.push((name, v));
+                ctx.request_headers_to_set.push((name.clone(), v.clone()));
+                ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(name, v));
             }
         },
         HeaderAppendAction::AddIfAbsent => {
             if !ctx.request.headers.contains_key(&name) {
-                ctx.extra_request_headers.push((Cow::Owned(hv.key.clone()), value));
+                ctx.extra_request_headers
+                    .push((Cow::Owned(hv.key.clone()), value.clone()));
+                ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(name, value));
             }
         },
         HeaderAppendAction::AppendIfExistsOrAdd => {
-            ctx.extra_request_headers.push((Cow::Owned(hv.key.clone()), value));
+            ctx.extra_request_headers
+                .push((Cow::Owned(hv.key.clone()), value.clone()));
+            ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(name, value));
         },
     }
 }
@@ -331,6 +338,15 @@ pub(crate) fn header_value_string(hv: &HeaderValue) -> String {
 /// Returns `true` if the header name is an HTTP/2 pseudo-header.
 pub(crate) fn is_pseudo_header(name: &str) -> bool {
     name.starts_with(':')
+}
+
+/// Returns `true` if the header is protocol-controlled request authority.
+///
+/// `Host` is the HTTP/1.1 singleton authority header. Applying a default
+/// `AppendIfExistsOrAdd` `ext_proc` mutation would create duplicate `Host`
+/// fields on the forwarded request, so request mutations never alter it.
+fn is_request_authority(name: &str) -> bool {
+    name.eq_ignore_ascii_case("host")
 }
 
 /// Build a [`HeaderValue`] proto with the given key and value.

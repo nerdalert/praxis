@@ -38,10 +38,10 @@ pub use http::ResponsesFormatFilter;
 pub use http::ResponsesProxyFilter;
 pub use http::{
     A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter,
-    CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter, GrpcDetectionFilter,
-    GuardrailsAction, GuardrailsFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
-    LoadBalancerFilter, McpFilter, PathRewriteFilter, PiiKind, RateLimitFilter, RateLimitMode, RedirectFilter,
-    RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind, StaticResponseFilter, TimeoutFilter,
+    CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, EndpointSelectorFilter, ForwardedHeadersFilter,
+    GrpcDetectionFilter, GuardrailsAction, GuardrailsFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter,
+    JsonRpcFilter, LoadBalancerFilter, McpFilter, PathRewriteFilter, PiiKind, RateLimitFilter, RateLimitMode,
+    RedirectFilter, RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind, StaticResponseFilter, TimeoutFilter,
     TokenUsageHeadersFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
 };
 #[cfg(feature = "ai-inference")]
