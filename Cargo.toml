@@ -35,6 +35,7 @@ repository = "https://github.com/praxis-proxy/praxis"
 
 [workspace.dependencies]
 arc-swap = "1.9.1"
+base64 = "0.22.1"
 async-trait = "0.1.89"
 benchmarks = { path = "benchmarks" }
 bytes = "1.12.0"

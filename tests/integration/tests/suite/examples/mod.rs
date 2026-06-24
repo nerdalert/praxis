@@ -31,6 +31,7 @@ mod least_connections;
 mod logging;
 mod max_body_guard;
 mod max_connections;
+mod mcp_broker;
 #[cfg(feature = "ai-inference")]
 mod model_to_header;
 mod multi_listener;

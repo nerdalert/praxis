@@ -2532,6 +2532,7 @@ name = "praxis-proxy-filter"
 version = "0.3.1"
 dependencies = [
  "async-trait",
+ "base64",
  "bytes",
  "dashmap 6.2.1",
  "http",
