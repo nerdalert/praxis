@@ -34,7 +34,7 @@ filter_chains:
         default_model: "llama-3.3-70b"
         model_aliases:
           "codex-*": "llama-3.3-70b"
-          gpt-4.1-mini: "qwen-2.5-72b"
+          "gpt-4.1-mini": "qwen-2.5-72b"
         headers:
           effective_model: x-praxis-ai-effective-model
           original_model: x-praxis-ai-original-model

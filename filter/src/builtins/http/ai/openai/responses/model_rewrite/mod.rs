@@ -71,9 +71,9 @@ const MAX_PROMOTED_VALUE_LEN: usize = 256;
 /// filter: openai_responses_model_rewrite
 /// default_model: "llama-3.3-70b"
 /// model_aliases:
-///   codex-mini-latest: "llama-3.3-70b"
+///   "codex-mini-latest": "llama-3.3-70b"
 ///   "gpt-4.1-*": "qwen-2.5-72b"
-///   gpt-4.1-mini: "qwen-2.5-72b"
+///   "gpt-4.1-mini": "qwen-2.5-72b"
 /// ```
 ///
 /// # Full YAML
@@ -82,7 +82,7 @@ const MAX_PROMOTED_VALUE_LEN: usize = 256;
 /// filter: openai_responses_model_rewrite
 /// default_model: "llama-3.3-70b"
 /// model_aliases:
-///   codex-mini-latest: "llama-3.3-70b"
+///   "codex-mini-latest": "llama-3.3-70b"
 ///   "gpt-4.1-*": "qwen-2.5-72b"
 /// max_body_bytes: 10485760
 /// on_invalid: continue
@@ -101,7 +101,7 @@ pub struct ModelRewriteFilter {
     max_body_bytes: usize,
 
     /// Map from client-facing model names or single-wildcard patterns
-    /// to backend model names.
+    /// to backend model names. Quote wildcard keys in YAML.
     model_aliases: HashMap<String, String>,
 
     /// Behavior when the body is not valid JSON.
