@@ -366,6 +366,11 @@ impl HttpFilter for RouterFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if let Some(existing) = &ctx.cluster {
+            debug!(cluster = %existing, "cluster already selected by a prior filter; skipping route match");
+            return Ok(FilterAction::Continue);
+        }
+
         let path = ctx.rewritten_path.as_deref().unwrap_or_else(|| ctx.request.uri.path());
         let host = ctx
             .request

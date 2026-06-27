@@ -16,6 +16,7 @@ Built-in filters organized by protocol and category.
 | [`anthropic_stream_events`](http/ai/anthropic_stream_events.md) | `ai-inference` | Transforms streaming SSE responses between `OpenAI` and Anthropic formats, processing each chunk as it arrives. |
 | [`anthropic_to_openai`](http/ai/anthropic_to_openai.md) | `ai-inference` | Transforms Anthropic Messages API requests to Chat Completions-compatible request bodies and transforms compatible responses back. The filter name refers to the OpenAI Chat Completions wire shape, not the Responses API; non-OpenAI compatible backends are valid targets. |
 | [`anthropic_validate`](http/ai/anthropic_validate.md) | `ai-inference` | Validates Anthropic Messages request bodies for proxy-owned JSON envelope requirements. |
+| [`grid_route`](http/ai/grid_route.md) | - | Selects a local or remote gateway cluster from a static site/capability descriptor with deterministic scoring. |
 | [`json_rpc`](http/ai/json_rpc.md) | - | Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes method, id, and kind to request headers and filter results for routing. |
 | [`mcp`](http/ai/mcp.md) | - | Extracts MCP protocol metadata from JSON-RPC request bodies and promotes method, tool/resource/prompt name, JSON-RPC kind, protocol version, and session presence to request headers/filter results; stores session ID in durable metadata. |
 | [`model_to_header`](http/ai/model_to_header.md) | `ai-inference` | Promotes the JSON `"model"` field from the request body to a request header. |
@@ -50,6 +51,7 @@ Built-in filters organized by protocol and category.
 | [`credential_injection`](http/security/credential_injection.md) | - | Injects per-cluster API credentials into upstream requests. |
 | [`csrf`](http/security/csrf.md) | - | CSRF protection filter that validates request origins against a trusted allowlist. |
 | [`forwarded_headers`](http/security/forwarded_headers.md) | - | Injects `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers into upstream requests. |
+| [`grid_ingress_trust`](http/security/grid_ingress_trust.md) | - | Validates that the downstream mTLS peer identity matches a configured trusted peer before allowing the request to continue. |
 | [`guardrails`](http/security/guardrails.md) | - | Rejects requests matching string, regex, or PII rules against headers and/or body content. |
 | [`ip_acl`](http/security/ip_acl.md) | - | IP-based access control filter. |
 

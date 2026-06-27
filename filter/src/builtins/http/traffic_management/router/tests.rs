@@ -204,6 +204,25 @@ async fn on_request_combined_host_and_path() {
     );
 }
 
+#[tokio::test]
+async fn on_request_preserves_existing_cluster() {
+    let router = make_router(vec![prefix_route("/", "default")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(std::sync::Arc::from("prior-selector"));
+
+    let action = router.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "router should continue when cluster is already set"
+    );
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("prior-selector"),
+        "router must not overwrite a cluster set by a prior filter"
+    );
+}
+
 #[test]
 fn route_matches_by_header() {
     let router = make_router(vec![Route {

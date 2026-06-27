@@ -43,12 +43,12 @@ pub use ai::ResponsesFormatFilter;
 pub use ai::ResponsesProxyFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::token_usage::{TokenUsage, TokenUsageProvider, extract_token_usage, set_token_usage};
-pub use ai::{A2aFilter, JsonRpcFilter, McpFilter, TokenUsageHeadersFilter};
+pub use ai::{A2aFilter, GridRouteFilter, JsonRpcFilter, McpFilter, TokenUsageHeadersFilter};
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter};
 pub use security::{
     ContainsValue, CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter,
-    GuardrailsAction, GuardrailsFilter, IpAclFilter, PiiKind, RuleTargetKind,
+    GridIngressTrustFilter, GuardrailsAction, GuardrailsFilter, IpAclFilter, PiiKind, RuleTargetKind,
 };
 pub use traffic_management::{
     CircuitBreakerFilter, GrpcDetectionFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter,

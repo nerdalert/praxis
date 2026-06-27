@@ -10,6 +10,7 @@ pub(crate) mod agentic;
 mod anthropic;
 #[cfg(feature = "ai-inference")]
 pub(crate) mod classifier;
+pub(crate) mod grid;
 #[cfg(feature = "ai-inference")]
 mod guardrails;
 #[cfg(feature = "ai-inference")]
@@ -39,6 +40,7 @@ pub use anthropic::AnthropicStreamEventsFilter;
 pub use anthropic::AnthropicToOpenaiFilter;
 #[cfg(feature = "ai-inference")]
 pub use anthropic::AnthropicValidateFilter;
+pub use grid::GridRouteFilter;
 #[cfg(feature = "ai-inference")]
 pub use guardrails::AiGuardrailsFilter;
 #[cfg(feature = "ai-inference")]

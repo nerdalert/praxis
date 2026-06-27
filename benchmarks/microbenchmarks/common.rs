@@ -55,6 +55,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         filter_state: std::collections::HashMap::new(),
         health_registry: None,
         id_generator: &BENCH_ID_GENERATOR,
+        peer_identity: None,
         kv_stores: None,
         request: req,
         request_body_bytes: 0,

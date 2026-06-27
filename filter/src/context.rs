@@ -13,6 +13,27 @@ use praxis_core::{
 use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
 
 // -----------------------------------------------------------------------------
+// TlsPeerIdentity
+// -----------------------------------------------------------------------------
+
+/// Verified downstream TLS peer identity from the client certificate.
+///
+/// Populated by the protocol layer when the downstream connection uses
+/// mTLS. Filters can read this to make trust decisions about the peer
+/// without parsing certificates themselves.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TlsPeerIdentity {
+    /// SHA-256 digest of the peer's leaf certificate (DER-encoded).
+    pub cert_digest: Vec<u8>,
+
+    /// X.509 subject organization (`O=` field), if present.
+    pub organization: Option<String>,
+
+    /// Certificate serial number as a decimal string, if present.
+    pub serial_number: Option<String>,
+}
+
+// -----------------------------------------------------------------------------
 // HttpFilterContext
 // -----------------------------------------------------------------------------
 
@@ -117,6 +138,14 @@ pub struct HttpFilterContext<'a> {
 
     /// Shared health registry for endpoint health lookups.
     pub health_registry: Option<&'a HealthRegistry>,
+
+    /// Verified downstream TLS peer identity.
+    ///
+    /// `Some` when the downstream connection uses mTLS and the
+    /// protocol layer extracted certificate fields from the
+    /// [`SslDigest`]. `None` for plain connections or TLS
+    /// without client certificates.
+    pub peer_identity: Option<TlsPeerIdentity>,
 
     /// Shared request ID generator.
     pub id_generator: &'a IdGenerator,

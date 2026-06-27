@@ -2069,6 +2069,7 @@ fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
         filter_state: HashMap::new(),
         health_registry: None,
         id_generator: &TEST_ID_GENERATOR,
+        peer_identity: None,
         kv_stores: None,
         request: req,
         request_body_bytes: 0,

@@ -43,7 +43,7 @@ pub mod ai {
         extract_token_usage, set_token_usage,
     };
 }
-pub use context::{HttpFilterContext, Request, Response};
+pub use context::{HttpFilterContext, Request, Response, TlsPeerIdentity};
 pub use extensions::RequestExtensions;
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
@@ -419,6 +419,7 @@ pub(crate) mod test_utils {
             filter_state: std::collections::HashMap::new(),
             health_registry: None,
             id_generator: &TEST_ID_GENERATOR,
+            peer_identity: None,
             kv_stores: None,
             request: req,
             request_body_bytes: 0,
