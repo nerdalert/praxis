@@ -1,0 +1,46 @@
+# A2A Agent Card Routing
+#
+# Public agent-card discovery uses plain HTTP path routing because
+# GET /.well-known/agent-card.json is not a JSON-RPC request.
+# Extended agent-card retrieval uses the A2A classifier because
+# GetExtendedAgentCard is a JSON-RPC method that requires body
+# parsing to identify.
+
+listeners:
+  - name: a2a
+    address: "127.0.0.1:8080"
+    filter_chains: [a2a-agent-card]
+
+filter_chains:
+  - name: a2a-agent-card
+    filters:
+      - filter: a2a
+        max_body_bytes: 65536
+        on_invalid: continue
+        headers:
+          method: x-praxis-a2a-method
+          family: x-praxis-a2a-family
+          version: x-praxis-a2a-version
+
+      - filter: router
+        routes:
+          - path: "/.well-known/agent-card.json"
+            cluster: "public-agent-card"
+          - path_prefix: "/a2a/"
+            headers:
+              x-praxis-a2a-method: "GetExtendedAgentCard"
+            cluster: "extended-agent-card"
+          - path_prefix: "/"
+            cluster: "default-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "public-agent-card"
+            endpoints:
+              - "127.0.0.1:9101"
+          - name: "extended-agent-card"
+            endpoints:
+              - "127.0.0.1:9102"
+          - name: "default-backend"
+            endpoints:
+              - "127.0.0.1:9103"

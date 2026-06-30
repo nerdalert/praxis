@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    Backend, free_port, http_send, json_post, load_example_config, parse_body, parse_status,
+    Backend, free_port, http_get, http_send, json_post, load_example_config, parse_body, parse_status,
     start_backend_with_shutdown, start_proxy,
 };
 
@@ -489,9 +489,132 @@ fn a2a_task_routing_example_unknown_task_follows_fallback() {
     );
 }
 
+#[test]
+fn a2a_agent_card_example_routes_public_well_known_card() {
+    let public_guard = start_backend_with_shutdown("public-card-response");
+    let extended_guard = start_backend_with_shutdown("extended-card-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_agent_card_example_config(
+        proxy_port,
+        public_guard.port(),
+        extended_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let (status, body) = http_get(proxy.addr(), "/.well-known/agent-card.json", None);
+    assert_eq!(status, 200, "public agent card GET should return 200");
+    assert_eq!(
+        body, "public-card-response",
+        "GET /.well-known/agent-card.json should route to public-agent-card cluster"
+    );
+}
+
+#[test]
+fn a2a_agent_card_example_exact_path_rejects_suffix() {
+    let public_guard = start_backend_with_shutdown("public-card-response");
+    let extended_guard = start_backend_with_shutdown("extended-card-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_agent_card_example_config(
+        proxy_port,
+        public_guard.port(),
+        extended_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let (status, body) = http_get(proxy.addr(), "/.well-known/agent-card.json-extra", None);
+    assert_eq!(status, 200, "suffixed path should still return 200 via fallback");
+    assert_eq!(
+        body, "default-response",
+        "/.well-known/agent-card.json-extra must not match the exact public card route"
+    );
+}
+
+#[test]
+fn a2a_agent_card_example_routes_get_extended_agent_card() {
+    let public_guard = start_backend_with_shutdown("public-card-response");
+    let extended_guard = start_backend_with_shutdown("extended-card-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_agent_card_example_config(
+        proxy_port,
+        public_guard.port(),
+        extended_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/a2a/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"GetExtendedAgentCard","params":{}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "GetExtendedAgentCard should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "extended-card-response",
+        "GetExtendedAgentCard should route to extended-agent-card cluster"
+    );
+}
+
+#[test]
+fn a2a_agent_card_example_non_agent_card_falls_back() {
+    let public_guard = start_backend_with_shutdown("public-card-response");
+    let extended_guard = start_backend_with_shutdown("extended-card-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_agent_card_example_config(
+        proxy_port,
+        public_guard.port(),
+        extended_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/a2a/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "non-agent-card method should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "default-response",
+        "non-agent-card A2A method should route to default-backend, not agent-card clusters"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
+
+fn load_agent_card_example_config(
+    proxy_port: u16,
+    public_port: u16,
+    extended_port: u16,
+    default_port: u16,
+) -> praxis_core::config::Config {
+    load_example_config(
+        "ai/a2a-agent-card-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9101", public_port),
+            ("127.0.0.1:9102", extended_port),
+            ("127.0.0.1:9103", default_port),
+        ]),
+    )
+}
 
 #[expect(clippy::too_many_arguments, reason = "test utility with all A2A example ports")]
 fn load_a2a_example_config(
