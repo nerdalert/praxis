@@ -34,8 +34,9 @@
 //! filter. The original request `input` is carried through typed
 //! per-filter state because it can be arbitrary JSON and is not part
 //! of the Responses API response object. When rehydrate populated
-//! [`ResponsesState`], that state is used as the stored message
-//! history.
+//! [`ResponsesState`], its persistence history is used as the
+//! stored message history so output-only metadata can survive
+//! future rehydration without being replayed as backend input.
 //!
 //! [`filter_metadata`]: crate::HttpFilterContext::filter_metadata
 //! [`ResponsesState`]: super::super::state::ResponsesState
@@ -50,7 +51,10 @@ use tokio::sync::OnceCell;
 use tracing::{debug, trace, warn};
 
 use super::{
-    super::{DEFAULT_STORE_NAME, DEFAULT_TENANT_ID, TENANT_METADATA_KEY, state::ResponsesState},
+    super::{
+        DEFAULT_STORE_NAME, DEFAULT_TENANT_ID, TENANT_METADATA_KEY, error::responses_error_rejection,
+        state::ResponsesState,
+    },
     InputItemPage, ListParams, Order,
     config::{ResponseStoreConfig, StorageBackend, revalidate_postgres_host, validate_config},
     list_input_items,
@@ -219,14 +223,15 @@ impl ResponseStoreFilter {
             Ok(FilterAction::Reject(delete_success_rejection(id)?))
         } else {
             debug!(id, tenant_id, "response not found for delete");
-            Ok(FilterAction::Reject(delete_not_found_rejection(id)?))
+            Ok(FilterAction::Reject(delete_not_found_rejection(id)))
         }
     }
 
     /// Return whether this exchange should release response body
     /// chunks immediately instead of waiting for EOS.
     fn should_release_skipped_response_body(&self, ctx: &HttpFilterContext<'_>) -> bool {
-        should_skip_persist(ctx) || self.store.get().and_then(Option::as_ref).is_none()
+        ctx.get_metadata("responses._reformat_error").is_none()
+            && (should_skip_persist(ctx) || self.store.get().and_then(Option::as_ref).is_none())
     }
 
     /// Return the initialized store and terminal response bytes.
@@ -388,18 +393,13 @@ fn delete_success_rejection(id: &str) -> Result<Rejection, FilterError> {
 }
 
 /// Build the 404 rejection for a missing response.
-fn delete_not_found_rejection(id: &str) -> Result<Rejection, FilterError> {
-    let body = serde_json::to_string(&serde_json::json!({
-        "error": {
-            "message": format!("No response found with id: '{id}'."),
-            "type": "invalid_request_error",
-        }
-    }))
-    .map_err(|e| FilterError::from(format!("openai_response_store: serialize failed: {e}")))?;
-
-    Ok(Rejection::status(404)
-        .with_header("content-type", "application/json")
-        .with_body(Bytes::from(body)))
+fn delete_not_found_rejection(id: &str) -> Rejection {
+    responses_error_rejection(
+        404,
+        "invalid_request_error",
+        &format!("No response found with id: '{id}'."),
+        false,
+    )
 }
 
 // -----------------------------------------------------------------------------
@@ -719,7 +719,7 @@ impl HttpFilter for ResponseStoreFilter {
         let state_messages = ctx
             .extensions
             .get::<ResponsesState>()
-            .map(|state| state.messages.clone());
+            .map(|state| state.persisted_messages.clone());
         let Some(record) = parse_response_record(bytes, &tenant_id, request_input, state_messages) else {
             return Ok(FilterAction::Continue);
         };
@@ -894,41 +894,22 @@ pub(super) fn parse_query_params(query: Option<&str>) -> ListParams {
     params
 }
 
-/// Build a 404 rejection with an `OpenAI`-style error body.
+/// Build a 404 rejection with a Responses API error body.
 fn reject_not_found(id: &str) -> Rejection {
-    let body = serde_json::json!({
-        "error": {
-            "message": format!("No response found with id '{id}'."),
-            "type": "invalid_request_error",
-        }
-    });
-    Rejection::status(404)
-        .with_header("content-type", "application/json")
-        .with_body(serde_json::to_vec(&body).unwrap_or_default())
+    responses_error_rejection(
+        404,
+        "invalid_request_error",
+        &format!("No response found with id '{id}'."),
+        false,
+    )
 }
 
 /// Build a 400 rejection for invalid client-supplied parameters.
 fn reject_invalid_input(message: &str) -> Rejection {
-    let body = serde_json::json!({
-        "error": {
-            "message": message,
-            "type": "invalid_request_error",
-        }
-    });
-    Rejection::status(400)
-        .with_header("content-type", "application/json")
-        .with_body(serde_json::to_vec(&body).unwrap_or_default())
+    responses_error_rejection(400, "invalid_request_error", message, false)
 }
 
 /// Build a 500 rejection for internal store failures.
 fn reject_store_error() -> Rejection {
-    let body = serde_json::json!({
-        "error": {
-            "message": "Internal server error.",
-            "type": "server_error",
-        }
-    });
-    Rejection::status(500)
-        .with_header("content-type", "application/json")
-        .with_body(serde_json::to_vec(&body).unwrap_or_default())
+    responses_error_rejection(500, "server_error", "Internal server error.", false)
 }
