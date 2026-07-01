@@ -20,6 +20,8 @@ mod conditional_filters;
 mod credential_injection;
 mod csrf;
 mod default_config;
+#[cfg(feature = "ext-proc")]
+mod ext_proc_endpoint_selector;
 #[cfg(feature = "ai-inference")]
 mod full_flow;
 mod grpc_detection;

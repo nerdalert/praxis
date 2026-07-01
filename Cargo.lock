@@ -2596,8 +2596,10 @@ dependencies = [
  "bytes",
  "futures",
  "http",
+ "praxis-proxy",
  "praxis-proxy-core",
  "praxis-proxy-filter",
+ "praxis-proxy-proto",
  "praxis-proxy-protocol",
  "praxis-test-utils",
  "rustls",
@@ -2608,7 +2610,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tokio-tungstenite",
+ "tonic",
  "yaml_serde",
 ]
 
