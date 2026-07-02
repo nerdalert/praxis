@@ -47,9 +47,19 @@ influence downstream processing:
 - `ctx.cluster`: select which upstream cluster to route to.
 - `ctx.upstream`: select a specific endpoint.
 - `ctx.rewritten_path`: rewrite the upstream request path.
-- `ctx.extra_request_headers`: inject headers into the upstream request.
-- `ctx.response_header`: mutate response headers directly in `on_response`.
-- `ctx.response_headers_modified`: flag that response headers were changed
+- `ctx.extra_request_headers`: inject headers into the
+  upstream request.
+- `ctx.request_headers_to_set`: overwrite headers on the
+  upstream request.
+- `ctx.request_headers_to_remove`: remove headers from the
+  upstream request.
+- `ctx.filter_metadata`: write durable per-request metadata.
+- `ctx.filter_results`: write results for branch chain
+  evaluation.
+- `ctx.response_header`: mutate response headers directly
+  in `on_response`.
+- `ctx.response_headers_modified`: flag that response
+  headers were changed.
 
 ### Lifecycle Hooks
 
