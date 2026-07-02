@@ -7,6 +7,8 @@ use std::borrow::Cow;
 
 use tracing::{trace, warn};
 
+use super::super::MAX_DYNAMIC_VALUE_LEN;
+
 // -----------------------------------------------------------------------------
 // Field Extraction
 // -----------------------------------------------------------------------------
@@ -25,6 +27,16 @@ pub(super) fn extract_fields(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
+            if text.len() > MAX_DYNAMIC_VALUE_LEN {
+                warn!(
+                    field = %field,
+                    header = %header,
+                    len = text.len(),
+                    max = MAX_DYNAMIC_VALUE_LEN,
+                    "skipping header promotion: value exceeds maximum length"
+                );
+                continue;
+            }
             if contains_control_chars(&text) {
                 warn!(
                     field = %field,
