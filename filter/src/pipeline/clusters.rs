@@ -16,8 +16,10 @@ use praxis_core::config::FilterEntry;
 pub(super) fn extract_selected_clusters(entries: &[FilterEntry]) -> HashSet<String> {
     let mut clusters = HashSet::new();
     for entry in entries {
-        if entry.filter_type == "router" {
-            extract_from_router(&entry.config, &mut clusters);
+        match entry.filter_type.as_str() {
+            "router" => extract_from_router(&entry.config, &mut clusters),
+            "mcp" => extract_from_mcp_broker(&entry.config, &mut clusters),
+            _ => {},
         }
     }
     clusters
@@ -30,6 +32,19 @@ fn extract_from_router(config: &serde_yaml::Value, clusters: &mut HashSet<String
     };
     for route in routes {
         if let Some(cluster) = route.get("cluster").and_then(|v| v.as_str()) {
+            clusters.insert(cluster.to_owned());
+        }
+    }
+}
+
+/// MCP broker `servers[].cluster` entries select clusters the same way
+/// router routes do.
+fn extract_from_mcp_broker(config: &serde_yaml::Value, clusters: &mut HashSet<String>) {
+    let Some(servers) = config.get("servers").and_then(|v| v.as_sequence()) else {
+        return;
+    };
+    for server in servers {
+        if let Some(cluster) = server.get("cluster").and_then(|v| v.as_str()) {
             clusters.insert(cluster.to_owned());
         }
     }
@@ -102,18 +117,46 @@ mod tests {
 
     #[test]
     fn skips_non_cluster_selecting_entries() {
-        let entries = vec![
-            make_entry("ip_acl", "allow: [\"10.0.0.0/8\"]"),
-            make_entry(
-                "custom_filter",
-                "servers:\n  - name: weather\n    cluster: weather-svc\n    tools: []",
-            ),
-        ];
+        let entries = vec![make_entry("ip_acl", "allow: [\"10.0.0.0/8\"]")];
         let clusters = extract_selected_clusters(&entries);
         assert!(
             clusters.is_empty(),
             "non-cluster-selecting entries should yield no clusters"
         );
+    }
+
+    #[test]
+    fn extracts_mcp_broker_clusters() {
+        let entries = vec![make_entry(
+            "mcp",
+            "servers:\n  - name: weather\n    cluster: weather-mcp\n  - name: calendar\n    cluster: cal-mcp",
+        )];
+        let clusters = extract_selected_clusters(&entries);
+        assert_eq!(clusters.len(), 2, "should extract two MCP broker clusters");
+        assert!(clusters.contains("weather-mcp"), "should contain weather-mcp");
+        assert!(clusters.contains("cal-mcp"), "should contain cal-mcp");
+    }
+
+    #[test]
+    fn skips_mcp_classifier_without_servers() {
+        let entries = vec![make_entry("mcp", "max_body_bytes: 65536")];
+        let clusters = extract_selected_clusters(&entries);
+        assert!(
+            clusters.is_empty(),
+            "mcp classifier without servers should yield no clusters"
+        );
+    }
+
+    #[test]
+    fn mcp_broker_and_router_clusters_merged() {
+        let entries = vec![
+            make_entry("router", "routes:\n  - path_prefix: \"/\"\n    cluster: web"),
+            make_entry("mcp", "servers:\n  - name: weather\n    cluster: weather-mcp"),
+        ];
+        let clusters = extract_selected_clusters(&entries);
+        assert_eq!(clusters.len(), 2, "should merge router and mcp clusters");
+        assert!(clusters.contains("web"), "should contain router cluster");
+        assert!(clusters.contains("weather-mcp"), "should contain mcp cluster");
     }
 
     #[test]

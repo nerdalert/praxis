@@ -33,9 +33,9 @@ const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 /// `load_balancer` without a filter that sets `ctx.cluster` will fail
 /// every request with "no cluster selected".
 #[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
-pub(super) fn check_lb_without_cluster_selector(names: &[&str], errors: &mut Vec<String>) {
-    for (i, name) in names.iter().enumerate() {
-        if *name == "load_balancer" && !names[..i].contains(&"router") {
+pub(super) fn check_lb_without_cluster_selector(entries: &[FilterEntry], errors: &mut Vec<String>) {
+    for (i, entry) in entries.iter().enumerate() {
+        if entry.filter_type == "load_balancer" && !entries[..i].iter().any(entry_selects_cluster) {
             errors.push(
                 "load_balancer without a preceding router \
                  or cluster-selecting filter; requests will \
@@ -137,6 +137,29 @@ pub(super) fn check_duplicate_load_balancers(names: &[&str], errors: &mut Vec<St
     }
 }
 
+/// Both `router` and broker-configured `mcp` write `ctx.cluster`; the
+/// later one silently overwrites the earlier selection.
+#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
+pub(super) fn check_conflicting_cluster_selectors(entries: &[FilterEntry], errors: &mut Vec<String>) {
+    for (i, entry) in entries.iter().enumerate() {
+        if entry.filter_type != "load_balancer" {
+            continue;
+        }
+        let preceding = &entries[..i];
+        let has_router = preceding.iter().any(|e| e.filter_type == "router");
+        let has_mcp_broker = preceding.iter().any(is_mcp_broker_entry);
+        if has_router && has_mcp_broker {
+            errors.push(
+                "pipeline contains both 'router' and broker-configured \
+                 'mcp' before load_balancer; only the last one's \
+                 cluster selection will take effect"
+                    .to_owned(),
+            );
+            return;
+        }
+    }
+}
+
 /// Every cluster selected by a pipeline filter must be defined by the
 /// load balancer that will consume `ctx.cluster`.
 pub(super) fn check_misaligned_clusters(entries: &[FilterEntry], errors: &mut Vec<String>) {
@@ -165,6 +188,29 @@ pub(super) fn check_misaligned_clusters(entries: &[FilterEntry], errors: &mut Ve
             );
         }
     }
+}
+
+/// Returns `true` when the filter entry is a cluster-selecting filter.
+///
+/// `router` always selects clusters. `mcp` selects clusters only
+/// in broker mode (when `servers` is configured).
+fn entry_selects_cluster(entry: &FilterEntry) -> bool {
+    match entry.filter_type.as_str() {
+        "router" => true,
+        "mcp" => is_mcp_broker_entry(entry),
+        _ => false,
+    }
+}
+
+/// Broker mode is identified by the `servers` list because classifier-only
+/// MCP filters do not select clusters for load balancing.
+fn is_mcp_broker_entry(entry: &FilterEntry) -> bool {
+    entry.filter_type == "mcp"
+        && entry
+            .config
+            .get("servers")
+            .and_then(|servers| servers.as_sequence())
+            .is_some()
 }
 
 /// Multiple path rewriting filters (`path_rewrite` / `url_rewrite`).
@@ -284,9 +330,9 @@ mod tests {
 
     #[test]
     fn lb_without_router_errors() {
-        let names = vec!["load_balancer"];
+        let entries = vec![make_entry("load_balancer", "clusters: []")];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
+        check_lb_without_cluster_selector(&entries, &mut errors);
         assert_eq!(errors.len(), 1, "should produce exactly one error");
         assert!(
             errors[0].contains("load_balancer without a preceding router"),
@@ -297,38 +343,178 @@ mod tests {
 
     #[test]
     fn lb_with_router_no_error() {
-        let names = vec!["router", "load_balancer"];
+        let entries = vec![
+            make_entry("router", "routes: []"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
+        check_lb_without_cluster_selector(&entries, &mut errors);
         assert!(errors.is_empty(), "router before LB should produce no errors");
     }
 
     #[test]
     fn lb_with_only_non_cluster_filter_errors() {
-        let names = vec!["custom_filter", "load_balancer"];
+        let entries = vec![
+            make_entry("custom_filter", "{}"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
+        check_lb_without_cluster_selector(&entries, &mut errors);
         assert_eq!(errors.len(), 1);
         assert!(
             errors[0].contains("load_balancer without a preceding router"),
-            "non-cluster-selecting filter should not satisfy router requirement: {}",
+            "non-cluster-selecting filter should not satisfy requirement: {}",
             errors[0]
         );
     }
 
     #[test]
-    fn non_cluster_filter_with_router_no_error() {
-        let names = vec!["custom_filter", "router", "load_balancer"];
+    fn mcp_broker_before_lb_no_error() {
+        let entries = vec![
+            make_entry("mcp", "servers:\n  - name: s\n    cluster: c"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
-        assert!(errors.is_empty());
+        check_lb_without_cluster_selector(&entries, &mut errors);
+        assert!(errors.is_empty(), "mcp broker before LB should produce no errors");
+    }
+
+    #[test]
+    fn classifier_mcp_before_lb_errors() {
+        let entries = vec![
+            make_entry("mcp", "max_body_bytes: 65536"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
+        let mut errors = Vec::new();
+        check_lb_without_cluster_selector(&entries, &mut errors);
+        assert_eq!(errors.len(), 1, "classifier-only mcp before LB should error");
+    }
+
+    #[test]
+    fn mcp_with_non_sequence_servers_before_lb_errors() {
+        let entries = vec![
+            make_entry("mcp", "servers: invalid"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
+        let mut errors = Vec::new();
+        check_lb_without_cluster_selector(&entries, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "mcp with malformed servers should not satisfy cluster selector requirement"
+        );
+    }
+
+    #[test]
+    fn classifier_mcp_then_router_then_lb_no_error() {
+        let entries = vec![
+            make_entry("mcp", "max_body_bytes: 65536"),
+            make_entry("router", "routes: []"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
+        let mut errors = Vec::new();
+        check_lb_without_cluster_selector(&entries, &mut errors);
+        assert!(errors.is_empty(), "classifier mcp -> router -> LB should be valid");
+    }
+
+    #[test]
+    fn router_and_mcp_broker_conflict_rejected() {
+        let entries = vec![
+            make_entry("router", "routes: []"),
+            make_entry("mcp", "servers:\n  - name: s\n    cluster: c"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&entries, &mut errors);
+        assert_eq!(errors.len(), 1, "router+broker mcp should produce a conflict error");
+        assert!(
+            errors[0].contains("both 'router' and broker-configured 'mcp'"),
+            "error should mention conflicting selectors: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn mcp_broker_and_router_conflict_rejected() {
+        let entries = vec![
+            make_entry("mcp", "servers:\n  - name: s\n    cluster: c"),
+            make_entry("router", "routes: []"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&entries, &mut errors);
+        assert_eq!(errors.len(), 1, "broker mcp+router should produce a conflict error");
+    }
+
+    #[test]
+    fn classifier_mcp_and_router_no_conflict() {
+        let entries = vec![
+            make_entry("mcp", "max_body_bytes: 65536"),
+            make_entry("router", "routes: []"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&entries, &mut errors);
+        assert!(errors.is_empty(), "classifier mcp + router should not conflict");
+    }
+
+    #[test]
+    fn non_mcp_servers_config_and_router_no_conflict() {
+        let entries = vec![
+            make_entry("custom_filter", "servers:\n  - name: s\n    cluster: c"),
+            make_entry("router", "routes: []"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&entries, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "only broker-configured mcp entries should conflict with router"
+        );
+    }
+
+    #[test]
+    fn mcp_broker_without_router_no_conflict() {
+        let entries = vec![
+            make_entry("mcp", "servers:\n  - name: s\n    cluster: c"),
+            make_entry("load_balancer", "clusters: []"),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&entries, &mut errors);
+        assert!(errors.is_empty(), "broker mcp without router should not conflict");
+    }
+
+    #[test]
+    fn router_and_mcp_broker_without_lb_no_conflict() {
+        let entries = vec![
+            make_entry("router", "routes: []"),
+            make_entry("mcp", "servers:\n  - name: s\n    cluster: c"),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&entries, &mut errors);
+        assert!(errors.is_empty(), "router+broker mcp without LB should not conflict");
+    }
+
+    #[test]
+    fn router_after_lb_does_not_conflict_with_mcp_broker_before_lb() {
+        let entries = vec![
+            make_entry("mcp", "servers:\n  - name: s\n    cluster: c"),
+            make_entry("load_balancer", "clusters: []"),
+            make_entry("router", "routes: []"),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&entries, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "conflict check should only consider selectors before the load balancer"
+        );
     }
 
     #[test]
     fn no_lb_no_error() {
-        let names = vec!["router", "ip_acl"];
+        let entries = vec![make_entry("router", "routes: []")];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
+        check_lb_without_cluster_selector(&entries, &mut errors);
         assert!(errors.is_empty(), "no LB present should produce no errors");
     }
 
@@ -573,6 +759,25 @@ mod tests {
         let mut errors = Vec::new();
         check_misaligned_clusters(&entries, &mut errors);
         assert!(errors.is_empty(), "aligned clusters should produce no errors");
+    }
+
+    #[test]
+    fn mcp_broker_missing_cluster_reference_rejected() {
+        let entries = vec![
+            make_entry("mcp", "servers:\n  - name: weather\n    cluster: missing-mcp-cluster"),
+            make_entry(
+                "load_balancer",
+                "clusters:\n  - name: other\n    endpoints: [\"1.2.3.4:80\"]",
+            ),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&entries, &mut errors);
+        assert_eq!(errors.len(), 1, "should produce exactly one error");
+        assert!(
+            errors[0].contains("missing-mcp-cluster") && errors[0].contains("not defined"),
+            "error should mention the missing MCP cluster: {}",
+            errors[0]
+        );
     }
 
     #[test]
