@@ -46,6 +46,8 @@ mod cors;
 mod csrf;
 mod downstream_read_timeout;
 mod examples;
+#[cfg(feature = "ext-proc")]
+mod ext_proc;
 mod failure_mode;
 mod filter_composition;
 mod filter_metadata;
