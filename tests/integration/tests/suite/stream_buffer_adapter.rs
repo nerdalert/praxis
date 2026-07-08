@@ -222,7 +222,7 @@ fn registry_with_header_mutator() -> praxis_filter::FilterRegistry {
 }
 
 // -----------------------------------------------------------------------------
-// YAML Helpers
+// YAML Utilities
 // -----------------------------------------------------------------------------
 
 fn mutator_yaml(proxy_port: u16, backend_port: u16) -> String {
