@@ -209,7 +209,7 @@ audit:
 	cargo deny check
 
 PUBLISH_CRATES := praxis-proxy-tls praxis-proxy-core \
-	praxis-proxy-filter praxis-proxy-protocol praxis-proxy
+	praxis-proxy-filter praxis-proxy-ext-proc praxis-proxy-protocol praxis-proxy
 
 publish-dry-run:
 	@for crate in $(PUBLISH_CRATES); do \

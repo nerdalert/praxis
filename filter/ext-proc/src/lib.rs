@@ -43,11 +43,14 @@
 //! use praxis_filter::FilterRegistry;
 //!
 //! let mut registry = FilterRegistry::with_builtins();
-//! registry.register(
-//!     "ext_proc",
-//!     praxis_filter::http_builtin(praxis_ext_proc::ExtProcFilter::from_config),
-//! ).unwrap();
+//! praxis_ext_proc::register_filters(&mut registry);
 //! ```
+//!
+//! # Protocol Types
+//!
+//! Generated Envoy protobuf and gRPC types are exposed under [`proto`]
+//! so downstream tests and external processor implementations can use
+//! the same vendored protocol definitions as the filter.
 //!
 //! [`HttpFilter`]: praxis_filter::HttpFilter
 //! [`FilterRegistry::with_builtins`]: praxis_filter::FilterRegistry::with_builtins
@@ -59,7 +62,7 @@
 mod callout;
 pub(crate) mod duplex;
 mod mutations;
-pub(crate) mod proto;
+pub mod proto;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -1159,6 +1162,10 @@ impl HttpFilter for ExtProcFilter {
             .await,
         ))
     }
+}
+
+praxis_filter::export_filters! {
+    http "ext_proc" => ExtProcFilter::from_config,
 }
 
 #[cfg(test)]

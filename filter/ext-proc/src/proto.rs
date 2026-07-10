@@ -8,14 +8,17 @@
 //!
 //! Compiled from vendored `.proto` files at build time.
 
+/// Envoy API protobuf modules.
 #[allow(
     clippy::allow_attributes,
     clippy::missing_docs_in_private_items,
     reason = "generated protobuf module tree"
 )]
-pub(crate) mod envoy {
-    pub(crate) mod service {
-        pub(crate) mod common {
+pub mod envoy {
+    /// Envoy service protobuf modules.
+    pub mod service {
+        /// Shared Envoy service protobuf types.
+        pub mod common {
             #[allow(
                 dead_code,
                 missing_docs,
@@ -41,7 +44,8 @@ pub(crate) mod envoy {
             }
         }
 
-        pub(crate) mod ext_proc {
+        /// Envoy external processing protobuf types and gRPC service.
+        pub mod ext_proc {
             #[allow(
                 dead_code,
                 missing_docs,
@@ -57,6 +61,7 @@ pub(crate) mod envoy {
                 clippy::doc_markdown,
                 clippy::enum_variant_names,
                 clippy::missing_docs_in_private_items,
+                clippy::missing_errors_doc,
                 clippy::needless_borrows_for_generic_args,
                 clippy::too_many_lines,
                 clippy::trivially_copy_pass_by_ref,

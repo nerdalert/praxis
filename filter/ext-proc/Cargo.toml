@@ -8,7 +8,7 @@ description = "Envoy-compatible ext_proc filter for Praxis"
 license = "MIT AND Apache-2.0 AND BSD-3-Clause"
 repository.workspace = true
 readme = "../../README.md"
-publish = false
+publish = true
 
 [lib]
 name = "praxis_ext_proc"
