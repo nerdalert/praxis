@@ -60,13 +60,18 @@ pub struct BranchChainConfig {
     #[serde(default)]
     pub on_result: Option<BranchCondition>,
 
-    /// Where to resume in the parent chain after the
-    /// branch completes.
+    /// Where to resume in the parent pipeline after the branch.
     ///
     /// - `"next"` (default): continue after the branch point
-    /// - `"terminal"` or `"client"`: stop the parent chain
-    /// - `"<name>"`: skip to a named filter in the parent chain
-    /// - `"<chain>:<name>"` or `"<chain>:<index>"`: skip to a filter in a named chain
+    /// - `"terminal"` or `"client"`: stop the pipeline
+    /// - `"<name>"`: skip to a named filter in the pipeline
+    ///
+    /// Named targets work across chains because all listener
+    /// chains are concatenated into one flat pipeline. Forward
+    /// targets become `SkipTo`; backward targets become
+    /// `ReEnter` (which requires [`max_iterations`]).
+    ///
+    /// [`max_iterations`]: BranchChainConfig::max_iterations
     #[serde(default = "default_rejoin")]
     pub rejoin: String,
 }
@@ -101,7 +106,14 @@ fn default_rejoin() -> String {
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BranchCondition {
-    /// Name of the filter whose results to inspect.
+    /// Filter TYPE name whose results to inspect.
+    ///
+    /// Must match the return value of [`HttpFilter::name()`] (e.g.,
+    /// `"guardrails"`, `"json_rpc"`), NOT the user-assigned `name`
+    /// on [`FilterEntry`].
+    ///
+    /// [`HttpFilter::name()`]: https://docs.rs/praxis-filter/latest/praxis_filter/trait.HttpFilter.html#tymethod.name
+    /// [`FilterEntry`]: super::FilterEntry
     pub filter: String,
 
     /// Result key to check (default: "status").
@@ -110,6 +122,8 @@ pub struct BranchCondition {
 
     /// Expected result value. Branch fires when the
     /// filter's result for `key` equals this value.
+    ///
+    /// In YAML this field is written as `result:`, not `value:`.
     #[serde(rename = "result")]
     pub value: String,
 }

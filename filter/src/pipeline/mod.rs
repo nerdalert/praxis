@@ -1,7 +1,34 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Filter pipeline: ordered chain of filters executed on each request.
+//! Filter pipeline engine: the runtime representation of a listener's
+//! filter processing.
+//!
+//! ## Module Layout
+//!
+//! | Module | Responsibility |
+//! |---|---|
+//! | [`build`] | `FilterPipeline` construction from config entries |
+//! | [`build_branch`] | Recursive branch chain resolution |
+//! | [`http`] | Request, response, and body execution loops |
+//! | [`tcp`] | Connect/disconnect execution |
+//! | [`evaluate`] | Branch condition checking and dispatch |
+//! | [`branch`] | Runtime branch types ([`ResolvedBranch`], [`BranchOutcome`]) |
+//! | [`filter`] | [`PipelineFilter`] — the per-filter wrapper |
+//! | [`body`] | Body chunk processing utilities |
+//! | [`checks`] | Ordering validation (router before LB, etc.) |
+//! | [`clusters`] | Cluster reference collection |
+//! | [`extension`] | [`PipelineExtension`] trait for injecting per-request resources |
+//!
+//! At runtime, chains do not exist. All listener chains are
+//! concatenated into a flat `Vec<PipelineFilter>`. Branch chains are
+//! stored as nested `Vec<PipelineFilter>` inside each filter's
+//! [`branches`] field.
+//!
+//! [`ResolvedBranch`]: branch::ResolvedBranch
+//! [`BranchOutcome`]: branch::BranchOutcome
+//! [`PipelineFilter`]: filter::PipelineFilter
+//! [`branches`]: filter::PipelineFilter::branches
 
 pub(crate) mod body;
 pub(crate) mod branch;
@@ -75,6 +102,9 @@ pub struct FilterPipeline {
 
     /// Ordered list of filters with their conditions and branches.
     pub(crate) filters: Vec<PipelineFilter>,
+
+    /// Whether per-filter duration metrics are recorded.
+    record_filter_duration_metrics: bool,
 
     /// Shared health registry for endpoint health lookups.
     health_registry: Option<HealthRegistry>,
@@ -178,6 +208,16 @@ impl FilterPipeline {
     /// Set the shared [`HealthRegistry`] for this pipeline.
     pub fn set_health_registry(&mut self, registry: HealthRegistry) {
         self.health_registry = Some(registry);
+    }
+
+    /// Enable or disable recording of per-filter duration metrics.
+    pub fn set_record_filter_duration_metrics(&mut self, enabled: bool) {
+        self.record_filter_duration_metrics = enabled;
+    }
+
+    /// Whether per-filter duration metrics are recorded.
+    pub fn records_filter_duration_metrics(&self) -> bool {
+        self.record_filter_duration_metrics
     }
 
     /// The shared health registry, if set.

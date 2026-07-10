@@ -36,6 +36,15 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - { name: Schema, target: test-schema }
+          - { name: Security, target: test-security }
+          - { name: Resilience, target: test-resilience }
+          - { name: Integration, target: test-integration }
+    name: ${{ matrix.suite.name }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -55,15 +64,5 @@ jobs:
             ${{ runner.os }}-rust-1.96.0-cargo-
           save-always: true
 
-      - name: Schema tests
-        run: make test-schema
-
-      - name: Security tests
-        run: make test-security
-
-      - name: Resilience tests
-        run: make test-resilience
-
-      - name: Integration tests
-        run: make test-integration
-
+      - name: ${{ matrix.suite.name }} tests
+        run: make ${{ matrix.suite.target }}

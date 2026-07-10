@@ -53,6 +53,7 @@ impl FilterPipeline {
             body_capabilities,
             compression,
             filters,
+            record_filter_duration_metrics: false,
             health_registry: None,
             id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,
@@ -66,6 +67,12 @@ impl FilterPipeline {
     /// Like [`build`], but also resolves `branch_chains` on each
     /// filter entry into runtime `ResolvedBranch` types using
     /// the provided chain lookup table.
+    ///
+    /// The `chains` parameter is the **top-level** chain lookup
+    /// table (all `filter_chains` from the config), used to
+    /// resolve `ChainRef::Named` entries inside branch
+    /// configurations. The actual filters for this pipeline come
+    /// from `entries`.
     ///
     /// # Errors
     ///
@@ -85,6 +92,7 @@ impl FilterPipeline {
             body_capabilities,
             compression,
             filters,
+            record_filter_duration_metrics: false,
             health_registry: None,
             id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,

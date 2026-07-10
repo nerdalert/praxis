@@ -1,7 +1,29 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Branch evaluation and execution for HTTP pipeline.
+//! Branch evaluation and execution during the HTTP request phase.
+//!
+//! Called by [`execute_http_request`] after each filter runs.
+//! [`evaluate_branches`] checks every branch on the current filter:
+//!
+//! 1. Does the [`on_result`] condition match `ctx.filter_results`?
+//! 2. Is the re-entrance limit (if any) still within bounds?
+//! 3. Execute the branch's filter list.
+//! 4. Map the rejoin target to a [`BranchOutcome`] that controls the parent while-loop index.
+//!
+//! **First-match-wins**: once a branch fires and produces a
+//! non-[`Continue`] outcome, evaluation stops.
+//!
+//! **Results clearing**: `ctx.filter_results` is cleared after
+//! branch evaluation at each filter. For [`ReEnter`], results
+//! are also cleared to prevent stale data from re-triggering
+//! conditional branches without the filter re-executing.
+//!
+//! [`execute_http_request`]: super::FilterPipeline::execute_http_request
+//! [`on_result`]: praxis_core::config::BranchChainConfig::on_result
+//! [`BranchOutcome`]: super::branch::BranchOutcome
+//! [`Continue`]: super::branch::BranchOutcome::Continue
+//! [`ReEnter`]: super::branch::RejoinTarget::ReEnter
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -134,6 +156,11 @@ async fn execute_branch_filters(
 ///
 /// Returns `Some(action)` when the parent should stop iteration
 /// (terminal or reject), `None` to continue.
+///
+/// `SkipTo` and `ReEnter` from nested branches are **deliberately
+/// discarded** because they reference indices in the parent
+/// pipeline, which the nested branch has no authority to control.
+/// Only `Terminal` and `Reject` propagate upward.
 async fn dispatch_nested_outcome(
     branches: &[ResolvedBranch],
     ctx: &mut HttpFilterContext<'_>,

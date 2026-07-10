@@ -21,6 +21,15 @@ use crate::any_filter::AnyFilter;
 /// optional user-assigned name.
 pub(crate) struct PipelineFilter {
     /// Optional user-assigned name for rejoin targeting.
+    ///
+    /// From [`FilterEntry::name`] in YAML config (e.g.,
+    /// `name: routing`). Distinct from `self.filter.name()`, which
+    /// returns the filter TYPE name (e.g., `"router"`).
+    ///
+    /// - `on_result.filter` in branch conditions matches the TYPE name
+    /// - `rejoin` targets match this USER name
+    ///
+    /// [`FilterEntry::name`]: praxis_core::config::FilterEntry::name
     pub(crate) name: Option<Arc<str>>,
 
     /// Branches evaluated after this filter.

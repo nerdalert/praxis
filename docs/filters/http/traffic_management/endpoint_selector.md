@@ -16,14 +16,14 @@ The resolved value must be a single `host:port` authority. If no trusted value i
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `connection` | EndpointConnectionConfig | no | Optional connection tuning for selected upstreams. |
-| `connection.connection_timeout_ms` | u64 | no | TCP connection timeout in milliseconds. |
-| `connection.idle_timeout_ms` | u64 | no | Idle connection timeout in milliseconds. |
-| `connection.read_timeout_ms` | u64 | no | Per-read timeout in milliseconds. |
-| `connection.total_connection_timeout_ms` | u64 | no | Total TCP and TLS connection timeout in milliseconds. |
-| `connection.write_timeout_ms` | u64 | no | Per-write timeout in milliseconds. |
+| `connection.connection_timeout_ms` | integer | no | TCP connection timeout in milliseconds. |
+| `connection.idle_timeout_ms` | integer | no | Idle connection timeout in milliseconds. |
+| `connection.read_timeout_ms` | integer | no | Per-read timeout in milliseconds. |
+| `connection.total_connection_timeout_ms` | integer | no | Total TCP and TLS connection timeout in milliseconds. |
+| `connection.write_timeout_ms` | integer | no | Per-write timeout in milliseconds. |
 | `required` | bool | no | Whether the destination header is required (fail-closed). When `true`, requests without a trusted destination header are rejected. Use for compositions where an external processor is expected to always supply a destination. |
 | `source_header` | string | yes | The request header to read the upstream endpoint address from. |
-| `status_on_required_failure` | u16 | no | HTTP status code for required-mode routing failures. Only used when `required: true`. Defaults to 500. Compositions with required external processing typically set 503. |
+| `status_on_required_failure` | integer | no | HTTP status code for required-mode routing failures. Only used when `required: true`. Defaults to 500. Compositions with required external processing typically set 503. |
 | `strip_header` | bool | no | Whether to remove the source header after reading it. |
 | `tls` | ClusterTls | no | Optional TLS settings for selected upstreams. Certificates and keys are loaded and parsed once when the filter is constructed, never on a request path. |
 | `tls.ca` | CaConfig | no | Custom CA. |

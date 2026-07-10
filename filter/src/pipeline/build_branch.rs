@@ -1,7 +1,37 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Branch chain resolution for filter pipeline construction.
+//! Branch chain resolution: config [`BranchChainConfig`]s become
+//! runtime [`ResolvedBranch`]es.
+//!
+//! This module handles the branch-aware build path. The simpler
+//! [`FilterPipeline::build`](super::FilterPipeline::build) (in
+//! [`build`]) skips branch resolution;
+//! [`FilterPipeline::build_with_chains`](super::FilterPipeline::build_with_chains)
+//! delegates here via [`resolve_chain_filters`].
+//!
+//! ## Resolution flow
+//!
+//! 1. [`build_filters`] instantiates `PipelineFilter`s and extracts `branch_chains` from each entry.
+//! 2. [`build_name_index`] maps user-assigned filter names to their pipeline index (for rejoin targeting).
+//! 3. [`attach_branches`] resolves each `BranchChainConfig` into a `ResolvedBranch`, recursively resolving nested
+//!    branches.
+//!
+//! A shared `next_filter_id` counter threads through all recursive
+//! calls so every filter instance — including those inside branches
+//! — gets a globally unique ID.
+//!
+//! ## Two kinds of "name"
+//!
+//! - **Filter type name** (`HttpFilter::name()`, e.g. `"router"`): stored in [`pipeline_filter_type_names`], used to
+//!   validate `on_result.filter` references in branch conditions.
+//! - **User-assigned name** (`FilterEntry::name`, e.g. `"routing"`): stored in the name index, used for `rejoin`
+//!   targeting.
+//!
+//! [`BranchChainConfig`]: praxis_core::config::BranchChainConfig
+//! [`ResolvedBranch`]: super::branch::ResolvedBranch
+//! [`build`]: super::build
+//! [`pipeline_filter_type_names`]: BuildContext::pipeline_filter_type_names
 
 use std::{collections::HashMap, mem, sync::Arc};
 
@@ -26,8 +56,14 @@ struct BuildContext<'a> {
     /// Shared counter for unique filter invocation IDs.
     next_filter_id: &'a mut usize,
 
-    /// Filter type names from the current pipeline, for `on_result` validation.
-    pipeline_filter_names: Vec<&'a str>,
+    /// Filter TYPE names (from [`HttpFilter::name()`]) for the current
+    /// pipeline level. Used to validate `on_result.filter` references.
+    /// Distinct from user-assigned [`FilterEntry::name`] values used
+    /// for rejoin targeting.
+    ///
+    /// [`HttpFilter::name()`]: crate::HttpFilter::name
+    /// [`FilterEntry::name`]: praxis_core::config::FilterEntry::name
+    pipeline_filter_type_names: Vec<&'a str>,
 
     /// Filter registry for instantiating filters.
     registry: &'a FilterRegistry,
@@ -66,11 +102,11 @@ fn resolve_chain_filters_with_counter(
         return Err(format!("branch nesting depth exceeds maximum ({MAX_BRANCH_DEPTH})").into());
     }
     let (mut filters, branch_configs) = build_filters(entries, registry, next_filter_id)?;
-    let pipeline_filter_names: Vec<&str> = filters.iter().map(|pf| pf.filter.name()).collect();
+    let pipeline_filter_type_names: Vec<&str> = filters.iter().map(|pf| pf.filter.name()).collect();
     let mut bctx = BuildContext {
         chains,
         next_filter_id,
-        pipeline_filter_names,
+        pipeline_filter_type_names,
         registry,
     };
     let name_index = build_name_index(&filters);
@@ -184,7 +220,7 @@ fn resolve_single_branch(
     depth: usize,
 ) -> Result<ResolvedBranch, FilterError> {
     let condition = config.on_result.as_ref().map(resolve_condition);
-    check_on_result_filter(config, &bctx.pipeline_filter_names)?;
+    check_on_result_filter(config, &bctx.pipeline_filter_type_names)?;
     let branch_filters = resolve_chain_refs(&config.chains, bctx, depth + 1)?;
     let rejoin = resolve_rejoin(&config.rejoin, name_index, current_idx)?;
     if matches!(rejoin, RejoinTarget::ReEnter(_)) && config.max_iterations.is_none() {
@@ -208,10 +244,11 @@ fn resolve_single_branch(
 // Condition Resolution
 // ---------------------------------------------------------------------------
 
-/// Reject configs where `on_result.filter` does not match any filter type name in the pipeline.
-fn check_on_result_filter(config: &BranchChainConfig, pipeline_filter_names: &[&str]) -> Result<(), FilterError> {
+/// Reject configs where `on_result.filter` does not match any filter
+/// TYPE name in the pipeline.
+fn check_on_result_filter(config: &BranchChainConfig, pipeline_filter_type_names: &[&str]) -> Result<(), FilterError> {
     if let Some(cond) = &config.on_result
-        && !on_result_filter_in_pipeline(&cond.filter, pipeline_filter_names)
+        && !on_result_filter_type_in_pipeline(&cond.filter, pipeline_filter_type_names)
     {
         return Err(FilterError::from(format!(
             "branch '{}': on_result.filter '{}' does not match any filter type in this pipeline",
@@ -221,9 +258,12 @@ fn check_on_result_filter(config: &BranchChainConfig, pipeline_filter_names: &[&
     Ok(())
 }
 
-/// Check if the `on_result.filter` name matches any filter type name in the pipeline.
-fn on_result_filter_in_pipeline(filter_name: &str, pipeline_filter_names: &[&str]) -> bool {
-    pipeline_filter_names.contains(&filter_name)
+/// Check if the `on_result.filter` value matches any filter TYPE name
+/// (from [`HttpFilter::name()`]) in the pipeline.
+///
+/// [`HttpFilter::name()`]: crate::HttpFilter::name
+fn on_result_filter_type_in_pipeline(filter_name: &str, pipeline_filter_type_names: &[&str]) -> bool {
+    pipeline_filter_type_names.contains(&filter_name)
 }
 
 /// Convert a [`BranchCondition`] to a runtime [`ResolvedBranchCondition`].
@@ -527,7 +567,7 @@ mod tests {
         let mut bctx = BuildContext {
             chains: &chains,
             next_filter_id: &mut next_id,
-            pipeline_filter_names: vec![],
+            pipeline_filter_type_names: vec![],
             registry: &registry,
         };
         let refs = vec![ChainRef::Named("nonexistent".to_owned())];
@@ -639,7 +679,7 @@ mod tests {
     #[test]
     fn on_result_filter_found_in_pipeline() {
         assert!(
-            on_result_filter_in_pipeline("router", &["headers", "router", "static_response"]),
+            on_result_filter_type_in_pipeline("router", &["headers", "router", "static_response"]),
             "filter present in pipeline should match"
         );
     }
@@ -647,7 +687,7 @@ mod tests {
     #[test]
     fn on_result_filter_not_found_in_pipeline() {
         assert!(
-            !on_result_filter_in_pipeline("nonexistent", &["headers", "router", "static_response"]),
+            !on_result_filter_type_in_pipeline("nonexistent", &["headers", "router", "static_response"]),
             "filter absent from pipeline should not match"
         );
     }
@@ -655,7 +695,7 @@ mod tests {
     #[test]
     fn on_result_filter_empty_pipeline() {
         assert!(
-            !on_result_filter_in_pipeline("router", &[]),
+            !on_result_filter_type_in_pipeline("router", &[]),
             "empty pipeline should not match any filter"
         );
     }

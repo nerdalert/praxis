@@ -34,6 +34,10 @@
 
 - [Overview](architecture/overview.md):
   design principles, protocol adapters, filter-first design
+- [Pipeline Concepts](architecture/pipeline-concepts.md):
+  chains, pipelines, filter results, naming
+- [Life of a Request](architecture/life-of-a-request.md):
+  step-by-step request walkthrough
 - [Connection Lifecycle](architecture/connection-lifecycle.md):
   HTTP and TCP request flow
 - [Payload Processing](architecture/payload-processing.md):
@@ -47,6 +51,8 @@
 
 - [Filter System](filters/README.md):
   traits, context, body access, pipeline
+- [Branch Chains](filters/branch-chains.md):
+  conditional branching in pipelines
 - [Extensions](filters/extensions.md):
   custom filter tutorial, best practices
 

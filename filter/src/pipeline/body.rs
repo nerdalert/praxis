@@ -73,7 +73,7 @@ pub(super) fn accumulate_caps(caps: &mut BodyCapabilities, filters: &[PipelineFi
         };
 
         accumulate_request_body(caps, http_filter);
-        accumulate_response_body(caps, http_filter);
+        accumulate_response_body(caps, http_filter, &pf.response_conditions);
 
         if http_filter.needs_request_context() {
             caps.needs_request_context = true;
@@ -101,10 +101,17 @@ fn accumulate_request_body(caps: &mut BodyCapabilities, filter: &dyn crate::filt
 }
 
 /// Accumulate response body capabilities from a single filter.
-fn accumulate_response_body(caps: &mut BodyCapabilities, filter: &dyn crate::filter::HttpFilter) {
+fn accumulate_response_body(
+    caps: &mut BodyCapabilities,
+    filter: &dyn crate::filter::HttpFilter,
+    response_conditions: &[ResponseCondition],
+) {
     let access = filter.response_body_access();
     if access != BodyAccess::None {
         caps.needs_response_body = true;
+        if !response_conditions.is_empty() {
+            caps.any_response_body_condition = true;
+        }
         if access == BodyAccess::ReadWrite {
             caps.any_response_body_writer = true;
         }
@@ -278,6 +285,45 @@ mod tests {
         assert!(
             resp_conditions_use_headers(&conds),
             "should return true for Unless variant with headers"
+        );
+    }
+
+    #[test]
+    fn body_caps_marks_response_body_conditions_for_status_only() {
+        use crate::{FilterAction, FilterError};
+
+        /// Minimal response-body filter for capability tests.
+        struct ResponseBodyFilter;
+
+        #[async_trait::async_trait]
+        impl crate::HttpFilter for ResponseBodyFilter {
+            fn name(&self) -> &'static str {
+                "response_body"
+            }
+
+            async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::Continue)
+            }
+
+            fn response_body_access(&self) -> BodyAccess {
+                BodyAccess::ReadOnly
+            }
+        }
+
+        let conditions = vec![ResponseCondition::When(ResponseConditionMatch {
+            status: Some(vec![200]),
+            headers: None,
+        })];
+        let filter = PipelineFilter::new(0, AnyFilter::Http(Box::new(ResponseBodyFilter)), vec![], conditions);
+        let caps = compute_body_capabilities(&[filter]);
+
+        assert!(
+            caps.any_response_body_condition,
+            "status-only response body conditions should require response header snapshots"
+        );
+        assert!(
+            !caps.any_response_condition_uses_headers,
+            "status-only conditions should not set the header-specific flag"
         );
     }
 

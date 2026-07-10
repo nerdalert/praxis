@@ -1,7 +1,24 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Filter pipeline resolution for server listeners.
+//! Config-to-runtime bridge: builds a [`FilterPipeline`] for each listener.
+//!
+//! This module is the single point where YAML configuration becomes a
+//! running pipeline. The sequence per listener is:
+//!
+//! 1. Index top-level [`FilterChainConfig`]s by name.
+//! 2. Concatenate the listener's named chains into a flat `Vec<FilterEntry>`.
+//! 3. Instantiate filters via the [`FilterRegistry`] and resolve branch chains ([`FilterPipeline::build_with_chains`]).
+//! 4. Apply body limits, health registry, and KV stores ([`configure_pipeline`]).
+//! 5. Validate ordering constraints ([`validate_pipeline`]).
+//!
+//! After this module runs, chains no longer exist as a concept —
+//! everything is a flat `Vec<PipelineFilter>` inside
+//! [`FilterPipeline`].
+//!
+//! [`FilterChainConfig`]: praxis_core::config::FilterChainConfig
+//! [`FilterPipeline`]: praxis_filter::FilterPipeline
+//! [`FilterRegistry`]: praxis_filter::FilterRegistry
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -14,6 +31,10 @@ use praxis_protocol::ListenerPipelines;
 // -----------------------------------------------------------------------------
 
 /// Build a [`FilterPipeline`] for each listener by resolving named chains.
+///
+/// This is the config-to-runtime bridge. After it returns, the concept
+/// of "chains" no longer exists — each listener has a flat pipeline of
+/// filters in execution order.
 ///
 /// # Errors
 ///
@@ -72,6 +93,7 @@ fn configure_pipeline(
         config.body_limits.max_response_bytes,
         config.insecure_options.allow_unbounded_body,
     )?;
+    pipeline.set_record_filter_duration_metrics(config.metrics.filter_duration);
     if !health_registry.is_empty() {
         pipeline.set_health_registry(Arc::clone(health_registry));
     }
@@ -415,6 +437,39 @@ filter_chains:
         let registry = FilterRegistry::with_builtins();
         let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
         assert!(result.is_ok(), "allow_open_security_filters should permit open ip_acl");
+    }
+
+    #[test]
+    fn resolve_pipelines_applies_filter_duration_config() {
+        let config = Config::from_yaml(
+            r#"
+metrics:
+  filter_duration: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["10.0.0.1:80"]
+"#,
+        )
+        .unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores()).unwrap();
+        let pipeline = pipelines.get("web").unwrap().load();
+        assert!(
+            pipeline.records_filter_duration_metrics(),
+            "filter_duration config should enable per-filter duration metrics"
+        );
     }
 
     #[test]

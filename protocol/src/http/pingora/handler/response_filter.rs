@@ -39,6 +39,17 @@ pub(super) async fn execute(
     ctx.upstream_response_status = Some(upstream_response.status.as_u16());
 
     let (result, headers_modified) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
+    let should_snapshot_response_header = pipeline.body_capabilities().any_response_body_condition
+        && matches!(
+            &result,
+            Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone)
+        );
+    if should_snapshot_response_header {
+        ctx.response_header_snapshot = Some(praxis_filter::Response {
+            headers: resp.headers.clone(),
+            status: resp.status,
+        });
+    }
     handle_response_result(result, upstream_response, resp, headers_modified)
 }
 

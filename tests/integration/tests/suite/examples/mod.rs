@@ -17,6 +17,8 @@ mod circuit_breaker;
 mod conditional_filters;
 mod csrf;
 mod default_config;
+#[cfg(feature = "ext-proc")]
+mod ext_proc_endpoint_selector;
 mod grpc_detection;
 mod guardrails;
 mod header_manipulation;

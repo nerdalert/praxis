@@ -113,7 +113,15 @@ pub struct FilterEntry {
     #[serde(default)]
     pub failure_mode: FailureMode,
 
-    /// Arbitrary YAML config passed to the filter's factory function.
+    /// Filter-specific configuration passed to the factory function.
+    ///
+    /// `#[serde(flatten)]` collects all YAML keys not handled by
+    /// the named fields above (`filter`, `branch_chains`,
+    /// `conditions`, `name`, `response_conditions`, `failure_mode`).
+    /// A misspelled known field (e.g., `failuremode`) is silently
+    /// absorbed here; [`warn_config_typos`] detects near-matches.
+    ///
+    /// [`warn_config_typos`]: FilterEntry::warn_config_typos
     #[serde(flatten)]
     pub config: serde_yaml::Value,
 }

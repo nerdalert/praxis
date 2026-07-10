@@ -42,6 +42,9 @@ pub struct BodyCapabilities {
     /// Whether any filter writes to the request body.
     pub any_request_body_writer: bool,
 
+    /// Whether any response-body filter has response conditions.
+    pub any_response_body_condition: bool,
+
     /// Whether any filter writes to the response body.
     pub any_response_body_writer: bool,
 
@@ -81,6 +84,10 @@ mod tests {
         assert!(
             !caps.any_request_body_writer,
             "default caps should have no request body writer"
+        );
+        assert!(
+            !caps.any_response_body_condition,
+            "default caps should have no response body conditions"
         );
         assert!(
             !caps.any_response_body_writer,

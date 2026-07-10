@@ -1,7 +1,27 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Branch chain runtime types for pipeline execution.
+//! Runtime branch types produced by [`build_branch`] resolution.
+//!
+//! These types are the runtime counterparts of the config types in
+//! [`praxis_core::config`]:
+//!
+//! | Config type | Runtime type |
+//! |---|---|
+//! | [`BranchChainConfig`] | [`ResolvedBranch`] |
+//! | [`BranchCondition`] | [`ResolvedBranchCondition`] |
+//! | `rejoin` string | [`RejoinTarget`] enum |
+//!
+//! [`BranchOutcome`] is produced by [`evaluate_branches`] and drives
+//! the while-loop index in [`execute_http_request`]: `Continue`
+//! advances, `SkipTo` jumps forward, `ReEnter` loops back,
+//! `Terminal` stops, and `Reject` aborts with an error response.
+//!
+//! [`build_branch`]: super::build_branch
+//! [`BranchChainConfig`]: praxis_core::config::BranchChainConfig
+//! [`BranchCondition`]: praxis_core::config::BranchCondition
+//! [`evaluate_branches`]: super::evaluate::evaluate_branches
+//! [`execute_http_request`]: super::FilterPipeline::execute_http_request
 
 use std::sync::Arc;
 
@@ -36,7 +56,11 @@ pub(crate) enum RejoinTarget {
 
 /// A resolved branch condition for runtime evaluation.
 pub(crate) struct ResolvedBranchCondition {
-    /// Filter name whose results to check.
+    /// Filter TYPE name (from [`HttpFilter::name()`]) whose results
+    /// to check. Not the user-assigned [`FilterEntry::name`].
+    ///
+    /// [`HttpFilter::name()`]: crate::HttpFilter::name
+    /// [`FilterEntry::name`]: praxis_core::config::FilterEntry::name
     pub filter_name: Arc<str>,
 
     /// Result key to match.

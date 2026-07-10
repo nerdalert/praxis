@@ -2,6 +2,28 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Filter result feedback for branch chain evaluation.
+//!
+//! Filters write key-value results to `ctx.filter_results` using
+//! their **type name** ([`HttpFilter::name()`]) as the outer map
+//! key. For example, the guardrails filter writes:
+//!
+//! ```text
+//! ctx.filter_results
+//!     .entry("guardrails")           // filter TYPE name
+//!     .or_default()
+//!     .set("status", "blocked")?;    // key-value result
+//! ```
+//!
+//! Branch conditions match against these results via
+//! [`on_result.filter`] (which must equal the filter type name)
+//! and `on_result.key` / `on_result.result`.
+//!
+//! Results are **cleared after branch evaluation** at each filter
+//! — they are ephemeral, scoped to the window between a filter's
+//! execution and its branch evaluation.
+//!
+//! [`HttpFilter::name()`]: crate::HttpFilter::name
+//! [`on_result.filter`]: praxis_core::config::BranchCondition::filter
 
 use std::{borrow::Cow, collections::HashMap};
 

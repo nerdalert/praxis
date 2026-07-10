@@ -192,6 +192,8 @@ as warnings.
 
 ## Related
 
+- [Pipeline Concepts](pipeline-concepts.md)
+- [Life of a Request](life-of-a-request.md)
 - [Connection Lifecycle](connection-lifecycle.md)
 - [Payload Processing](payload-processing.md)
 - [Crate Layout](crate-layout.md)

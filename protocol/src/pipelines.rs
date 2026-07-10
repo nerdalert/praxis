@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Maps listener names to their resolved [`FilterPipeline`].
+//! Hot-swappable pipeline storage for protocol adapters.
+//!
+//! [`ListenerPipelines`] lives in the protocol crate because it is
+//! the interface between protocol adapters (which invoke filter
+//! execution) and the filter engine (which owns [`FilterPipeline`]).
+//!
+//! Each pipeline is wrapped in [`ArcSwap`] for lock-free atomic
+//! replacement during hot reloads. In-flight requests hold an
+//! [`Arc`] guard to the old pipeline, so they drain safely while
+//! new requests pick up the replacement.
 //!
 //! [`FilterPipeline`]: praxis_filter::FilterPipeline
+//! [`ArcSwap`]: arc_swap::ArcSwap
 
 use std::{collections::HashMap, sync::Arc};
 

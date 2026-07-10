@@ -7,7 +7,7 @@ use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use praxis_core::connectivity::Upstream;
-use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, TrustedHeaderMutation};
+use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, TrustedHeaderMutation};
 use tokio::sync::OwnedSemaphorePermit;
 
 // -----------------------------------------------------------------------------
@@ -208,6 +208,13 @@ pub struct PingoraRequestCtx {
     /// Whether the response body has been released (`StreamBuffer` mode).
     pub response_body_released: bool,
 
+    /// Snapshot of response headers after response-phase filters.
+    ///
+    /// Used to evaluate `response_conditions` consistently during
+    /// response-body hooks, where Pingora no longer exposes mutable
+    /// response headers.
+    pub response_header_snapshot: Option<Response>,
+
     /// Upstream response status code, captured during `response_filter`
     /// for passive health recording in the `logging` hook.
     pub upstream_response_status: Option<u16>,
@@ -316,7 +323,7 @@ impl PingoraRequestCtx {
         &mut self,
         pipeline: &'a FilterPipeline,
         request: &'a Request,
-        response_header: Option<&'a mut praxis_filter::Response>,
+        response_header: Option<&'a mut Response>,
     ) -> praxis_filter::HttpFilterContext<'a> {
         filter_context!(self, pipeline, request, response_header)
     }
@@ -350,10 +357,26 @@ impl PingoraRequestCtx {
     pub fn filter_context_for<'a>(
         &'a mut self,
         pipeline: &'a FilterPipeline,
-        response_header: Option<&'a mut praxis_filter::Response>,
+        response_header: Option<&'a mut Response>,
     ) -> Option<praxis_filter::HttpFilterContext<'a>> {
         let request = self.request_snapshot.as_ref()?;
         Some(filter_context!(self, pipeline, request, response_header))
+    }
+
+    /// Build an [`HttpFilterContext`] plus the saved response header for body conditions.
+    ///
+    /// Response body hooks do not receive mutable headers, but their
+    /// `response_conditions` still need the response status and headers
+    /// captured during the response phase.
+    ///
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    pub fn response_body_context_for<'a>(
+        &'a mut self,
+        pipeline: &'a FilterPipeline,
+    ) -> Option<(praxis_filter::HttpFilterContext<'a>, Option<&'a Response>)> {
+        let request = self.request_snapshot.as_ref()?;
+        let response_header = self.response_header_snapshot.as_ref();
+        Some((filter_context!(self, pipeline, request, None), response_header))
     }
 
     /// Pin the current pipeline for this request's entire lifecycle.
@@ -434,6 +457,7 @@ impl Default for PingoraRequestCtx {
             response_body_bytes: 0,
             response_body_mode: BodyMode::Stream,
             response_body_released: false,
+            response_header_snapshot: None,
             upstream_response_status: None,
             response_phase_done: false,
             retries: 0,

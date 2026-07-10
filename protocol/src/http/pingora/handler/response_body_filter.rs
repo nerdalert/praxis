@@ -91,13 +91,14 @@ pub(super) fn execute(
     }
 
     let (result, body_bytes, cluster, upstream, extensions, filter_metadata, filter_state, executed_indices, body_done) = {
-        let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
+        let (mut fctx, response_header) = ctx.response_body_context_for(pipeline).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
                 "request snapshot not set when response body hooks are active",
             )
         })?;
-        let r = pipeline.execute_http_response_body(&mut fctx, body, end_of_stream);
+        let r =
+            pipeline.execute_http_response_body_with_response_header(&mut fctx, body, end_of_stream, response_header);
         (
             r,
             fctx.response_body_bytes,
