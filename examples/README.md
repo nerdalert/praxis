@@ -18,6 +18,12 @@ page.
 
 ## Configs
 
+### Ai
+
+| File | Description |
+| ------ | ------------- |
+| [grid-route-inference.yaml](configs/ai/grid-route-inference.yaml) | Routes requests to different upstream clusters based on the inference model name extracted from a configured request header.  The header value is set by an earlier filter such as `json_body_field` |
+
 ### Branching
 
 | File | Description |

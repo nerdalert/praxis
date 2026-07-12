@@ -377,6 +377,10 @@ impl HttpFilter for RouterFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if ctx.cluster.is_some() {
+            tracing::debug!("router: cluster already set by earlier filter; preserving");
+            return Ok(FilterAction::Continue);
+        }
         let path = ctx.rewritten_path.as_deref().unwrap_or_else(|| ctx.request.uri.path());
         let host = ctx
             .request

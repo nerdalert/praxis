@@ -5,6 +5,12 @@
 
 Built-in filters organized by protocol and category.
 
+## HTTP / AI
+
+| Filter | Feature | Description |
+|--------|---------|-------------|
+| [`grid_route`](http/ai/grid_route.md) | - | Selects an upstream cluster from a static site/capability descriptor by matching the inference model name from a configured request header. |
+
 ## HTTP / Observability
 
 | Filter | Feature | Description |

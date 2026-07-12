@@ -3,6 +3,7 @@
 
 //! HTTP protocol filters, organized by category.
 
+pub mod ai;
 mod observability;
 pub mod payload_processing;
 mod security;
@@ -10,6 +11,7 @@ mod traffic_management;
 mod transformation;
 pub mod value_safety;
 
+pub use ai::GridRouteFilter;
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter};
 #[cfg(feature = "cpex-policy-engine")]
