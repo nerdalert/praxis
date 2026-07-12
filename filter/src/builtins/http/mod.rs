@@ -3,6 +3,7 @@
 
 //! HTTP protocol filters, organized by category.
 
+pub mod ai;
 mod observability;
 pub mod payload_processing;
 mod security;
@@ -25,3 +26,4 @@ pub use traffic_management::{
 pub use transformation::{
     HeaderFilter, PathRewriteFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
 };
+pub use ai::GridRouteFilter;
