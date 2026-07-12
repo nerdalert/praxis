@@ -10,7 +10,8 @@ mod tcp;
 pub use http::PolicyFilter;
 pub use http::{
     AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter, CredentialInjectionFilter,
-    CsrfFilter, DisallowedOriginMode, EndpointSelectorFilter, ForwardedHeadersFilter, GridRouteFilter,
+    CsrfFilter, DisallowedOriginMode, EndpointSelectorFilter, ForwardedHeadersFilter, GridIngressTrustFilter,
+    GridRouteFilter,
     GrpcDetectionFilter, GuardrailsAction, GuardrailsFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter,
     JsonRpcFilter, LoadBalancerFilter, PathRewriteFilter, PiiKind, RateLimitFilter, RateLimitMode, RedirectFilter,
     RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind, StaticResponseFilter, TimeoutFilter,
