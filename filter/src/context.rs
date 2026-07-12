@@ -20,6 +20,77 @@ use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge
 const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
 
 // -----------------------------------------------------------------------------
+// TlsPeerIdentity
+// -----------------------------------------------------------------------------
+
+/// Verified downstream TLS peer identity from the client certificate.
+///
+/// Populated by the protocol layer when the downstream connection uses
+/// mTLS and the peer presented a valid client certificate. Filters can
+/// read this to make trust decisions about the authenticated peer
+/// without parsing certificates themselves.
+///
+/// Fields are extracted from Pingora's SSL digest during request
+/// setup. SAN (Subject Alternative Name) and SPIFFE identity parsing
+/// are not yet included and are planned for a follow-up.
+///
+/// ```
+/// use praxis_filter::TlsPeerIdentity;
+///
+/// let identity = TlsPeerIdentity {
+///     cert_digest: vec![0xAB, 0xCD],
+///     organization: Some("example-org".to_owned()),
+///     serial_number: Some("12345".to_owned()),
+/// };
+/// assert_eq!(identity.hex_digest(), "abcd");
+/// assert_eq!(identity.organization.as_deref(), Some("example-org"));
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TlsPeerIdentity {
+    /// SHA-256 digest of the peer's leaf certificate (DER-encoded).
+    pub cert_digest: Vec<u8>,
+
+    /// X.509 subject organization (`O=` field), if present.
+    pub organization: Option<String>,
+
+    /// Certificate serial number as a decimal string, if present.
+    pub serial_number: Option<String>,
+}
+
+impl TlsPeerIdentity {
+    /// Lowercase hex-encoded certificate digest for logging and
+    /// config display.
+    ///
+    /// ```
+    /// use praxis_filter::TlsPeerIdentity;
+    ///
+    /// let id = TlsPeerIdentity {
+    ///     cert_digest: vec![0xDE, 0xAD, 0xBE, 0xEF],
+    ///     organization: None,
+    ///     serial_number: None,
+    /// };
+    /// assert_eq!(id.hex_digest(), "deadbeef");
+    /// ```
+    #[must_use]
+    pub fn hex_digest(&self) -> String {
+        let mut hex = String::with_capacity(self.cert_digest.len() * 2);
+        for byte in &self.cert_digest {
+            hex.push(hex_digit(byte >> 4));
+            hex.push(hex_digit(byte & 0x0F));
+        }
+        hex
+    }
+}
+
+/// Convert a four-bit value to its lowercase hexadecimal character.
+fn hex_digit(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        _ => (b'a' + nibble - 10) as char,
+    }
+}
+
+// -----------------------------------------------------------------------------
 // TrustedHeaderMutation
 // -----------------------------------------------------------------------------
 
@@ -132,6 +203,16 @@ pub struct HttpFilterContext<'a> {
     /// rather than the request URI scheme (which is absent
     /// in HTTP/1.1).
     pub downstream_tls: bool,
+
+    /// Verified downstream TLS peer identity, if the connection
+    /// is mTLS and the peer presented a valid client certificate.
+    ///
+    /// `None` for plain-TLS or non-TLS connections, or when the
+    /// client did not send a certificate (e.g. `client_cert_mode:
+    /// request` with no cert).  Populated once from the SSL digest
+    /// before the first filter runs and preserved across all
+    /// subsequent `build_filter_context()` calls for the request.
+    pub peer_identity: Option<TlsPeerIdentity>,
 
     /// Type-safe request-scoped extension container.
     ///
