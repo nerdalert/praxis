@@ -2,14 +2,24 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Grid route filter: selects an upstream cluster for the request
-//! based on the inference model name extracted from a configured
-//! request header.
+//! based on the inference model name or MCP tool name.
+//!
+//! **Lookup precedence:** if `mcp.method` filter metadata exists, the
+//! filter attempts MCP tool routing first.  `tools/call` with a valid
+//! `mcp.name` matches `mcp_tool` candidates.  Any other MCP method
+//! returns `Continue` without routing.  When no `mcp.method` metadata
+//! is present, the filter reads the configured model header and matches
+//! `inference_model` candidates.
+//!
+//! MCP metadata takes precedence over the model header to prevent a
+//! client-supplied model name from hijacking MCP routing.
 //!
 //! Candidate selection is deterministic.  Fresh candidates score 0;
 //! stale candidates receive −100.  Candidates on `local_site` receive
 //! +10.  First configured candidate wins when scores are equal.
 //!
 //! No request-time metrics or control-plane lookups are performed.
+//! A2A agent routing is a separate follow-on.
 
 use std::sync::Arc;
 
@@ -96,8 +106,10 @@ fn default_model_header() -> String {
 /// written.  No request-time database, control-plane, or metrics
 /// lookups are performed.
 ///
-/// **Scope:** only `inference_model` candidates are matched in this
-/// release.  MCP tool routing and A2A agent routing are separate PRs.
+/// **MCP lookup:** if `mcp.method` filter metadata is set to `tools/call`
+/// and `mcp.name` is present, `mcp_tool` candidates are matched.
+/// Other MCP methods (`initialize`, `notifications/*`, etc.) skip routing.
+/// A2A agent routing is a separate follow-on PR.
 pub struct GridRouteFilter {
     /// Validated route candidates.
     candidates: Vec<RouteCandidate>,
@@ -141,7 +153,7 @@ impl HttpFilter for GridRouteFilter {
             return Ok(FilterAction::Continue);
         }
 
-        let lookup = extract_model_lookup(ctx, &self.model_header);
+        let lookup = extract_lookup(ctx, &self.model_header);
 
         let (kind, name) = match lookup {
             Lookup::Route { kind, name } => (kind, name),
@@ -173,19 +185,56 @@ impl HttpFilter for GridRouteFilter {
 // Lookup Extraction
 // -----------------------------------------------------------------------------
 
-/// Result of extracting a routable model from the request.
+/// Result of extracting a routable capability from the request.
 enum Lookup {
-    /// A routable model was found.
+    /// A routable capability was found.
     Route {
         /// Capability kind.
         kind: CapabilityKind,
         /// Capability name.
         name: String,
     },
-    /// Model header absent; continue without routing.
+    /// No routable capability; continue without routing.
     Skip,
-    /// Header present but invalid; fail closed.
+    /// Input is present but invalid; fail closed.
     Invalid,
+}
+
+/// Extract the routable capability from request context.
+///
+/// MCP metadata takes precedence over the model header: if `mcp.method`
+/// metadata is present (set by an upstream MCP classifier filter), the
+/// filter dispatches to MCP tool lookup.  Otherwise it falls back to the
+/// configured model header.
+fn extract_lookup(ctx: &HttpFilterContext<'_>, model_header: &http::header::HeaderName) -> Lookup {
+    if let Some(mcp_method) = ctx.get_metadata("mcp.method") {
+        return extract_mcp_lookup(ctx, mcp_method);
+    }
+    extract_model_lookup(ctx, model_header)
+}
+
+/// Extract an MCP tool lookup from filter metadata.
+///
+/// Only `tools/call` is routable.  Any other MCP method continues without
+/// routing even if a model header is present — the request is an MCP
+/// protocol message, not an inference request.
+fn extract_mcp_lookup(ctx: &HttpFilterContext<'_>, method: &str) -> Lookup {
+    if method != "tools/call" {
+        tracing::debug!(method = method, "grid_route: non-tools/call MCP method; skipping");
+        return Lookup::Skip;
+    }
+    let Some(name) = ctx.get_metadata("mcp.name") else {
+        tracing::debug!("grid_route: tools/call without mcp.name; rejecting");
+        return Lookup::Invalid;
+    };
+    if name.trim().is_empty() || name.len() > MAX_HEADER_VALUE_LEN {
+        tracing::debug!("grid_route: mcp.name blank or oversized; rejecting");
+        return Lookup::Invalid;
+    }
+    Lookup::Route {
+        kind: CapabilityKind::McpTool,
+        name: name.to_owned(),
+    }
 }
 
 /// Extract an inference model lookup from the promoted model header.
@@ -457,6 +506,138 @@ mod tests {
         let action = f.on_request(&mut ctx).await.unwrap();
         assert!(matches!(action, FilterAction::Continue));
         assert_eq!(ctx.cluster.as_deref(), Some("remote-gw"));
+    }
+
+    // ---- MCP tool routing ----
+
+    #[tokio::test]
+    async fn mcp_tools_call_routes_to_matching_tool() {
+        let f = make_filter(&[
+            ("mcp_tool", "weather", "site-c", "grid-site-c"),
+            ("inference_model", "llama", "site-a", "local-inf"),
+        ]);
+        let req = crate::test_utils::make_request(Method::POST, "/mcp");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "tools/call");
+        ctx.set_metadata("mcp.name", "weather");
+
+        let action = f.on_request(&mut ctx).await.unwrap();
+        assert!(matches!(action, FilterAction::Continue), "valid MCP tool should route");
+        assert_eq!(ctx.cluster.as_deref(), Some("grid-site-c"), "cluster should be mcp_tool cluster");
+        assert_eq!(ctx.get_metadata("grid.route.kind"), Some("mcp_tool"));
+        assert_eq!(ctx.get_metadata("grid.route.name"), Some("weather"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_beats_model_header() {
+        let f = make_filter(&[
+            ("mcp_tool", "weather", "site-c", "mcp-cluster"),
+            ("inference_model", "llama", "site-a", "inf-cluster"),
+        ]);
+        let mut req = crate::test_utils::make_request(Method::POST, "/mcp");
+        req.headers.insert("X-Model", http::HeaderValue::from_static("llama"));
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "tools/call");
+        ctx.set_metadata("mcp.name", "weather");
+
+        let _unused = f.on_request(&mut ctx).await.unwrap();
+        assert_eq!(ctx.cluster.as_deref(), Some("mcp-cluster"), "MCP metadata must win over model header");
+    }
+
+    #[tokio::test]
+    async fn mcp_non_tools_call_skips_even_with_model_header() {
+        let f = make_filter(&[("inference_model", "llama", "site-a", "inf-cluster")]);
+        let mut req = crate::test_utils::make_request(Method::POST, "/mcp");
+        req.headers.insert("X-Model", http::HeaderValue::from_static("llama"));
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "initialize");
+
+        let action = f.on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "non-tools/call MCP method must skip without routing"
+        );
+        assert!(ctx.cluster.is_none(), "no cluster should be set for non-tools/call");
+        assert_no_route_metadata(&ctx);
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_missing_name_rejects_400() {
+        let f = make_filter(&[("mcp_tool", "weather", "site-c", "c")]);
+        let req = crate::test_utils::make_request(Method::POST, "/mcp");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "tools/call");
+        // mcp.name not set
+
+        let action = f.on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Reject(r) if r.status == 400),
+            "missing mcp.name must reject 400"
+        );
+        assert_no_route_metadata(&ctx);
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_blank_name_rejects_400() {
+        let f = make_filter(&[("mcp_tool", "weather", "site-c", "c")]);
+        let req = crate::test_utils::make_request(Method::POST, "/mcp");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "tools/call");
+        ctx.set_metadata("mcp.name", "");
+
+        let action = f.on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Reject(r) if r.status == 400),
+            "blank mcp.name must reject 400"
+        );
+        assert_no_route_metadata(&ctx);
+    }
+
+    #[tokio::test]
+    async fn unknown_mcp_tool_rejects_404() {
+        let f = make_filter(&[("mcp_tool", "weather", "site-c", "c")]);
+        let req = crate::test_utils::make_request(Method::POST, "/mcp");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "tools/call");
+        ctx.set_metadata("mcp.name", "unknown-tool");
+
+        let action = f.on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Reject(r) if r.status == 404),
+            "unknown mcp_tool must reject 404"
+        );
+        assert_no_route_metadata(&ctx);
+    }
+
+    #[tokio::test]
+    async fn inference_candidate_not_matched_by_mcp_lookup() {
+        // Only inference_model candidates configured; MCP tools/call should not match them.
+        let f = make_filter(&[("inference_model", "llama", "site-a", "inf")]);
+        let req = crate::test_utils::make_request(Method::POST, "/mcp");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "tools/call");
+        ctx.set_metadata("mcp.name", "llama");
+
+        let action = f.on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Reject(r) if r.status == 404),
+            "inference_model candidates must not match MCP lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_applies_scoring() {
+        let f = make_scored_filter(&[
+            ("mcp_tool", "weather", "site-b", "remote-mcp", true),
+            ("mcp_tool", "weather", "site-a", "local-mcp", true),
+        ]);
+        let req = crate::test_utils::make_request(Method::POST, "/mcp");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "tools/call");
+        ctx.set_metadata("mcp.name", "weather");
+
+        let _unused = f.on_request(&mut ctx).await.unwrap();
+        assert_eq!(ctx.cluster.as_deref(), Some("local-mcp"), "local MCP tool should win");
     }
 
     // ---- Cluster preservation ----

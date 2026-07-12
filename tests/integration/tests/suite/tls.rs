@@ -2738,3 +2738,4 @@ filter_chains:
         status, 403,
         "grid_ingress_trust must reject connections with no peer identity (got {status})"
     );
+}
