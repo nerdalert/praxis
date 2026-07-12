@@ -13,7 +13,7 @@ Selects an upstream cluster from a static site/capability descriptor by matching
 
 **Metadata:** on successful selection, bounded in-process filter metadata is written under the `grid.route.` namespace (`kind`, `name`, `site`, `cluster`, `local_site`).  No HTTP forwarding headers are written.  No request-time database, control-plane, or metrics lookups are performed.
 
-**Scope:** only `inference_model` candidates are matched in this release.  MCP tool routing and A2A agent routing are separate PRs.
+**MCP lookup:** if `mcp.method` filter metadata is set to `tools/call` and `mcp.name` is present, `mcp_tool` candidates are matched. Other MCP methods (`initialize`, `notifications/*`, etc.) skip routing.
 
 ## Configuration
 
@@ -22,7 +22,7 @@ Selects an upstream cluster from a static site/capability descriptor by matching
 | `candidates` | CandidateConfig[] | yes | Static list of route candidates. |
 | `candidates[].cluster` | string | yes | Cluster name to select when this candidate is chosen. |
 | `candidates[].fresh` | bool | no | Whether this candidate is fresh (default: `true`). |
-| `candidates[].kind` | `inference_model` | yes | Capability kind. |
+| `candidates[].kind` | `inference_model` \| `mcp_tool` | yes | Capability kind. |
 | `candidates[].name` | string | yes | Capability name (model name, tool name, or agent name). |
 | `candidates[].site` | string | yes | Site that owns this capability. |
 | `local_site` | string | yes | Name of the local site. |

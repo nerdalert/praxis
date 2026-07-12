@@ -23,7 +23,7 @@ const MAX_CANDIDATES: usize = 1024;
 const MAX_NAME_LEN: usize = 256;
 
 /// Header prefixes reserved for internal gateway/protocol metadata.
-pub(crate) const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-"];
+pub(crate) const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-", "x-mcp-"];
 
 // -----------------------------------------------------------------------------
 // CapabilityKind
@@ -34,14 +34,17 @@ pub(crate) const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-"];
 /// Categorises what a route candidate offers. The route filter
 /// uses this to decide which request metadata can match a candidate.
 ///
-/// Only `InferenceModel` is routed by the current filter.
-/// MCP tool routing and A2A agent routing are separate follow-on PRs;
-/// those kind values are not accepted in this release.
+/// `InferenceModel` is matched by the model request header.
+/// `McpTool` is matched by `mcp.method`=`tools/call` + `mcp.name`
+/// metadata, which takes precedence over the model header.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CapabilityKind {
     /// OpenAI-compatible inference model.
     InferenceModel,
+
+    /// MCP tool, matched by `mcp.method`=`tools/call` + `mcp.name` metadata.
+    McpTool,
 }
 
 impl CapabilityKind {
@@ -49,6 +52,7 @@ impl CapabilityKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::InferenceModel => "inference_model",
+            Self::McpTool => "mcp_tool",
         }
     }
 }
@@ -65,10 +69,10 @@ impl CapabilityKind {
 ///     name: llama-3.1-8b
 ///     site: site-b
 ///     cluster: grid-site-b
-///   - kind: inference_model
-///     name: granite-3.3-8b
-///     site: site-a
-///     cluster: grid-site-a
+///   - kind: mcp_tool
+///     name: weather-lookup
+///     site: site-c
+///     cluster: grid-site-c
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -337,17 +341,27 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tool_kind_rejected() {
-        let yaml = "- kind: mcp_tool\n  name: x\n  site: s\n  cluster: c";
-        let err: Result<Vec<CandidateConfig>, _> = serde_yaml::from_str(yaml);
-        assert!(err.is_err(), "mcp_tool is not a supported kind in this release");
+    fn mcp_tool_candidate_valid() {
+        let candidates = validate_candidates(vec![candidate("mcp_tool", "weather", "site-b", "gateway-b")]).unwrap();
+        assert_eq!(candidates[0].kind, CapabilityKind::McpTool, "mcp_tool should parse");
+        assert_eq!(&*candidates[0].name, "weather");
     }
 
     #[test]
-    fn a2a_agent_kind_rejected() {
-        let yaml = "- kind: a2a_agent\n  name: x\n  site: s\n  cluster: c";
+    fn unsupported_capability_kind_rejected() {
+        let yaml = "- kind: unsupported_kind\n  name: x\n  site: s\n  cluster: c";
         let err: Result<Vec<CandidateConfig>, _> = serde_yaml::from_str(yaml);
-        assert!(err.is_err(), "a2a_agent is not a supported kind in this release");
+        assert!(err.is_err(), "unsupported capability kind is not supported");
+    }
+
+    #[test]
+    fn mcp_and_inference_candidates_can_coexist() {
+        let candidates = validate_candidates(vec![
+            candidate("inference_model", "llama", "site-a", "c1"),
+            candidate("mcp_tool", "weather", "site-b", "c2"),
+        ])
+        .unwrap();
+        assert_eq!(candidates.len(), 2, "inference and mcp candidates can coexist");
     }
 
     #[test]
