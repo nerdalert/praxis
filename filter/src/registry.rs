@@ -111,8 +111,8 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
         AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
         ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
-        PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter,
-        UrlRewriteFilter,
+        PathRewriteFilter, PeerIdentityTrustFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
+        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
     };
 
     register_http(factories, "access_log", AccessLogFilter::from_config);
@@ -148,6 +148,7 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
+    register_http(factories, "peer_identity_trust", PeerIdentityTrustFilter::from_config);
 }
 
 /// Register a single HTTP filter factory by name.
