@@ -34,7 +34,7 @@ pub use builtins::{
     normalize_rewritten_path,
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
-pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
+pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TlsPeerIdentity, TrustedHeaderMutation};
 pub use extensions::RequestExtensions;
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
@@ -413,6 +413,7 @@ pub(crate) mod test_utils {
             health_registry: None,
             id_generator: &TEST_ID_GENERATOR,
             kv_stores: None,
+            peer_identity: None,
             request: req,
             request_body_bytes: 0,
             request_body_mode: crate::body::BodyMode::Stream,
