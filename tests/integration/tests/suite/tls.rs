@@ -2047,16 +2047,19 @@ filter_chains:
 // populated when the downstream connection uses mTLS and the peer
 // presents a valid client certificate.
 //
-// The tests use a small inline test filter `PeerIdentityRejectIfNone`
-// that rejects requests when `peer_identity` is None.  This is the
-// minimal filter needed to observe peer identity from outside the proxy —
-// no production filter is assumed to exist yet.
+// The tests use small inline test-only filters that observe peer_identity
+// and reject with a 403 when expectations are not met.  This is the
+// minimal approach to verify peer identity from outside the proxy without
+// depending on any production access-control filter.
+//
+// All fields extracted from the client certificate — cert_digest,
+// organization, and serial_number — are covered end-to-end below.
+//
+// Regression covered: peer_identity must survive StreamBuffer body
+// pre-read.  Root cause was `.take()` in filter_context! macro consuming
+// the value during pre_read_body; fixed by switching to `.clone()`.
 // -----------------------------------------------------------------------------
 
-/// Test-only filter: rejects the request with 403 if `peer_identity` is `None`.
-///
-/// Used to prove that peer identity is populated for mTLS connections
-/// without depending on any production access-control filter.
 struct PeerIdentityRejectIfNone;
 
 #[async_trait::async_trait]
@@ -2079,7 +2082,6 @@ impl praxis_filter::HttpFilter for PeerIdentityRejectIfNone {
     }
 }
 
-/// Test-only filter: rejects with 403 if `peer_identity` org doesn't match.
 struct PeerIdentityRequireOrg(&'static str);
 
 #[async_trait::async_trait]
@@ -2279,14 +2281,93 @@ filter_chains:
     assert_eq!(body, "peer-identity-org-ok", "request should reach backend");
 }
 
-/// Regression: peer_identity must survive StreamBuffer body pre-read.
-///
-/// Root cause: the `filter_context!` macro used `.take()` for `peer_identity`,
-/// which consumed it during `pre_read_body`. The main filter pipeline then
-/// saw `None`. Fix: `.clone()` in the macro so the value is preserved across
-/// all `build_filter_context()` calls within a single request.
+struct PeerIdentityRequireSerialNumber;
+
+#[async_trait::async_trait]
+impl praxis_filter::HttpFilter for PeerIdentityRequireSerialNumber {
+    fn name(&self) -> &'static str {
+        "test_peer_identity_require_serial_number"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut praxis_filter::HttpFilterContext<'_>,
+    ) -> Result<praxis_filter::FilterAction, praxis_filter::FilterError> {
+        let has_serial = ctx
+            .peer_identity
+            .as_ref()
+            .and_then(|id| id.serial_number.as_deref())
+            .is_some();
+        if has_serial {
+            Ok(praxis_filter::FilterAction::Continue)
+        } else {
+            Ok(praxis_filter::FilterAction::Reject(praxis_filter::Rejection::status(
+                403,
+            )))
+        }
+    }
+}
+
 #[test]
-fn peer_identity_survives_stream_buffer_pre_read() {
+fn peer_identity_has_serial_number_for_mtls_connection() {
+    let certs = TestCertificates::generate();
+    let client_cert = certs.generate_client_cert();
+    let client_config = certs.client_config_with_cert(&client_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("peer-identity-serial-ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: require
+filter_chains:
+  - name: main
+    filters:
+      - filter: test_peer_identity_require_serial_number
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("test_peer_identity_require_serial_number", || {
+        Box::new(PeerIdentityRequireSerialNumber)
+    });
+    let proxy = start_tls_proxy_no_wait_with_registry(&config, &registry);
+    wait_for_https(proxy.addr(), &client_config);
+
+    let (status, body) = https_get(proxy.addr(), "/", &client_config);
+    assert_eq!(
+        status, 200,
+        "peer_identity.serial_number must be populated for valid mTLS client cert (got {status}, body: {body})"
+    );
+    assert_eq!(body, "peer-identity-serial-ok", "request should reach backend");
+}
+
+#[test]
+fn peer_identity_survives_stream_buffer_pre_read_regression() {
     let certs = TestCertificates::generate();
     let client_cert = certs.generate_client_cert_with_org("test-org");
     let client_config = certs.client_config_with_cert(&client_cert);

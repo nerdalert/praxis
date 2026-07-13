@@ -47,7 +47,7 @@ const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TlsPeerIdentity {
-    /// SHA-256 digest of the peer's leaf certificate (DER-encoded).
+    /// Cryptographic digest of the peer's leaf certificate (DER-encoded).
     pub cert_digest: Vec<u8>,
 
     /// X.509 subject organization (`O=` field), if present.
@@ -1670,5 +1670,52 @@ mod tests {
             ctx.get_structured_metadata("ns", "new-key").is_none(),
             "merge should drop new key past limit"
         );
+    }
+
+    #[test]
+    fn hex_digest_empty() {
+        let id = TlsPeerIdentity {
+            cert_digest: vec![],
+            organization: None,
+            serial_number: None,
+        };
+        assert_eq!(id.hex_digest(), "", "empty digest should produce empty string");
+    }
+
+    #[test]
+    fn hex_digest_typical_32_byte_length() {
+        let id = TlsPeerIdentity {
+            cert_digest: vec![0_u8; 32],
+            organization: None,
+            serial_number: None,
+        };
+        let hex = id.hex_digest();
+        assert_eq!(hex.len(), 64, "32-byte digest should produce 64 hex chars");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "all chars should be hex");
+        assert_eq!(hex, "0".repeat(64), "all-zero digest should be all-zero hex");
+    }
+
+    #[test]
+    fn hex_digest_all_zeros() {
+        let id = TlsPeerIdentity {
+            cert_digest: vec![0x00; 4],
+            organization: None,
+            serial_number: None,
+        };
+        assert_eq!(
+            id.hex_digest(),
+            "00000000",
+            "all-zero bytes should produce all-zero hex"
+        );
+    }
+
+    #[test]
+    fn hex_digest_all_0xff() {
+        let id = TlsPeerIdentity {
+            cert_digest: vec![0xFF; 4],
+            organization: None,
+            serial_number: None,
+        };
+        assert_eq!(id.hex_digest(), "ffffffff", "all-0xFF bytes should produce all-f hex");
     }
 }
