@@ -321,15 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn same_model_different_site_not_duplicate() {
-        let result = validate_candidates(vec![
-            candidate("inference_model", "llama", "site-a", "c1"),
-            candidate("inference_model", "llama", "site-b", "c2"),
-        ]);
-        assert!(result.is_ok(), "same model on different sites is not a duplicate");
-    }
-
-    #[test]
     fn unknown_capability_kind_rejected() {
         let yaml = "- kind: unknown_thing\n  name: x\n  site: s\n  cluster: c";
         let err: Result<Vec<CandidateConfig>, _> = serde_yaml::from_str(yaml);

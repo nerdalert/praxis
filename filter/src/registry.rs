@@ -260,6 +260,7 @@ mod tests {
             "json_body_field should be registered"
         );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
+        assert!(names.contains(&"grid_route"), "grid_route should be registered");
         #[cfg(feature = "cpex-policy-engine")]
         assert!(names.contains(&"policy"), "policy should be registered");
     }

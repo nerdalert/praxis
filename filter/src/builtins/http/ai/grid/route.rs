@@ -131,6 +131,14 @@ impl HttpFilter for GridRouteFilter {
         "grid_route"
     }
 
+    fn selects_cluster(&self) -> bool {
+        true
+    }
+
+    fn selected_clusters(&self) -> Vec<String> {
+        self.candidates.iter().map(|c| c.cluster.to_string()).collect()
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if ctx.cluster.is_some() {
             tracing::debug!("grid_route: cluster already set; preserving");

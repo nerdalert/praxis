@@ -195,6 +195,29 @@ async fn on_request_rejects_on_no_match() {
 }
 
 #[tokio::test]
+async fn on_request_preserves_cluster_already_set_by_earlier_filter() {
+    // When ctx.cluster is already set (e.g. by grid_route), the router should
+    // not overwrite it.  This is the skip-on-pre-set behavior added to prevent
+    // competing cluster selectors.
+    let router = make_router(vec![prefix_route("/", "router-cluster")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(std::sync::Arc::from("pre-set-cluster"));
+
+    let action = router.on_request(&mut ctx).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "router should return Continue when cluster is already set"
+    );
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("pre-set-cluster"),
+        "router must not overwrite a cluster set by an earlier filter"
+    );
+}
+
+#[tokio::test]
 async fn on_request_combined_host_and_path() {
     let router = make_router(vec![
         Route {

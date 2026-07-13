@@ -23,6 +23,7 @@ fn grid_route_inference_routes_by_model() {
     );
     let proxy = praxis_test_utils::start_proxy(&config);
 
+    // llama-3.2-8b → llama-remote cluster → remote-model backend
     let raw = http_send(
         proxy.addr(),
         &json_post("/v1/chat/completions", r#"{"model":"llama-3.2-8b"}"#),
@@ -33,5 +34,18 @@ fn grid_route_inference_routes_by_model() {
         parse_body(&raw),
         "remote-model",
         "grid_route should select the candidate cluster for the requested model"
+    );
+
+    // granite-3.3-8b → granite-local cluster → local-model backend
+    let raw = http_send(
+        proxy.addr(),
+        &json_post("/v1/chat/completions", r#"{"model":"granite-3.3-8b"}"#),
+    );
+
+    assert_eq!(parse_status(&raw), 200, "granite model should route");
+    assert_eq!(
+        parse_body(&raw),
+        "local-model",
+        "grid_route should select the local cluster for granite-3.3-8b"
     );
 }
