@@ -9,6 +9,7 @@ use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
 use praxis_core::{
     connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
 };
+use praxis_tls::TlsPeerIdentity;
 
 use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
 
@@ -18,81 +19,6 @@ use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge
 /// send unique keys across many response messages. Existing keys
 /// can still be overwritten past this limit.
 const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
-
-// -----------------------------------------------------------------------------
-// TlsPeerIdentity
-// -----------------------------------------------------------------------------
-
-/// Verified downstream TLS peer identity from the client certificate.
-///
-/// Populated by the protocol layer when the downstream connection uses
-/// mTLS and the peer presented a valid client certificate. Filters can
-/// read this to make trust decisions about the authenticated peer
-/// without parsing certificates themselves.
-///
-/// Fields are extracted from Pingora's SSL digest during request
-/// setup. SAN (Subject Alternative Name) and SPIFFE identity parsing
-/// are not yet included and are planned for a follow-up.
-///
-/// ```
-/// use praxis_filter::TlsPeerIdentity;
-///
-/// let identity = TlsPeerIdentity {
-///     cert_digest: vec![0xAB, 0xCD],
-///     organization: Some("example-org".to_owned()),
-///     serial_number: Some("12345".to_owned()),
-/// };
-/// assert_eq!(identity.hex_digest(), "abcd");
-/// assert_eq!(identity.organization.as_deref(), Some("example-org"));
-/// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TlsPeerIdentity {
-    /// Cryptographic digest of the peer's leaf certificate (DER-encoded).
-    pub cert_digest: Vec<u8>,
-
-    /// X.509 subject organization (`O=` field), if present.
-    pub organization: Option<String>,
-
-    /// Certificate serial number as a decimal string, if present.
-    pub serial_number: Option<String>,
-}
-
-impl TlsPeerIdentity {
-    /// Lowercase hex-encoded certificate digest for logging and
-    /// config display.
-    ///
-    /// ```
-    /// use praxis_filter::TlsPeerIdentity;
-    ///
-    /// let id = TlsPeerIdentity {
-    ///     cert_digest: vec![0xDE, 0xAD, 0xBE, 0xEF],
-    ///     organization: None,
-    ///     serial_number: None,
-    /// };
-    /// assert_eq!(id.hex_digest(), "deadbeef");
-    /// ```
-    #[must_use]
-    pub fn hex_digest(&self) -> String {
-        let mut hex = String::with_capacity(self.cert_digest.len() * 2);
-        for byte in &self.cert_digest {
-            hex.push(hex_digit(byte >> 4));
-            hex.push(hex_digit(byte & 0x0F));
-        }
-        hex
-    }
-}
-
-/// Convert a four-bit value to its lowercase hexadecimal character.
-fn hex_digit(nibble: u8) -> char {
-    match nibble {
-        0..=9 => (b'0' + nibble) as char,
-        _ => (b'a' + nibble - 10) as char,
-    }
-}
-
-// -----------------------------------------------------------------------------
-// TrustedHeaderMutation
-// -----------------------------------------------------------------------------
 
 /// Trusted header mutation recorded during pre-read body processing.
 ///
@@ -1670,52 +1596,5 @@ mod tests {
             ctx.get_structured_metadata("ns", "new-key").is_none(),
             "merge should drop new key past limit"
         );
-    }
-
-    #[test]
-    fn hex_digest_empty() {
-        let id = TlsPeerIdentity {
-            cert_digest: vec![],
-            organization: None,
-            serial_number: None,
-        };
-        assert_eq!(id.hex_digest(), "", "empty digest should produce empty string");
-    }
-
-    #[test]
-    fn hex_digest_typical_32_byte_length() {
-        let id = TlsPeerIdentity {
-            cert_digest: vec![0_u8; 32],
-            organization: None,
-            serial_number: None,
-        };
-        let hex = id.hex_digest();
-        assert_eq!(hex.len(), 64, "32-byte digest should produce 64 hex chars");
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "all chars should be hex");
-        assert_eq!(hex, "0".repeat(64), "all-zero digest should be all-zero hex");
-    }
-
-    #[test]
-    fn hex_digest_all_zeros() {
-        let id = TlsPeerIdentity {
-            cert_digest: vec![0x00; 4],
-            organization: None,
-            serial_number: None,
-        };
-        assert_eq!(
-            id.hex_digest(),
-            "00000000",
-            "all-zero bytes should produce all-zero hex"
-        );
-    }
-
-    #[test]
-    fn hex_digest_all_0xff() {
-        let id = TlsPeerIdentity {
-            cert_digest: vec![0xFF; 4],
-            organization: None,
-            serial_number: None,
-        };
-        assert_eq!(id.hex_digest(), "ffffffff", "all-0xFF bytes should produce all-f hex");
     }
 }

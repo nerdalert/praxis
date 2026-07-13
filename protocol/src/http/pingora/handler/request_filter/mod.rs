@@ -93,7 +93,7 @@ pub(in crate::http) async fn execute(
         if d.cert_digest.is_empty() {
             return None;
         }
-        Some(praxis_filter::TlsPeerIdentity {
+        Some(praxis_tls::TlsPeerIdentity {
             cert_digest: d.cert_digest.clone(),
             organization: d.organization.clone(),
             serial_number: d.serial_number.clone(),

@@ -79,7 +79,7 @@ pub struct PingoraRequestCtx {
     /// `HttpFilterContext` so it is available in both pre-read
     /// body phases and the main filter pipeline.  `None` for
     /// non-mTLS or no-client-cert connections.
-    pub peer_identity: Option<praxis_filter::TlsPeerIdentity>,
+    pub peer_identity: Option<praxis_tls::TlsPeerIdentity>,
 
     /// Whether the connection was upgraded via 101 Switching Protocols.
     ///
