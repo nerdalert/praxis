@@ -135,6 +135,7 @@ mod tests {
         };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -162,6 +163,7 @@ mod tests {
     async fn build_peer_without_tls() {
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8080"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         };
@@ -178,6 +180,7 @@ mod tests {
         };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -202,6 +205,7 @@ mod tests {
         };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -344,6 +348,7 @@ mod tests {
         };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -388,6 +393,7 @@ mod tests {
     fn make_upstream(address: &str) -> Upstream {
         Upstream {
             address: Arc::from(address),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         }

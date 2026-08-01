@@ -762,6 +762,7 @@ mod tests {
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.upstream = Some(Upstream {
             address: Arc::from("10.0.0.1:8080"),
+            authority: None,
             tls: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         });

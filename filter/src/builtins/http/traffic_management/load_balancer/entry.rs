@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use http::header::HeaderValue;
 use praxis_core::{
     config::{CachedClusterTls, Cluster},
     connectivity::{ConnectionOptions, Upstream},
@@ -12,7 +13,7 @@ use praxis_core::{
 use tracing::{debug, error};
 
 use super::strategy::{Strategy, build_strategy};
-use crate::{filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
+use crate::{FilterError, filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
 
 // -----------------------------------------------------------------------------
 // ClusterEntry
@@ -20,6 +21,11 @@ use crate::{filter::HttpFilterContext, load_balancing::endpoint::build_weighted_
 
 /// Resolved state for a single cluster.
 pub(super) struct ClusterEntry {
+    /// Pre-parsed upstream authority override as a [`HeaderValue`].
+    /// `None` means forward the downstream `Host` header unchanged.
+    /// Parsed at config load time to avoid per-request conversion.
+    pub(super) authority: Option<HeaderValue>,
+
     /// Connection options derived from the cluster config, [`Arc`]-wrapped
     /// to avoid per-request cloning.
     pub(super) opts: Arc<ConnectionOptions>,
@@ -55,6 +61,7 @@ impl ClusterEntry {
         });
         Upstream {
             address: addr,
+            authority: self.authority.clone(),
             connection: Arc::clone(&self.opts),
             tls,
         }
@@ -74,7 +81,12 @@ fn strip_host_port(host: &str) -> &str {
 }
 
 /// Build a [`ClusterEntry`] from a cluster definition.
-pub(super) fn build_cluster_entry(cluster: &Cluster) -> ClusterEntry {
+///
+/// # Errors
+///
+/// Returns [`FilterError`] if the authority override cannot be parsed
+/// as a valid HTTP header value.
+pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, FilterError> {
     let endpoints = build_weighted_endpoints(cluster);
     let total_weight: u32 = endpoints.iter().map(|ep| ep.weight).sum();
     debug!(
@@ -84,7 +96,20 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> ClusterEntry {
         "cluster registered"
     );
 
-    let tls = cluster
+    let tls = build_cached_tls(cluster);
+    let authority = build_authority(cluster)?;
+    let strategy = build_strategy(&cluster.load_balancer_strategy, endpoints);
+    Ok(ClusterEntry {
+        authority,
+        opts: Arc::new(ConnectionOptions::from(cluster)),
+        strategy,
+        tls,
+    })
+}
+
+/// Pre-cache TLS material for a cluster, logging on failure.
+fn build_cached_tls(cluster: &Cluster) -> Option<CachedClusterTls> {
+    cluster
         .tls
         .as_ref()
         .and_then(|t| match CachedClusterTls::try_from_config(t) {
@@ -97,14 +122,26 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> ClusterEntry {
                 );
                 None
             },
-        });
+        })
+}
 
-    let strategy = build_strategy(&cluster.load_balancer_strategy, endpoints);
-    ClusterEntry {
-        opts: Arc::new(ConnectionOptions::from(cluster)),
-        strategy,
-        tls,
-    }
+/// Pre-parse the authority override as a [`HeaderValue`].
+///
+/// Returns an error instead of silently disabling the override, so
+/// that programmatic callers of `LoadBalancerFilter::new` cannot
+/// accidentally forward the caller's original `Host` header.
+fn build_authority(cluster: &Cluster) -> Result<Option<HeaderValue>, FilterError> {
+    let Some(a) = cluster.authority.as_deref() else {
+        return Ok(None);
+    };
+    cluster.validate_authority().map_err(|e| e.to_string())?;
+    HeaderValue::from_str(a).map(Some).map_err(|e| {
+        format!(
+            "cluster '{}': authority '{}' is not a valid HTTP header value: {e}",
+            cluster.name, a,
+        )
+        .into()
+    })
 }
 
 // -----------------------------------------------------------------------------

@@ -32,6 +32,54 @@ fn new_creates_clusters() {
 }
 
 #[test]
+fn try_new_rejects_semantically_invalid_authority() {
+    let cluster = Cluster {
+        authority: Some(Arc::from("https://api.example.com")),
+        ..test_cluster("api", &["127.0.0.1:8080"])
+    };
+
+    let error = LoadBalancerFilter::try_new(&[cluster])
+        .err()
+        .expect("scheme-bearing authority should be rejected");
+    assert!(
+        error.to_string().contains("URI scheme"),
+        "error should identify the invalid authority component: {error}"
+    );
+}
+
+#[test]
+fn from_config_rejects_semantically_invalid_authority() {
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+clusters:
+  - name: api
+    endpoints: ["127.0.0.1:8080"]
+    authority: "api.example.com/v1"
+"#,
+    )
+    .unwrap();
+
+    let error = LoadBalancerFilter::from_config(&config)
+        .err()
+        .expect("path-bearing authority should be rejected");
+    assert!(
+        error.to_string().contains("path"),
+        "error should identify the invalid authority component: {error}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "invalid load balancer cluster configuration")]
+fn new_panics_on_invalid_authority() {
+    let cluster = Cluster {
+        authority: Some(Arc::from("user@api.example.com")),
+        ..test_cluster("api", &["127.0.0.1:8080"])
+    };
+
+    drop(LoadBalancerFilter::new(&[cluster]));
+}
+
+#[test]
 fn new_multiple_clusters() {
     let clusters = vec![
         test_cluster("web", &["127.0.0.1:8080"]),
@@ -362,7 +410,7 @@ async fn explicit_sni_overrides_host_header() {
 #[test]
 fn build_cluster_entry_preserves_endpoints_via_selection() {
     let cluster = test_cluster("web", &["10.0.0.1:80", "10.0.0.2:80", "10.0.0.3:80"]);
-    let entry = build_cluster_entry(&cluster);
+    let entry = build_cluster_entry(&cluster).unwrap();
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let ctx = crate::test_utils::make_filter_context(&req);
     let mut seen = std::collections::HashSet::new();
@@ -387,7 +435,7 @@ fn build_cluster_entry_preserves_weights_via_distribution() {
             },
         ],
     );
-    let entry = build_cluster_entry(&cluster);
+    let entry = build_cluster_entry(&cluster).unwrap();
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let ctx = crate::test_utils::make_filter_context(&req);
     let mut counts = HashMap::new();
@@ -415,7 +463,7 @@ fn build_cluster_entry_tls_and_sni() {
         }),
         ..Cluster::with_defaults("secure", vec!["10.0.0.1:443".into()])
     };
-    let entry = build_cluster_entry(&cluster);
+    let entry = build_cluster_entry(&cluster).unwrap();
     assert!(entry.tls.is_some(), "TLS should be present");
     assert_eq!(
         entry.tls.as_ref().unwrap().sni(),
@@ -477,6 +525,7 @@ fn build_strategy_consistent_hash() {
 #[tokio::test]
 async fn tls_and_sni_wired_from_cluster() {
     let cluster = Cluster {
+        authority: Some(Arc::from("public.example.com")),
         tls: Some(praxis_core::config::ClusterTls {
             sni: Some("api.example.com".into()),
             ..praxis_core::config::ClusterTls::default()
@@ -489,6 +538,11 @@ async fn tls_and_sni_wired_from_cluster() {
     ctx.cluster = Some(Arc::from("secure"));
     drop(lb.on_request(&mut ctx).await.unwrap());
     let upstream = ctx.upstream.unwrap();
+    assert_eq!(
+        upstream.authority.as_ref().and_then(|value| value.to_str().ok()),
+        Some("public.example.com"),
+        "HTTP authority should remain independent from TLS SNI"
+    );
     assert!(upstream.tls.is_some(), "TLS should be enabled from cluster config");
     assert_eq!(
         upstream.tls.as_ref().unwrap().sni(),

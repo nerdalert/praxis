@@ -434,6 +434,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test fixture exercises the complete populated context"
+    )]
     async fn on_response_with_populated_context_continues() {
         use praxis_core::connectivity::{ConnectionOptions, Upstream};
 
@@ -453,6 +457,7 @@ mod tests {
         ctx.cluster = Some(std::sync::Arc::from("backend"));
         ctx.upstream = Some(Upstream {
             address: std::sync::Arc::from("10.0.0.2:8080"),
+            authority: None,
             connection: std::sync::Arc::new(ConnectionOptions::default()),
             tls: None,
         });

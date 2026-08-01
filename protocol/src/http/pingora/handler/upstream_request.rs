@@ -109,6 +109,58 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Authority Override
+// -----------------------------------------------------------------------------
+
+/// Apply the per-cluster upstream authority override.
+///
+/// Replaces both the request's `Host` header and any URI authority. The
+/// authority is parsed when the cluster is built, so the request path does not
+/// perform string-to-header conversion.
+pub(crate) fn apply_authority_override(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
+    let Some(authority) = ctx.upstream_for_retry.as_ref().and_then(|u| u.authority.as_ref()) else {
+        return Ok(());
+    };
+
+    debug!(authority = ?authority, "applying upstream authority override");
+    req.insert_header(http::header::HOST, authority).map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("failed to set Host header for authority override: {e}"),
+        )
+    })?;
+    normalize_uri_authority(req, authority)
+}
+
+/// Replace an absolute-form request URI's authority while preserving its path
+/// and query. Origin-form URIs need only the `Host` header update above.
+fn normalize_uri_authority(req: &mut RequestHeader, authority: &http::header::HeaderValue) -> pingora_core::Result<()> {
+    let uri = &req.uri;
+    if uri.authority().is_none() && uri.scheme().is_none() {
+        return Ok(());
+    }
+
+    let authority_str = authority.to_str().map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("authority override is not valid UTF-8: {e}"),
+        )
+    })?;
+    let scheme = uri.scheme_str().unwrap_or("https");
+    let path_and_query = uri.path_and_query().map_or("/", http::uri::PathAndQuery::as_str);
+    let rebuilt = format!("{scheme}://{authority_str}{path_and_query}");
+    let new_uri: Uri = rebuilt.parse().map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("failed to rebuild URI with authority override: {e}"),
+        )
+    })?;
+
+    req.set_uri(new_uri);
+    Ok(())
+}
+
 /// Repair request framing after `StreamBuffer` body mutation.
 ///
 /// Pingora forwards upstream headers after `StreamBuffer` pre-read, so a
@@ -137,6 +189,8 @@ pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &Pingor
     reason = "tests"
 )]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -700,6 +754,60 @@ mod tests {
     }
 
     #[test]
+    fn apply_authority_override_sets_host() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        apply_authority_override(&mut req, &ctx_with_authority(Some("api.example.com"))).unwrap();
+        assert_eq!(req.headers.get("host").unwrap(), "api.example.com");
+    }
+
+    #[test]
+    fn apply_authority_override_with_port() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        apply_authority_override(&mut req, &ctx_with_authority(Some("api.example.com:8443"))).unwrap();
+        assert_eq!(req.headers.get("host").unwrap(), "api.example.com:8443");
+    }
+
+    #[test]
+    fn apply_authority_override_noop_when_none() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        apply_authority_override(&mut req, &ctx_with_authority(None)).unwrap();
+        assert_eq!(req.headers.get("host").unwrap(), "original.example.com");
+    }
+
+    #[test]
+    fn apply_authority_override_noop_when_no_upstream() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        apply_authority_override(&mut req, &PingoraRequestCtx::default()).unwrap();
+        assert_eq!(req.headers.get("host").unwrap(), "original.example.com");
+    }
+
+    #[test]
+    fn apply_authority_override_replaces_downstream_host() {
+        let mut req = make_request(&[("host", "attacker.evil.com")]);
+        apply_authority_override(&mut req, &ctx_with_authority(Some("api.example.com"))).unwrap();
+        assert_eq!(req.headers.get("host").unwrap(), "api.example.com");
+    }
+
+    #[test]
+    fn apply_authority_override_replaces_absolute_form_uri() {
+        let mut req = RequestHeader::build("GET", b"/v1/chat", None).unwrap();
+        req.set_uri("http://original.example.com/v1/chat".parse::<Uri>().unwrap());
+        apply_authority_override(&mut req, &ctx_with_authority(Some("api.example.com"))).unwrap();
+        assert_eq!(req.headers.get("host").unwrap(), "api.example.com");
+        assert_eq!(req.uri.authority().unwrap().as_str(), "api.example.com");
+        assert_eq!(req.uri.path(), "/v1/chat");
+    }
+
+    #[test]
+    fn apply_authority_override_preserves_origin_form_uri() {
+        let mut req = RequestHeader::build("GET", b"/v1/chat", None).unwrap();
+        req.insert_header("host", "original.example.com").unwrap();
+        apply_authority_override(&mut req, &ctx_with_authority(Some("api.example.com"))).unwrap();
+        assert_eq!(req.headers.get("host").unwrap(), "api.example.com");
+        assert!(req.uri.authority().is_none());
+    }
+
+    #[test]
     fn apply_mutated_content_length_updates_header() {
         let mut req = make_request(&[("content-length", "1024")]);
         let mut ctx = PingoraRequestCtx::default();
@@ -733,5 +841,16 @@ mod tests {
             let _inserted = req.insert_header((*name).to_owned(), (*value).to_owned());
         }
         req
+    }
+
+    fn ctx_with_authority(authority: Option<&'static str>) -> PingoraRequestCtx {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: authority.map(http::header::HeaderValue::from_static),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+        ctx
     }
 }

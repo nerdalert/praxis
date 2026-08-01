@@ -17,6 +17,7 @@ If all endpoints are unhealthy, the filter enters panic mode and routes to all e
 |-------|------|---------|-------------|
 | `clusters` | Cluster[] | no | Cluster definitions. |
 | `clusters[].name` | string | yes | Unique name for the cluster. |
+| `clusters[].authority` | string | no | Override the upstream HTTP `Host` header. **HTTP only** — this field has no effect on TCP load balancers, which do not process HTTP headers. When set, the proxy rewrites the `Host` header sent to the upstream instead of forwarding the downstream value. Upstream connections use HTTP/1.1; the `:authority` pseudo-header on the downstream HTTP/2 side is not forwarded upstream. TLS SNI remains independent — configure `tls.sni` separately when needed. Must be a valid HTTP authority: a hostname with an optional port, or a bracketed IPv6 address with an optional port. URI schemes, paths, userinfo, and fragments are rejected. |
 | `clusters[].connection_timeout_ms` | integer | no | TCP connection timeout in milliseconds. Applies to the TCP handshake only (before TLS). When exceeded, the connection attempt fails and the load balancer may retry on the next endpoint. `None` (the default) uses Pingora's built-in timeout. |
 | `clusters[].endpoints` | (string \| object)[] | yes | List of endpoints for the cluster. Each entry is either a plain `"host:port"` string or a `{ address, weight }` object. |
 | `clusters[].endpoints[].address` | string | yes | Socket address as `host:port`. |
