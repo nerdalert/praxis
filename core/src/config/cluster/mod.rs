@@ -21,6 +21,8 @@ pub use retry_policy::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::errors::ProxyError;
+
 // -----------------------------------------------------------------------------
 // Cluster
 // -----------------------------------------------------------------------------
@@ -46,6 +48,36 @@ use serde::{Deserialize, Serialize};
 pub struct Cluster {
     /// Unique name for the cluster.
     pub name: Arc<str>,
+
+    /// Override the upstream HTTP `Host` header. **HTTP only** — this
+    /// field has no effect on TCP load balancers, which do not process
+    /// HTTP headers.
+    ///
+    /// When set, the proxy rewrites the `Host` header sent to the
+    /// upstream instead of forwarding the downstream value. Upstream
+    /// connections use HTTP/1.1; the `:authority` pseudo-header on
+    /// the downstream HTTP/2 side is not forwarded upstream. TLS SNI
+    /// remains independent — configure `tls.sni` separately when
+    /// needed.
+    ///
+    /// Must be a valid HTTP authority: a hostname with an optional
+    /// port, or a bracketed IPv6 address with an optional port. URI
+    /// schemes, paths, userinfo, and fragments are rejected.
+    ///
+    /// ```
+    /// # use praxis_core::config::Cluster;
+    /// let yaml = r#"
+    /// name: "api"
+    /// endpoints: ["10.0.0.1:443"]
+    /// authority: "api.example.com"
+    /// tls:
+    ///   sni: "api.example.com"
+    /// "#;
+    /// let cluster: Cluster = serde_yaml::from_str(yaml).unwrap();
+    /// assert_eq!(cluster.authority.as_deref(), Some("api.example.com"));
+    /// ```
+    #[serde(default)]
+    pub authority: Option<Arc<str>>,
 
     /// TCP connection timeout in milliseconds.
     ///
@@ -138,6 +170,20 @@ pub struct Cluster {
 }
 
 impl Cluster {
+    /// Validate the optional upstream HTTP authority override.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProxyError::Config`] when the authority is not a
+    /// supported hostname with an optional port or a bracketed IPv6
+    /// address with an optional port.
+    pub fn validate_authority(&self) -> Result<(), ProxyError> {
+        let Some(authority) = self.authority.as_deref() else {
+            return Ok(());
+        };
+        super::validate::cluster::validate_authority(authority, &self.name)
+    }
+
     /// Build a cluster with only a name and endpoints; all other
     /// fields use their defaults (no timeouts, no TLS, no health
     /// check, `round_robin` strategy).
@@ -157,6 +203,7 @@ impl Cluster {
     pub fn with_defaults(name: &str, endpoints: Vec<Endpoint>) -> Self {
         Self {
             name: Arc::from(name),
+            authority: None,
             connection_timeout_ms: None,
             endpoints,
             health_check: None,

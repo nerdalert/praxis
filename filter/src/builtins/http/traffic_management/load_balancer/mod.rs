@@ -98,14 +98,20 @@ impl LoadBalancerFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] when a cluster's TLS material cannot be
-    /// loaded (missing or unparsable CA / client-cert files).
+    /// Returns [`FilterError`] when a cluster's TLS or authority configuration
+    /// cannot be loaded or validated.
     pub fn new(clusters: &[Cluster]) -> Result<Self, FilterError> {
         let map = clusters
             .iter()
             .map(|c| Ok((Arc::clone(&c.name), build_cluster_entry(c)?)))
             .collect::<Result<_, FilterError>>()?;
         Ok(Self { clusters: map })
+    }
+
+    /// Fallible constructor retained as an explicit alias for callers that
+    /// use the authority validation path directly.
+    pub fn try_new(clusters: &[Cluster]) -> Result<Self, FilterError> {
+        Self::new(clusters)
     }
 
     /// Create a load balancer from parsed YAML config.

@@ -687,6 +687,7 @@ mod tests {
         let mut ctx = default_ctx();
         let upstream = Upstream {
             address: Arc::from("10.0.0.1:80"),
+            authority: None,
             tls: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         };

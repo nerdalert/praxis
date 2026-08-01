@@ -32,6 +32,43 @@ fn new_creates_clusters() {
 }
 
 #[test]
+fn try_new_rejects_semantically_invalid_authority() {
+    let cluster = Cluster {
+        authority: Some(Arc::from("https://api.example.com")),
+        ..test_cluster("api", &["127.0.0.1:8080"])
+    };
+
+    let error = LoadBalancerFilter::try_new(&[cluster])
+        .err()
+        .expect("scheme-bearing authority should be rejected");
+    assert!(
+        error.to_string().contains("URI scheme"),
+        "error should identify the invalid authority component: {error}"
+    );
+}
+
+#[test]
+fn from_config_rejects_semantically_invalid_authority() {
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+clusters:
+  - name: api
+    endpoints: ["127.0.0.1:8080"]
+    authority: "api.example.com/v1"
+"#,
+    )
+    .unwrap();
+
+    let error = LoadBalancerFilter::from_config(&config)
+        .err()
+        .expect("path-bearing authority should be rejected");
+    assert!(
+        error.to_string().contains("path"),
+        "error should identify the invalid authority component: {error}"
+    );
+}
+
+#[test]
 fn new_multiple_clusters() {
     let clusters = vec![
         test_cluster("web", &["127.0.0.1:8080"]),
@@ -499,6 +536,7 @@ fn build_strategy_consistent_hash() {
 #[tokio::test]
 async fn tls_and_sni_wired_from_cluster() {
     let cluster = Cluster {
+        authority: Some(Arc::from("public.example.com")),
         tls: Some(praxis_core::config::ClusterTls {
             sni: Some("api.example.com".into()),
             ..praxis_core::config::ClusterTls::default()
@@ -511,6 +549,11 @@ async fn tls_and_sni_wired_from_cluster() {
     ctx.cluster = Some(Arc::from("secure"));
     drop(lb.on_request(&mut ctx).await.unwrap());
     let upstream = ctx.upstream.unwrap();
+    assert_eq!(
+        upstream.authority.as_ref().and_then(|value| value.to_str().ok()),
+        Some("public.example.com"),
+        "HTTP authority should remain independent from TLS SNI"
+    );
     assert!(upstream.tls.is_some(), "TLS should be enabled from cluster config");
     assert_eq!(
         upstream.tls.as_ref().unwrap().sni(),

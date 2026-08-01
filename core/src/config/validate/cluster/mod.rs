@@ -3,6 +3,7 @@
 
 //! Cluster validation: endpoints, weights, SNI hostnames, timeouts, and health check addresses.
 
+mod authority;
 mod endpoints;
 mod health_check;
 mod timeouts;
@@ -11,6 +12,11 @@ mod tls;
 pub use health_check::is_ssrf_sensitive;
 
 use crate::{config::InsecureOptions, errors::ProxyError};
+
+/// Validate the configured authority override for one cluster.
+pub(in crate::config) fn validate_authority(authority: &str, cluster_name: &str) -> Result<(), ProxyError> {
+    authority::validate_authority(authority, cluster_name)
+}
 
 // -----------------------------------------------------------------------------
 // Cluster Validation Constants
@@ -54,6 +60,7 @@ pub(in crate::config::validate) fn validate_clusters(
             return Err(ProxyError::Config("cluster name must not be empty".into()));
         }
         super::validate_name_chars(&cluster.name, "cluster")?;
+        cluster.validate_authority()?;
         endpoints::validate_endpoints(cluster, insecure_options)?;
         tls::validate_tls_settings(cluster, insecure_options)?;
         timeouts::validate_timeouts(cluster)?;
@@ -168,6 +175,137 @@ clusters:
         assert!(
             err.to_string().contains("exceeds maximum"),
             "should reject cluster max_connections > 1M: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_cluster_with_authority() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:443"]
+    authority: "api.example.com"
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn accept_cluster_with_authority_and_port() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:8443"]
+    authority: "api.example.com:8443"
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn accept_cluster_without_authority() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_cluster_with_empty_authority() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+    authority: ""
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "should reject empty authority: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_cluster_with_scheme_in_authority() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:443"]
+    authority: "https://api.example.com"
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("URI scheme"),
+            "should reject authority with scheme: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_cluster_with_path_in_authority() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:443"]
+    authority: "api.example.com/v1"
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path"),
+            "should reject authority with path: {err}"
         );
     }
 

@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use http::header::HeaderValue;
 use praxis_core::{
     config::{CachedClusterTls, Cluster, RetryPolicy},
     connectivity::{ConnectionOptions, Upstream},
@@ -16,7 +17,7 @@ use super::{
     reselector::EndpointReselector,
     strategy::{Strategy, build_strategy},
 };
-use crate::{filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
+use crate::{FilterError, filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
 
 // -----------------------------------------------------------------------------
 // ClusterEntry
@@ -24,6 +25,9 @@ use crate::{filter::HttpFilterContext, load_balancing::endpoint::build_weighted_
 
 /// Resolved state for a single cluster.
 pub(super) struct ClusterEntry {
+    /// Pre-parsed upstream authority override.
+    pub(super) authority: Option<HeaderValue>,
+
     /// Connection options derived from the cluster config, [`Arc`]-wrapped
     /// to avoid per-request cloning.
     pub(super) opts: Arc<ConnectionOptions>,
@@ -65,6 +69,7 @@ impl ClusterEntry {
         });
         Upstream {
             address: addr,
+            authority: self.authority.clone(),
             connection: Arc::clone(&self.opts),
             tls,
         }
@@ -135,16 +140,29 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, cra
         })
         .transpose()?;
 
+    let authority = build_authority(cluster)?;
     let strategy = Arc::new(build_strategy(&cluster.load_balancer_strategy, endpoints));
     let retry_policy = Arc::new(cluster.retry_policy.clone().unwrap_or_else(RetryPolicy::legacy_default));
     let retry_state = Arc::new(ClusterRetryState::new(retry_policy.retry_budget.as_ref()));
     Ok(ClusterEntry {
+        authority,
         opts: Arc::new(ConnectionOptions::from(cluster)),
         strategy,
         tls,
         retry_policy,
         retry_state,
     })
+}
+
+/// Validate and pre-parse the optional upstream authority override.
+fn build_authority(cluster: &Cluster) -> Result<Option<HeaderValue>, FilterError> {
+    let Some(authority) = cluster.authority.as_deref() else {
+        return Ok(None);
+    };
+    cluster.validate_authority().map_err(|error| error.to_string())?;
+    HeaderValue::from_str(authority)
+        .map(Some)
+        .map_err(|error| format!("cluster '{}': invalid authority header: {error}", cluster.name).into())
 }
 
 // -----------------------------------------------------------------------------

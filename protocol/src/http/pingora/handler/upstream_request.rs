@@ -51,6 +51,44 @@ pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
     }
 }
 
+/// Apply the selected upstream's pre-validated HTTP authority override.
+///
+/// The request `Host` header is replaced without reparsing configuration on
+/// the request path. Absolute-form URIs are normalized to the same authority.
+///
+/// # Errors
+///
+/// Returns a Pingora error if the URI cannot be rebuilt.
+pub(crate) fn apply_authority_override(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
+    let Some(authority) = ctx.upstream_for_retry.as_ref().and_then(|upstream| upstream.authority.as_ref()) else {
+        return Ok(());
+    };
+    req.insert_header(http::header::HOST, authority).map_err(|error| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("failed to set upstream Host header: {error}"),
+        )
+    })?;
+
+    let uri = &req.uri;
+    if uri.authority().is_none() && uri.scheme().is_none() {
+        return Ok(());
+    }
+    let authority = authority.to_str().map_err(|error| {
+        pingora_core::Error::explain(pingora_core::ErrorType::InternalError, format!("invalid authority: {error}"))
+    })?;
+    let scheme = uri.scheme_str().unwrap_or("https");
+    let path_and_query = uri.path_and_query().map_or("/", http::uri::PathAndQuery::as_str);
+    let rebuilt = format!("{scheme}://{authority}{path_and_query}").parse::<Uri>().map_err(|error| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("failed to rebuild URI with upstream authority: {error}"),
+        )
+    })?;
+    req.set_uri(rebuilt);
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // Path Rewriting
 // -----------------------------------------------------------------------------
