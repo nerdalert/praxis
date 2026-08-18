@@ -101,6 +101,13 @@ pub use registry::{FilterRegistry, SecurityClass};
 pub use results::{FilterResultSet, matches_filter_result};
 pub use tcp_filter::{TcpFilter, TcpFilterContext};
 
+/// Trusted metadata key for the authenticated principal identifier.
+///
+/// Authentication filters write this key only after successfully verifying
+/// credentials. Downstream filters may use it as a generic identity contract;
+/// it is intentionally independent of the authentication mechanism.
+pub const IDENTITY_USER_ID_METADATA: &str = "identity.user_id";
+
 // -----------------------------------------------------------------------------
 // Custom Filter Registration
 // -----------------------------------------------------------------------------

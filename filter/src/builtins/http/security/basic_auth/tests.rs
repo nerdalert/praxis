@@ -214,6 +214,11 @@ async fn authenticates_valid_credentials() {
         matches!(action, FilterAction::Continue),
         "valid credentials should continue"
     );
+    assert_eq!(
+        ctx.get_metadata(crate::IDENTITY_USER_ID_METADATA),
+        Some("admin"),
+        "successful authentication should publish the generic trusted identity"
+    );
 }
 
 #[tokio::test]
@@ -224,6 +229,10 @@ async fn rejects_missing_authorization_header() {
 
     let action = f.on_request(&mut ctx).await.unwrap();
     assert_rejection_with_challenge(&action, "TestRealm");
+    assert!(
+        ctx.get_metadata(crate::IDENTITY_USER_ID_METADATA).is_none(),
+        "missing credentials must not publish identity"
+    );
 }
 
 #[tokio::test]
@@ -290,6 +299,10 @@ async fn rejects_wrong_password() {
     assert!(
         matches!(&action, FilterAction::Reject(r) if r.status == 401),
         "wrong password should return 401"
+    );
+    assert!(
+        ctx.get_metadata(crate::IDENTITY_USER_ID_METADATA).is_none(),
+        "invalid credentials must not publish identity"
     );
 }
 
