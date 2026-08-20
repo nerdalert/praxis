@@ -31,6 +31,17 @@ const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
 /// insert thousands of unique keys per request.
 const MAX_METADATA_ENTRIES: usize = 128;
 
+/// Failure returned when a request metadata value cannot be stored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetadataError {
+    /// The metadata key is empty or exceeds the key-size limit.
+    InvalidKey,
+    /// The metadata value exceeds the value-size limit.
+    ValueTooLong,
+    /// The request has reached its metadata-entry limit.
+    Capacity,
+}
+
 /// Trusted header mutation recorded during pre-read body processing.
 ///
 /// Pre-read filters run *before* the request-phase pipeline. Mutations
@@ -375,15 +386,30 @@ impl HttpFilterContext<'_> {
     /// 64 bytes and values to 256 bytes to bound per-request
     /// memory growth.
     pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        match self.try_set_metadata(key, value) {
+            Ok(()) | Err(_) => {},
+        }
+    }
+
+    /// Write metadata and report whether it was stored.
+    ///
+    /// This is the fallible form for filters whose security or routing
+    /// contract requires the metadata to be present before continuing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataError`] when the key or value exceeds its size limit,
+    /// or when the request metadata entry limit has been reached.
+    pub fn try_set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) -> Result<(), MetadataError> {
         let key = key.into();
         let value = value.into();
         if key.is_empty() || key.len() > 64 {
             tracing::warn!(key_len = key.len(), "metadata key rejected (must be 1-64 bytes)");
-            return;
+            return Err(MetadataError::InvalidKey);
         }
         if value.len() > 256 {
             tracing::warn!(key = %key, value_len = value.len(), "metadata value rejected (max 256 bytes)");
-            return;
+            return Err(MetadataError::ValueTooLong);
         }
         if !self.filter_metadata.contains_key(&key) && self.filter_metadata.len() >= MAX_METADATA_ENTRIES {
             tracing::warn!(
@@ -391,9 +417,10 @@ impl HttpFilterContext<'_> {
                 entries = self.filter_metadata.len(),
                 "metadata entry rejected (max {MAX_METADATA_ENTRIES} entries)"
             );
-            return;
+            return Err(MetadataError::Capacity);
         }
         self.filter_metadata.insert(key, value);
+        Ok(())
     }
 
     /// Upgrade the request body delivery mode for this request.
@@ -1066,7 +1093,11 @@ mod tests {
             "should accept exactly {MAX_METADATA_ENTRIES} entries"
         );
 
-        ctx.set_metadata("overflow", "value");
+        assert_eq!(
+            ctx.try_set_metadata("overflow", "value"),
+            Err(MetadataError::Capacity),
+            "entry beyond limit should report capacity failure"
+        );
         assert!(
             ctx.get_metadata("overflow").is_none(),
             "entry beyond limit should be rejected"

@@ -214,6 +214,44 @@ async fn authenticates_valid_credentials() {
         matches!(action, FilterAction::Continue),
         "valid credentials should continue"
     );
+    assert_eq!(
+        ctx.get_metadata(crate::IDENTITY_USER_ID_METADATA),
+        Some("admin"),
+        "successful authentication should publish the generic trusted identity"
+    );
+}
+
+#[tokio::test]
+async fn authenticates_username_at_metadata_limit() {
+    let username = "u".repeat(256);
+    let f = make_filter(&[(&username, "fakecreds")], "Restricted");
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert(http::header::AUTHORIZATION, basic_header(&username, "fakecreds"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(
+        ctx.get_metadata(crate::IDENTITY_USER_ID_METADATA),
+        Some(username.as_str())
+    );
+}
+
+#[tokio::test]
+async fn rejects_authenticated_principal_when_metadata_capacity_is_exhausted() {
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert(http::header::AUTHORIZATION, basic_header("admin", "fakecreds"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    for i in 0..128 {
+        ctx.set_metadata(format!("test.key.{i}"), "value");
+    }
+
+    let action = f.on_request(&mut ctx).await.unwrap();
+    assert_rejection_with_challenge(&action, "Restricted");
+    assert!(ctx.get_metadata(crate::IDENTITY_USER_ID_METADATA).is_none());
 }
 
 #[tokio::test]
@@ -224,6 +262,10 @@ async fn rejects_missing_authorization_header() {
 
     let action = f.on_request(&mut ctx).await.unwrap();
     assert_rejection_with_challenge(&action, "TestRealm");
+    assert!(
+        ctx.get_metadata(crate::IDENTITY_USER_ID_METADATA).is_none(),
+        "missing credentials must not publish identity"
+    );
 }
 
 #[tokio::test]
@@ -290,6 +332,10 @@ async fn rejects_wrong_password() {
     assert!(
         matches!(&action, FilterAction::Reject(r) if r.status == 401),
         "wrong password should return 401"
+    );
+    assert!(
+        ctx.get_metadata(crate::IDENTITY_USER_ID_METADATA).is_none(),
+        "invalid credentials must not publish identity"
     );
 }
 
