@@ -20,6 +20,11 @@ listeners:
     address: "0.0.0.0:8080"
     filter_chains: [main]
 
+# The example targets a local test backend; production configurations should
+# keep private-endpoint protection enabled unless this is explicitly required.
+insecure_options:
+  allow_private_endpoints: true
+
 filter_chains:
   - name: main
     filters:

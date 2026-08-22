@@ -110,6 +110,11 @@ impl LoadBalancerFilter {
 
     /// Fallible constructor retained as an explicit alias for callers that
     /// use the authority validation path directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] when a cluster's TLS or authority configuration
+    /// cannot be loaded or validated.
     pub fn try_new(clusters: &[Cluster]) -> Result<Self, FilterError> {
         Self::new(clusters)
     }

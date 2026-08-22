@@ -1525,6 +1525,7 @@ mod tests {
         ctx.metrics_cluster = Some(Arc::from("api-cluster"));
         ctx.upstream_for_retry = Some(Upstream {
             address: Arc::from("10.0.0.1:80"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         });

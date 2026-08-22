@@ -85,6 +85,7 @@ impl ClusterEntry {
             Arc::clone(&self.strategy),
             Arc::clone(&self.opts),
             self.tls.clone(),
+            self.authority.clone(),
             hash_key,
             retry_policy,
             Arc::clone(&self.retry_state),
@@ -116,7 +117,7 @@ fn strip_host_port(host: &str) -> &str {
     clippy::too_many_lines,
     reason = "sequential setup steps, splitting harms readability"
 )]
-pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, crate::FilterError> {
+pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, FilterError> {
     let endpoints = build_weighted_endpoints(cluster);
     let total_weight: u32 = endpoints.iter().map(|ep| ep.weight).sum();
     debug!(
@@ -130,7 +131,7 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, cra
         .tls
         .as_ref()
         .map(|t| {
-            CachedClusterTls::try_from_config(t).map_err(|e| -> crate::FilterError {
+            CachedClusterTls::try_from_config(t).map_err(|e| -> FilterError {
                 format!(
                     "cluster '{}': failed to load TLS material: {e}; refusing to fall back to plaintext",
                     cluster.name

@@ -3166,6 +3166,7 @@ async fn build_peer_applies_tls_with_explicit_sni() {
     let cached = praxis_tls::CachedClusterTls::try_from_config(&tls).unwrap();
     let upstream = praxis_core::connectivity::Upstream {
         address: std::sync::Arc::from("127.0.0.1:9443"),
+        authority: None,
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
     };
@@ -3180,6 +3181,7 @@ async fn build_peer_derives_sni_from_hostname_address() {
     let cached = praxis_tls::CachedClusterTls::try_from_config(&tls).unwrap();
     let upstream = praxis_core::connectivity::Upstream {
         address: std::sync::Arc::from("localhost:9443"),
+        authority: None,
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
     };

@@ -102,6 +102,8 @@ filter_chains:
           - name: without-authority
             endpoints:
               - "127.0.0.1:{passthrough_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#,
         override_port = override_backend.port(),
         passthrough_port = passthrough_backend.port(),
