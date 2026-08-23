@@ -481,6 +481,33 @@ async fn kv_store_lookup_valid_credentials() {
 }
 
 #[tokio::test]
+async fn kv_store_rejects_username_over_metadata_limit_without_publishing_identity() {
+    let username = "u".repeat(257);
+    let yaml = yaml("kv_store: auth_users");
+    let f = BasicAuthFilter::from_config(&yaml).unwrap();
+
+    let registry = KvStoreRegistry::new();
+    let store = registry.get_or_create("auth_users");
+    store.set(&username, Arc::from("fakecreds"));
+
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert(http::header::AUTHORIZATION, basic_header(&username, "fakecreds"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.kv_stores = Some(&registry);
+
+    let action = f.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "an oversized KV-backed username must be rejected"
+    );
+    assert!(
+        ctx.get_metadata(crate::IDENTITY_USER_ID_METADATA).is_none(),
+        "an oversized username must not publish trusted identity metadata"
+    );
+}
+
+#[tokio::test]
 async fn kv_store_missing_store_rejects() {
     let yaml = yaml("kv_store: nonexistent_store");
     let f = BasicAuthFilter::from_config(&yaml).unwrap();

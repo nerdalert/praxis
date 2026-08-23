@@ -32,13 +32,16 @@ const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
 const MAX_METADATA_ENTRIES: usize = 128;
 
 /// Failure returned when a request metadata value cannot be stored.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MetadataError {
     /// The metadata key is empty or exceeds the key-size limit.
+    #[error("metadata key is empty or exceeds the 64-byte limit")]
     InvalidKey,
     /// The metadata value exceeds the value-size limit.
+    #[error("metadata value exceeds the 256-byte limit")]
     ValueTooLong,
     /// The request has reached its metadata-entry limit.
+    #[error("request metadata entry limit reached")]
     Capacity,
 }
 
@@ -386,9 +389,7 @@ impl HttpFilterContext<'_> {
     /// 64 bytes and values to 256 bytes to bound per-request
     /// memory growth.
     pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        match self.try_set_metadata(key, value) {
-            Ok(()) | Err(_) => {},
-        }
+        self.try_set_metadata(key, value).unwrap_or(());
     }
 
     /// Write metadata and report whether it was stored.
