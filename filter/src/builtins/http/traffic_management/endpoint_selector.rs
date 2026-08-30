@@ -8,12 +8,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use praxis_core::{
     config::{CachedClusterTls, ClusterTls},
-    connectivity::{ConnectionOptions, Upstream},
+    connectivity::ConnectionOptions,
 };
 use serde::Deserialize;
 
 use crate::{
-    FilterAction, FilterError, Rejection,
+    FilterAction, FilterError, HttpUpstream, HttpUpstreamRequestPolicy, Rejection,
     context::PendingHeaderResult,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -389,12 +389,14 @@ impl HttpFilter for EndpointSelectorFilter {
             Err(e) => return self.routing_failure(e.to_string()),
         };
 
-        let upstream = Upstream {
-            address: Arc::from(value.as_str()),
-            authority: None,
-            connection: Arc::clone(&self.connection),
-            tls: self.tls.clone(),
-        };
+        let upstream = HttpUpstream::new(
+            praxis_core::connectivity::Upstream {
+                address: Arc::from(value.as_str()),
+                connection: Arc::clone(&self.connection),
+                tls: self.tls.clone(),
+            },
+            HttpUpstreamRequestPolicy::default(),
+        );
 
         ctx.upstream = Some(upstream);
 
@@ -748,26 +750,29 @@ mod tests {
         assert!(matches!(action, FilterAction::Continue));
         let upstream = ctx.upstream.as_ref().expect("selector should set upstream");
         assert_eq!(
-            upstream.connection.connection_timeout,
+            upstream.transport().connection.connection_timeout,
             Some(std::time::Duration::from_millis(100))
         );
         assert_eq!(
-            upstream.connection.idle_timeout,
+            upstream.transport().connection.idle_timeout,
             Some(std::time::Duration::from_millis(200))
         );
         assert_eq!(
-            upstream.connection.read_timeout,
+            upstream.transport().connection.read_timeout,
             Some(std::time::Duration::from_millis(300))
         );
         assert_eq!(
-            upstream.connection.write_timeout,
+            upstream.transport().connection.write_timeout,
             Some(std::time::Duration::from_millis(400))
         );
         assert_eq!(
-            upstream.connection.total_connection_timeout,
+            upstream.transport().connection.total_connection_timeout,
             Some(std::time::Duration::from_millis(500))
         );
-        assert!(upstream.tls.is_none(), "TLS should remain disabled when omitted");
+        assert!(
+            upstream.transport().tls.is_none(),
+            "TLS should remain disabled when omitted"
+        );
     }
 
     #[tokio::test]
@@ -789,7 +794,7 @@ mod tests {
         let tls = ctx
             .upstream
             .as_ref()
-            .and_then(|upstream| upstream.tls.as_ref())
+            .and_then(|upstream| upstream.transport().tls.as_ref())
             .expect("configured TLS should be applied to selected upstream");
         assert_eq!(tls.sni(), Some("inference.example.internal"));
         assert!(!tls.verify(), "configured TLS verify flag should be preserved");

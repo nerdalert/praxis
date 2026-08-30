@@ -18,7 +18,10 @@ use super::{
     reselector::EndpointReselector,
     strategy::{Strategy, build_strategy},
 };
-use crate::{FilterError, filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
+use crate::{
+    FilterError, HttpUpstream, HttpUpstreamRequestPolicy, filter::HttpFilterContext,
+    load_balancing::endpoint::build_weighted_endpoints,
+};
 
 // -----------------------------------------------------------------------------
 // ClusterEntry
@@ -33,7 +36,7 @@ pub(super) struct ClusterEntry {
     /// Pre-parsed upstream authority override as a [`HeaderValue`].
     /// `None` means forward the downstream `Host` header unchanged.
     /// Parsed at config load time to avoid per-request conversion.
-    pub(super) authority: Option<HeaderValue>,
+    pub(super) request_policy: HttpUpstreamRequestPolicy,
 
     /// Connection options derived from the cluster config, [`Arc`]-wrapped
     /// to avoid per-request cloning.
@@ -75,7 +78,7 @@ impl ClusterEntry {
     /// per [RFC 6066].
     ///
     /// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
-    pub(super) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> Upstream {
+    pub(super) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> HttpUpstream {
         let tls = self.tls.clone().map(|mut t| {
             if t.sni().is_none()
                 && let Some(host) = ctx
@@ -88,12 +91,14 @@ impl ClusterEntry {
             }
             t
         });
-        Upstream {
-            address: addr,
-            authority: self.authority.clone(),
-            connection: Arc::clone(&self.opts),
-            tls,
-        }
+        HttpUpstream::new(
+            Upstream {
+                address: addr,
+                connection: Arc::clone(&self.opts),
+                tls,
+            },
+            self.request_policy.clone(),
+        )
     }
 
     /// Merge the route-level retry override onto this cluster's policy,
@@ -132,7 +137,7 @@ impl ClusterEntry {
             Arc::clone(&self.strategy),
             Arc::clone(&self.opts),
             self.tls.clone(),
-            self.authority.clone(),
+            self.request_policy.clone(),
             hash_key,
             retry_policy,
             Arc::clone(&self.retry_state),
@@ -169,12 +174,12 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
     );
 
     let tls = build_cached_tls(cluster)?;
-    let authority = build_authority(cluster)?;
+    let request_policy = HttpUpstreamRequestPolicy::new(build_authority(cluster)?);
     let strategy = Arc::new(build_strategy(&cluster.load_balancer_strategy, endpoints));
     let retry_policy = Arc::new(cluster.retry_policy.clone().unwrap_or_else(RetryPolicy::legacy_default));
     let retry_state = Arc::new(ClusterRetryState::new(retry_policy.retry_budget.as_ref()));
     Ok(ClusterEntry {
-        authority,
+        request_policy,
         opts: Arc::new(ConnectionOptions::from(cluster)),
         strategy,
         tls,

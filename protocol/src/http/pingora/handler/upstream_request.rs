@@ -134,7 +134,11 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
 /// Returns a Pingora error if the URI cannot be rebuilt with the
 /// new authority (should not happen with a pre-validated value).
 pub(crate) fn apply_authority_override(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
-    let Some(authority) = ctx.upstream_for_retry.as_ref().and_then(|u| u.authority.as_ref()) else {
+    let Some(authority) = ctx
+        .upstream_for_retry
+        .as_ref()
+        .and_then(|u| u.request_policy().authority())
+    else {
         return Ok(());
     };
 
@@ -225,6 +229,9 @@ pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &Pingor
 )]
 mod tests {
     use std::sync::Arc;
+
+    use praxis_core::connectivity::Upstream;
+    use praxis_filter::{HttpUpstream, HttpUpstreamRequestPolicy};
 
     use super::*;
 
@@ -892,12 +899,14 @@ mod tests {
     fn apply_authority_override_sets_host() {
         let mut req = make_request(&[("host", "original.example.com")]);
         let mut ctx = PingoraRequestCtx::default();
-        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
-            address: Arc::from("10.0.0.1:443"),
-            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
-            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
-            tls: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.1:443"),
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::new(Some(http::header::HeaderValue::from_static("api.example.com"))),
+        ));
 
         apply_authority_override(&mut req, &ctx).unwrap();
 
@@ -912,12 +921,14 @@ mod tests {
     fn apply_authority_override_with_port() {
         let mut req = make_request(&[("host", "original.example.com")]);
         let mut ctx = PingoraRequestCtx::default();
-        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
-            address: Arc::from("10.0.0.1:8443"),
-            authority: Some(http::header::HeaderValue::from_static("api.example.com:8443")),
-            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
-            tls: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.1:8443"),
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::new(Some(http::header::HeaderValue::from_static("api.example.com:8443"))),
+        ));
 
         apply_authority_override(&mut req, &ctx).unwrap();
 
@@ -932,12 +943,14 @@ mod tests {
     fn apply_authority_override_noop_when_none() {
         let mut req = make_request(&[("host", "original.example.com")]);
         let mut ctx = PingoraRequestCtx::default();
-        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
-            address: Arc::from("10.0.0.1:443"),
-            authority: None,
-            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
-            tls: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.1:443"),
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::default(),
+        ));
 
         apply_authority_override(&mut req, &ctx).unwrap();
 
@@ -966,12 +979,14 @@ mod tests {
     fn apply_authority_override_replaces_downstream_host() {
         let mut req = make_request(&[("host", "attacker.evil.com")]);
         let mut ctx = PingoraRequestCtx::default();
-        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
-            address: Arc::from("10.0.0.1:443"),
-            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
-            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
-            tls: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.1:443"),
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::new(Some(http::header::HeaderValue::from_static("api.example.com"))),
+        ));
 
         apply_authority_override(&mut req, &ctx).unwrap();
 
@@ -987,12 +1002,14 @@ mod tests {
         let mut req = RequestHeader::build("GET", b"/v1/chat", None).unwrap();
         req.set_uri("http://original.example.com/v1/chat".parse::<Uri>().unwrap());
         let mut ctx = PingoraRequestCtx::default();
-        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
-            address: Arc::from("10.0.0.1:443"),
-            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
-            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
-            tls: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.1:443"),
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::new(Some(http::header::HeaderValue::from_static("api.example.com"))),
+        ));
 
         apply_authority_override(&mut req, &ctx).unwrap();
 
@@ -1014,12 +1031,14 @@ mod tests {
         let mut req = RequestHeader::build("GET", b"/v1/chat", None).unwrap();
         req.insert_header("host", "original.example.com").unwrap();
         let mut ctx = PingoraRequestCtx::default();
-        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
-            address: Arc::from("10.0.0.1:443"),
-            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
-            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
-            tls: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.1:443"),
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::new(Some(http::header::HeaderValue::from_static("api.example.com"))),
+        ));
 
         apply_authority_override(&mut req, &ctx).unwrap();
 

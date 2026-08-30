@@ -6,8 +6,7 @@
 use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
 
 use bytes::Bytes;
-use praxis_core::connectivity::Upstream;
-use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, TrustedHeaderMutation};
+use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, HttpUpstream, Request, Response, TrustedHeaderMutation};
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Span;
 
@@ -314,10 +313,10 @@ pub struct PingoraRequestCtx {
     pub rewritten_path: Option<String>,
 
     /// Upstream endpoint selected by the load balancer filter.
-    pub upstream: Option<Upstream>,
+    pub upstream: Option<HttpUpstream>,
 
     /// Saved upstream for retry (cloned before first use).
-    pub upstream_for_retry: Option<Upstream>,
+    pub upstream_for_retry: Option<HttpUpstream>,
 }
 
 /// Build an [`HttpFilterContext`] from a `PingoraRequestCtx`.
@@ -594,6 +593,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use http::{HeaderMap, Method, Uri};
+    use praxis_core::connectivity::Upstream;
     use praxis_filter::FilterRegistry;
 
     use super::*;
@@ -706,15 +706,17 @@ mod tests {
     #[test]
     fn set_upstream() {
         let mut ctx = default_ctx();
-        let upstream = Upstream {
-            address: Arc::from("10.0.0.1:80"),
-            authority: None,
-            tls: None,
-            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
-        };
+        let upstream = HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.1:80"),
+                tls: None,
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            },
+            praxis_filter::HttpUpstreamRequestPolicy::default(),
+        );
         ctx.upstream = Some(upstream.clone());
         assert_eq!(
-            &*ctx.upstream.as_ref().unwrap().address,
+            ctx.upstream.as_ref().unwrap().address(),
             "10.0.0.1:80",
             "upstream address should match assigned value"
         );

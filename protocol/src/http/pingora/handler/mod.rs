@@ -22,8 +22,10 @@ use pingora_core::{
     services::listening::Service,
 };
 use pingora_proxy::{Session, http_proxy};
-use praxis_core::{config::ABSOLUTE_MAX_BODY_BYTES, connectivity::Upstream};
-use praxis_filter::{BodyBuffer, BodyMode, CompressionConfig, FilterPipeline, HttpFilterContext, RequestExtensions};
+use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
+use praxis_filter::{
+    BodyBuffer, BodyMode, CompressionConfig, FilterPipeline, HttpFilterContext, HttpUpstream, RequestExtensions,
+};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
@@ -268,7 +270,7 @@ fn handle_connect_failure(ctx: &mut PingoraRequestCtx, e: Box<pingora_core::Erro
             // policies opt into endpoint reselection.
             ctx.reselect_on_retry = policy.configured;
             if let Some(upstream) = ctx.upstream_for_retry.as_ref() {
-                let addr = Arc::clone(&upstream.address);
+                let addr = Arc::clone(&upstream.transport().address);
                 if !ctx.attempted_endpoints.iter().any(|e| e.as_ref() == addr.as_ref()) {
                     ctx.attempted_endpoints.push(addr);
                 }
@@ -281,14 +283,11 @@ fn handle_connect_failure(ctx: &mut PingoraRequestCtx, e: Box<pingora_core::Erro
                 if let Some(upstream) = ctx.upstream_for_retry.as_ref()
                     && let Some(reselector) = ctx.endpoint_reselector.as_ref()
                 {
-                    reselector.release(&upstream.address);
+                    reselector.release(upstream.address());
                 }
                 ctx.upstream_for_retry = None;
             }
-            let upstream_address = ctx
-                .upstream_for_retry
-                .as_ref()
-                .map_or("unknown", |u| u.address.as_ref());
+            let upstream_address = ctx.upstream_for_retry.as_ref().map_or("unknown", |u| u.address());
             debug!(
                 retries = ctx.retries,
                 max = policy.effective_max_retries(),
@@ -305,10 +304,7 @@ fn handle_connect_failure(ctx: &mut PingoraRequestCtx, e: Box<pingora_core::Erro
                 warn!(
                     retries = ctx.retries,
                     max = policy.effective_max_retries(),
-                    upstream_address = ctx
-                        .upstream_for_retry
-                        .as_ref()
-                        .map_or("unknown", |u| u.address.as_ref()),
+                    upstream_address = ctx.upstream_for_retry.as_ref().map_or("unknown", |u| u.address()),
                     "retry limit exhausted"
                 );
             }
@@ -340,7 +336,7 @@ fn maybe_retry_response(ctx: &mut PingoraRequestCtx, status: u16) -> Option<Box<
             // policies opt into endpoint reselection.
             ctx.reselect_on_retry = policy.configured;
             if let Some(upstream) = ctx.upstream_for_retry.as_ref() {
-                let addr = Arc::clone(&upstream.address);
+                let addr = Arc::clone(&upstream.transport().address);
                 if !ctx.attempted_endpoints.iter().any(|e| e.as_ref() == addr.as_ref()) {
                     ctx.attempted_endpoints.push(addr);
                 }
@@ -353,7 +349,7 @@ fn maybe_retry_response(ctx: &mut PingoraRequestCtx, status: u16) -> Option<Box<
                 if let Some(upstream) = ctx.upstream_for_retry.as_ref()
                     && let Some(reselector) = ctx.endpoint_reselector.as_ref()
                 {
-                    reselector.release(&upstream.address);
+                    reselector.release(upstream.address());
                 }
                 ctx.upstream_for_retry = None;
             }
@@ -631,7 +627,7 @@ fn record_response_span_fields(
     }
 
     if let Some(upstream) = &ctx.upstream_for_retry {
-        ctx.request_span.record("upstream.address", upstream.address.as_ref());
+        ctx.request_span.record("upstream.address", upstream.address());
     }
 
     if let Some(cluster) = &ctx.metrics_cluster {
@@ -757,7 +753,7 @@ struct BodyFilterOutput {
     /// Cluster selected by the filter pipeline.
     cluster: Option<Arc<str>>,
     /// Upstream endpoint selected by the load balancer.
-    upstream: Option<Upstream>,
+    upstream: Option<HttpUpstream>,
     /// Type-safe request-scoped extension container.
     extensions: RequestExtensions,
     /// Durable per-request metadata that persists across phases.
@@ -818,7 +814,8 @@ impl BodyFilterOutput {
     reason = "tests"
 )]
 mod tests {
-    use praxis_core::connectivity::ConnectionOptions;
+    use praxis_core::connectivity::{ConnectionOptions, Upstream};
+    use praxis_filter::HttpUpstreamRequestPolicy;
 
     use super::*;
 
@@ -1412,12 +1409,14 @@ mod tests {
 
         let output = BodyFilterOutput {
             cluster: Some(Arc::from("test-cluster")),
-            upstream: Some(Upstream {
-                address: Arc::from("10.0.0.1:80"),
-                authority: None,
-                connection: Arc::new(ConnectionOptions::default()),
-                tls: None,
-            }),
+            upstream: Some(HttpUpstream::new(
+                Upstream {
+                    address: Arc::from("10.0.0.1:80"),
+                    connection: Arc::new(ConnectionOptions::default()),
+                    tls: None,
+                },
+                HttpUpstreamRequestPolicy::default(),
+            )),
             extensions,
             attempted_endpoints: Vec::new(),
             filter_metadata: HashMap::from([("key".to_owned(), "val".to_owned())]),
@@ -1429,7 +1428,7 @@ mod tests {
 
         assert_eq!(ctx.cluster.as_deref(), Some("test-cluster"));
         assert!(ctx.upstream.is_some(), "upstream should transfer");
-        assert_eq!(ctx.upstream.as_ref().unwrap().address.as_ref(), "10.0.0.1:80");
+        assert_eq!(ctx.upstream.as_ref().unwrap().address(), "10.0.0.1:80");
         assert_eq!(ctx.extensions.get::<u32>(), Some(&42));
         assert_eq!(ctx.filter_metadata.get("key").map(String::as_str), Some("val"));
         assert_eq!(ctx.filter_state.len(), 1, "filter_state should transfer");
@@ -1641,12 +1640,14 @@ mod tests {
 
         let mut ctx = PingoraRequestCtx::default();
         ctx.metrics_cluster = Some(Arc::from("api-cluster"));
-        ctx.upstream_for_retry = Some(Upstream {
-            address: Arc::from("10.0.0.1:80"),
-            authority: None,
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.1:80"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::default(),
+        ));
         ctx.request_span = tracing::info_span!(
             "test_span",
             "http.response.status_code" = tracing::field::Empty,
@@ -1746,12 +1747,14 @@ mod tests {
     fn retry_with_upstream_address_sets_retry_flag() {
         let mut ctx = PingoraRequestCtx::default();
         ctx.request_is_idempotent = true;
-        ctx.upstream_for_retry = Some(Upstream {
-            address: Arc::from("10.0.0.1:8080"),
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: None,
-            authority: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.1:8080"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::default(),
+        ));
         let e = handle_connect_failure(&mut ctx, make_error());
         assert!(e.retry(), "should retry with upstream address present");
         assert_eq!(ctx.retries, 1, "retry counter should increment to 1");
@@ -1775,12 +1778,14 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.request_is_idempotent = true;
         ctx.retries = MAX_RETRIES as u32;
-        ctx.upstream_for_retry = Some(Upstream {
-            address: Arc::from("10.0.0.2:443"),
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: None,
-            authority: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.2:443"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::default(),
+        ));
         let e = handle_connect_failure(&mut ctx, make_error());
         assert!(
             !e.retry(),
@@ -1793,12 +1798,14 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.request_is_idempotent = true;
         ctx.request_body_bytes = RETRY_BODY_LIMIT + 1;
-        ctx.upstream_for_retry = Some(Upstream {
-            address: Arc::from("10.0.0.3:8080"),
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: None,
-            authority: None,
-        });
+        ctx.upstream_for_retry = Some(HttpUpstream::new(
+            Upstream {
+                address: Arc::from("10.0.0.3:8080"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::default(),
+        ));
         let e = handle_connect_failure(&mut ctx, make_error());
         assert!(!e.retry(), "should not retry large body even with upstream address");
         assert_eq!(ctx.retries, 0, "retry counter should not increment");

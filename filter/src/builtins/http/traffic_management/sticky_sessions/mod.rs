@@ -381,7 +381,7 @@ impl HttpFilter for StickySessionsFilter {
         );
 
         let endpoint = match ctx.upstream.as_ref() {
-            Some(u) => Arc::clone(&u.address),
+            Some(u) => Arc::clone(&u.transport().address),
             None => return Ok(FilterAction::Continue),
         };
 

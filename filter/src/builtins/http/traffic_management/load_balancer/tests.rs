@@ -125,7 +125,8 @@ async fn on_request_sets_upstream_round_robin() {
     assert!(matches!(action, FilterAction::Continue), "round robin should continue");
     let upstream = ctx.upstream.expect("upstream should be set");
     assert_eq!(
-        &*upstream.address, "127.0.0.1:8080",
+        upstream.address(),
+        "127.0.0.1:8080",
         "upstream address should match endpoint"
     );
 }
@@ -318,7 +319,9 @@ async fn weighted_endpoints_expand_proportionally() {
             matches!(action, FilterAction::Continue),
             "weighted selection should continue"
         );
-        *counts.entry(ctx.upstream.unwrap().address).or_insert(0_u32) += 1;
+        *counts
+            .entry(Arc::clone(&ctx.upstream.unwrap().transport().address))
+            .or_insert(0_u32) += 1;
     }
 
     assert_eq!(
@@ -349,9 +352,9 @@ async fn sni_fallback_to_host_header_when_sni_none() {
 
     drop(lb.on_request(&mut ctx).await.unwrap());
     let upstream = ctx.upstream.expect("upstream should be set");
-    assert!(upstream.tls.is_some(), "TLS should be enabled");
+    assert!(upstream.transport().tls.is_some(), "TLS should be enabled");
     assert_eq!(
-        upstream.tls.as_ref().unwrap().sni(),
+        upstream.transport().tls.as_ref().unwrap().sni(),
         Some("api.example.com"),
         "SNI should fall back to Host header when sni is None"
     );
@@ -371,9 +374,9 @@ async fn sni_fallback_is_none_when_no_host_header() {
 
     drop(lb.on_request(&mut ctx).await.unwrap());
     let upstream = ctx.upstream.expect("upstream should be set");
-    assert!(upstream.tls.is_some(), "TLS should be enabled");
+    assert!(upstream.transport().tls.is_some(), "TLS should be enabled");
     assert!(
-        upstream.tls.as_ref().unwrap().sni().is_none(),
+        upstream.transport().tls.as_ref().unwrap().sni().is_none(),
         "SNI should be None when no Host header and no explicit sni"
     );
 }
@@ -398,7 +401,7 @@ async fn explicit_sni_overrides_host_header() {
     drop(lb.on_request(&mut ctx).await.unwrap());
     let upstream = ctx.upstream.expect("upstream should be set");
     assert_eq!(
-        upstream.tls.as_ref().unwrap().sni(),
+        upstream.transport().tls.as_ref().unwrap().sni(),
         Some("override.example.com"),
         "explicit sni should override Host header"
     );
@@ -553,15 +556,70 @@ async fn tls_and_sni_wired_from_cluster() {
     drop(lb.on_request(&mut ctx).await.unwrap());
     let upstream = ctx.upstream.unwrap();
     assert_eq!(
-        upstream.authority.as_ref().and_then(|value| value.to_str().ok()),
+        upstream
+            .request_policy()
+            .authority()
+            .and_then(|value| value.to_str().ok()),
         Some("public.example.com"),
         "HTTP authority should remain independent from TLS SNI"
     );
-    assert!(upstream.tls.is_some(), "TLS should be enabled from cluster config");
+    assert!(
+        upstream.transport().tls.is_some(),
+        "TLS should be enabled from cluster config"
+    );
     assert_eq!(
-        upstream.tls.as_ref().unwrap().sni(),
+        upstream.transport().tls.as_ref().unwrap().sni(),
         Some("api.example.com"),
         "SNI should match cluster config"
+    );
+}
+
+#[tokio::test]
+async fn pinned_endpoint_preserves_cluster_authority() {
+    let cluster = Cluster {
+        http: praxis_core::config::ClusterHttpOptions {
+            authority: Some(Arc::from("api.example.com")),
+        },
+        ..test_cluster("pinned", &["10.0.0.1:80", "10.0.0.2:80"])
+    };
+    let lb = LoadBalancerFilter::new(&[cluster]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("pinned"));
+    ctx.pinned_endpoint_address = Some(Arc::from("10.0.0.2:80"));
+
+    assert!(
+        matches!(lb.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "pinned selection should continue"
+    );
+    let upstream = ctx.upstream.expect("pinned endpoint should be selected");
+    assert_eq!(upstream.address(), "10.0.0.2:80");
+    assert_eq!(
+        upstream
+            .request_policy()
+            .authority()
+            .and_then(|value| value.to_str().ok()),
+        Some("api.example.com"),
+        "pinned selection must preserve the cluster HTTP policy"
+    );
+}
+
+#[test]
+fn alternate_endpoint_preserves_cluster_authority() {
+    let cluster = Cluster {
+        http: praxis_core::config::ClusterHttpOptions {
+            authority: Some(Arc::from("api.example.com")),
+        },
+        ..test_cluster("retry", &["10.0.0.1:80", "10.0.0.2:80"])
+    };
+    let entry = build_cluster_entry(&cluster).unwrap();
+    let reselector = entry.reselector_with_policy(None, Arc::clone(&entry.retry_policy));
+    let first = reselector.build_upstream(Arc::from("10.0.0.1:80"));
+    let alternate = reselector.build_upstream(Arc::from("10.0.0.2:80"));
+
+    assert_eq!(
+        first.request_policy().authority(),
+        alternate.request_policy().authority()
     );
 }
 

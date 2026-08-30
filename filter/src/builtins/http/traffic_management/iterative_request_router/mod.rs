@@ -69,8 +69,8 @@ use self::{
     streaming::{IrrStreamingBody, IrrStreamingSession, ensure_combined_retained_limit},
 };
 use crate::{
-    FilterEntry, FilterError, FilterPipeline, FilterRegistry, IterationState, StreamTermination, SubRequest,
-    SubRequestResponseMode, SubResponse,
+    FilterEntry, FilterError, FilterPipeline, FilterRegistry, HttpUpstream, IterationState, StreamTermination,
+    SubRequest, SubRequestResponseMode, SubResponse,
     actions::{FilterAction, Rejection, StreamingResponseBody as _, StreamingTerminalResponse, TerminalResponse},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -975,6 +975,15 @@ fn ensure_destination_host(headers: &mut HeaderMap, address: &str) -> Result<(),
         headers.insert(http::header::HOST, value);
     }
     Ok(())
+}
+
+/// Apply the selected HTTP authority, falling back to the transport address.
+pub(super) fn apply_selected_request_host(headers: &mut HeaderMap, upstream: &HttpUpstream) -> Result<(), FilterError> {
+    if let Some(authority) = upstream.request_policy().authority() {
+        headers.insert(http::header::HOST, authority.clone());
+        return Ok(());
+    }
+    ensure_destination_host(headers, upstream.address())
 }
 
 /// Remove connection-scoped and proxy-internal response metadata.

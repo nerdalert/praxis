@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Upstream peer selection: converts the filter pipeline's [`Upstream`] into a Pingora `HttpPeer`.
+//! Upstream peer selection: converts the filter pipeline's [`HttpUpstream`] into a Pingora `HttpPeer`.
 //!
-//! [`Upstream`]: praxis_core::connectivity::Upstream
+//! [`HttpUpstream`]: praxis_filter::HttpUpstream
 
 use std::{
     net::SocketAddr,
@@ -15,7 +15,8 @@ use std::{
 };
 
 use pingora_core::{Result, upstreams::peer::HttpPeer};
-use praxis_core::connectivity::{Upstream, peer as peer_utils};
+use praxis_core::connectivity::peer as peer_utils;
+use praxis_filter::HttpUpstream;
 use tracing::debug;
 
 use super::super::context::PingoraRequestCtx;
@@ -117,7 +118,7 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
             if let Some(addr) = reselector.select_address(health, &ctx.attempted_endpoints) {
                 debug!(upstream = %addr, "selected alternate host for retry");
                 if let Some(prev) = ctx.upstream_for_retry.as_ref() {
-                    reselector.release(&prev.address);
+                    reselector.release(prev.address());
                 }
                 if !ctx.attempted_endpoints.iter().any(|e| e.as_ref() == addr.as_ref()) {
                     ctx.attempted_endpoints.push(Arc::clone(&addr));
@@ -166,14 +167,14 @@ fn reselected_endpoint_index(health: Option<&praxis_core::health::ClusterHealthS
 }
 
 /// Override connection/read timeouts with the policy's per-try timeout when set.
-fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut Upstream) {
+fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut HttpUpstream) {
     let Some(policy) = ctx.retry_policy.as_ref() else {
         return;
     };
     let Some(per_try_ms) = policy.per_try_timeout_ms else {
         return;
     };
-    let opts = Arc::make_mut(&mut upstream.connection);
+    let opts = Arc::make_mut(&mut upstream.transport_mut().connection);
     let timeout = std::time::Duration::from_millis(per_try_ms);
     opts.connection_timeout = Some(timeout);
     opts.total_connection_timeout = Some(timeout);
@@ -192,27 +193,28 @@ fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut Upstream) {
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
-async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
-    let addr: SocketAddr = resolve_address(&upstream.address).await?;
+async fn build_peer(upstream: &HttpUpstream) -> Result<Box<HttpPeer>> {
+    let transport = upstream.transport();
+    let addr: SocketAddr = resolve_address(&transport.address).await?;
 
-    let tls_enabled = upstream.tls.is_some();
-    let sni = upstream
+    let tls_enabled = transport.tls.is_some();
+    let sni = transport
         .tls
         .as_ref()
         .and_then(|t| t.sni().map(str::to_owned))
         .unwrap_or_else(|| {
             if tls_enabled {
-                peer_utils::derive_sni(&upstream.address)
+                peer_utils::derive_sni(&transport.address)
             } else {
                 String::new()
             }
         });
 
     let mut peer = HttpPeer::new(addr, tls_enabled, sni);
-    peer_utils::apply_connection_options(&mut peer, &upstream.connection);
+    peer_utils::apply_connection_options(&mut peer, &transport.connection);
 
-    if let Some(tls) = &upstream.tls {
-        peer_utils::apply_cached_tls(&mut peer, tls, &upstream.address);
+    if let Some(tls) = &transport.tls {
+        peer_utils::apply_cached_tls(&mut peer, tls, &transport.address);
     }
 
     Ok(Box::new(peer))
@@ -256,7 +258,7 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
     reason = "tests"
 )]
 mod tests {
-    use praxis_core::connectivity::ConnectionOptions;
+    use praxis_core::connectivity::{ConnectionOptions, Upstream};
     use praxis_tls::{CachedClusterTls, ClusterTls};
 
     use super::*;
@@ -275,12 +277,14 @@ mod tests {
             sni: Some("api.example.com".to_owned()),
             ..ClusterTls::default()
         };
-        let upstream = Upstream {
-            address: Arc::from("127.0.0.1:8443"),
-            authority: None,
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
-        };
+        let upstream = HttpUpstream::new(
+            Upstream {
+                address: Arc::from("127.0.0.1:8443"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
+            },
+            praxis_filter::HttpUpstreamRequestPolicy::default(),
+        );
         let peer = build_peer(&upstream).await.expect("should build TLS peer");
         assert!(!peer.sni.is_empty(), "TLS peer should have a non-empty SNI");
         assert_eq!(peer.sni, "api.example.com", "peer SNI should match configured value");
@@ -303,12 +307,14 @@ mod tests {
 
     #[tokio::test]
     async fn build_peer_without_tls() {
-        let upstream = Upstream {
-            address: Arc::from("127.0.0.1:8080"),
-            authority: None,
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: None,
-        };
+        let upstream = HttpUpstream::new(
+            Upstream {
+                address: Arc::from("127.0.0.1:8080"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: None,
+            },
+            praxis_filter::HttpUpstreamRequestPolicy::default(),
+        );
         let peer = build_peer(&upstream).await.expect("should build plain peer");
         assert_eq!(peer.sni, "", "plain peer should have empty SNI");
     }
@@ -320,12 +326,14 @@ mod tests {
             verify: false,
             ..ClusterTls::default()
         };
-        let upstream = Upstream {
-            address: Arc::from("127.0.0.1:8443"),
-            authority: None,
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
-        };
+        let upstream = HttpUpstream::new(
+            Upstream {
+                address: Arc::from("127.0.0.1:8443"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
+            },
+            praxis_filter::HttpUpstreamRequestPolicy::default(),
+        );
         let peer = build_peer(&upstream)
             .await
             .expect("should build peer with verification disabled");
@@ -345,12 +353,14 @@ mod tests {
             sni: Some("api.example.com".to_owned()),
             ..ClusterTls::default()
         };
-        let upstream = Upstream {
-            address: Arc::from("127.0.0.1:8443"),
-            authority: None,
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
-        };
+        let upstream = HttpUpstream::new(
+            Upstream {
+                address: Arc::from("127.0.0.1:8443"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
+            },
+            praxis_filter::HttpUpstreamRequestPolicy::default(),
+        );
         let peer = build_peer(&upstream)
             .await
             .expect("should build peer with verification enabled");
@@ -466,7 +476,7 @@ mod tests {
         assert!(ctx.upstream.is_none(), "upstream should be consumed");
         assert!(ctx.upstream_for_retry.is_some(), "should save for retry");
         assert_eq!(
-            &*ctx.upstream_for_retry.as_ref().unwrap().address,
+            ctx.upstream_for_retry.as_ref().unwrap().address(),
             "127.0.0.1:8080",
             "saved retry address should match original"
         );
@@ -525,12 +535,14 @@ mod tests {
             sni: Some("api.example.com".to_owned()),
             ..ClusterTls::default()
         };
-        let upstream = Upstream {
-            address: Arc::from("127.0.0.1:8443"),
-            authority: None,
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
-        };
+        let upstream = HttpUpstream::new(
+            Upstream {
+                address: Arc::from("127.0.0.1:8443"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
+            },
+            praxis_filter::HttpUpstreamRequestPolicy::default(),
+        );
         let peer = build_peer(&upstream).await.expect("should build peer with cached CA");
         assert!(peer.options.ca.is_some(), "peer should have custom CA set from cache");
     }
@@ -569,13 +581,15 @@ mod tests {
     }
 
     /// Create a test upstream with the given address (no TLS).
-    fn make_upstream(address: &str) -> Upstream {
-        Upstream {
-            address: Arc::from(address),
-            authority: None,
-            connection: Arc::new(ConnectionOptions::default()),
-            tls: None,
-        }
+    fn make_upstream(address: &str) -> HttpUpstream {
+        HttpUpstream::new(
+            Upstream {
+                address: Arc::from(address),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: None,
+            },
+            praxis_filter::HttpUpstreamRequestPolicy::default(),
+        )
     }
 
     /// Generated CA certificate file with temp dir lifetime.

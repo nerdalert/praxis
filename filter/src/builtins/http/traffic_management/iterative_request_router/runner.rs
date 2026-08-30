@@ -19,8 +19,8 @@ use tracing::{Instrument as _, warn};
 
 use super::{
     StepOutcome, SubPipelineRuntimeResources, apply_pre_read_header_mutations, apply_request_header_mutations,
-    body_exceeds_limit, build_peer, build_sub_filter_context, classify_transport_failure, config,
-    ensure_destination_host, iteration_state_exceeds_limit, response_body_exceeds_limits, sanitize_subrequest_headers,
+    apply_selected_request_host, body_exceeds_limit, build_peer, build_sub_filter_context, classify_transport_failure,
+    config, iteration_state_exceeds_limit, response_body_exceeds_limits, sanitize_subrequest_headers,
     sanitize_subresponse_headers, streaming::StepResponseContinuation, streaming_transport_limit,
     strip_reserved_headers, subresponse_from_rejection,
 };
@@ -283,9 +283,9 @@ impl IrrStepRunner {
                 format!("iterative_request_router: step '{current_step}' did not resolve an upstream").into()
             })?;
             in_transport_inner.store(true, Ordering::Release);
-            let peer = build_peer(upstream).await;
+            let peer = build_peer(upstream.transport()).await;
             apply_request_header_mutations(&mut sub_headers, &filter_ctx);
-            ensure_destination_host(&mut sub_headers, &upstream.address)?;
+            apply_selected_request_host(&mut sub_headers, upstream)?;
             sanitize_subrequest_headers(&mut sub_headers);
             let request = SubRequest {
                 method: current_request.method.clone(),

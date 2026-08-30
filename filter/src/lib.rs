@@ -51,6 +51,7 @@ mod error_response;
 mod extensions;
 mod factory;
 mod filter;
+mod http_upstream;
 pub(crate) mod load_balancing;
 mod metrics;
 pub(crate) mod path_match;
@@ -88,6 +89,7 @@ pub use factory::{
     tcp_builtin,
 };
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
+pub use http_upstream::{HttpUpstream, HttpUpstreamRequestPolicy};
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},

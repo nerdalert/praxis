@@ -61,10 +61,7 @@ pub(super) async fn execute(
 
     let err = classify_error(&etype, source);
 
-    let upstream_address = ctx
-        .upstream_for_retry
-        .as_ref()
-        .map_or("unknown", |u| u.address.as_ref());
+    let upstream_address = ctx.upstream_for_retry.as_ref().map_or("unknown", |u| u.address());
     error!(
         error_code = err.code,
         error_message = err.message,

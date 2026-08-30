@@ -13,14 +13,12 @@ use std::{
 };
 
 use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
-use praxis_core::{
-    connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
-};
+use praxis_core::{health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource};
 use praxis_tls::TlsPeerIdentity;
 
 use crate::{
-    FilterError, IterationState, body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode,
-    results::FilterResultSet,
+    FilterError, HttpUpstream, IterationState, body::BodyMode, extensions::RequestExtensions,
+    pipeline::body::merge_body_mode, results::FilterResultSet,
 };
 
 /// Bounded opaque chunks emitted by filters while IRR owns a logical stream.
@@ -457,7 +455,7 @@ pub struct HttpFilterContext<'a> {
     pub rewritten_path: Option<String>,
 
     /// The upstream peer selected by the load balancer filter.
-    pub upstream: Option<Upstream>,
+    pub upstream: Option<HttpUpstream>,
 }
 
 impl HttpFilterContext<'_> {
@@ -468,7 +466,7 @@ impl HttpFilterContext<'_> {
 
     /// Upstream peer address, if selected.
     pub fn upstream_addr(&self) -> Option<&str> {
-        self.upstream.as_ref().map(|u| &*u.address)
+        self.upstream.as_ref().map(HttpUpstream::address)
     }
 
     /// Shared sub-request client, if set.
@@ -1019,12 +1017,14 @@ mod tests {
     fn upstream_addr_returns_value_when_set() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.upstream = Some(Upstream {
-            address: Arc::from("10.0.0.1:8080"),
-            authority: None,
-            tls: None,
-            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
-        });
+        ctx.upstream = Some(HttpUpstream::new(
+            praxis_core::connectivity::Upstream {
+                address: Arc::from("10.0.0.1:8080"),
+                tls: None,
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            },
+            crate::HttpUpstreamRequestPolicy::default(),
+        ));
         assert_eq!(
             ctx.upstream_addr(),
             Some("10.0.0.1:8080"),

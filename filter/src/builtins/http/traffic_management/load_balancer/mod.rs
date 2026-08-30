@@ -256,7 +256,7 @@ impl HttpFilter for LoadBalancerFilter {
         if let (Some(cluster_name), Some(upstream)) = (&ctx.cluster, &ctx.upstream)
             && let Some(entry) = self.clusters.get(cluster_name)
         {
-            entry.strategy.release(&upstream.address);
+            entry.strategy.release(upstream.address());
         }
         if let Some(state) = &ctx.cluster_retry_state {
             state.leave();

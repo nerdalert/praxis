@@ -1255,6 +1255,8 @@ conditions:
     async fn on_response_with_populated_context_continues() {
         use praxis_core::connectivity::{ConnectionOptions, Upstream};
 
+        use crate::{HttpUpstream, HttpUpstreamRequestPolicy};
+
         let filter = AccessLogFilter {
             sample_every: 1,
             counter: AtomicU64::default(),
@@ -1275,12 +1277,14 @@ conditions:
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.client_addr = Some("10.0.0.1".parse().unwrap());
         ctx.cluster = Some(std::sync::Arc::from("backend"));
-        ctx.upstream = Some(Upstream {
-            address: std::sync::Arc::from("10.0.0.2:8080"),
-            authority: None,
-            connection: std::sync::Arc::new(ConnectionOptions::default()),
-            tls: None,
-        });
+        ctx.upstream = Some(HttpUpstream::new(
+            Upstream {
+                address: std::sync::Arc::from("10.0.0.2:8080"),
+                connection: std::sync::Arc::new(ConnectionOptions::default()),
+                tls: None,
+            },
+            HttpUpstreamRequestPolicy::default(),
+        ));
         let mut resp = crate::context::Response {
             headers: http::HeaderMap::new(),
             status: http::StatusCode::OK,

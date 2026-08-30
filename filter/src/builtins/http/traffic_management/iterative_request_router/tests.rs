@@ -9,7 +9,7 @@ use super::{
     DEPTH_HEADER,
     config::{self, IterativeRequestRouterConfig},
 };
-use crate::factory::parse_filter_config;
+use crate::{HttpUpstream, HttpUpstreamRequestPolicy, factory::parse_filter_config};
 
 // ---------------------------------------------------------------------------
 // Config Validation
@@ -3616,6 +3616,24 @@ fn destination_host_rejects_unencodable_address() {
 // Peer Construction
 // ---------------------------------------------------------------------------
 
+#[test]
+fn iterative_request_uses_configured_authority_over_transport_address() {
+    let upstream = HttpUpstream::new(
+        praxis_core::connectivity::Upstream {
+            address: std::sync::Arc::from("10.0.0.1:443"),
+            connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        },
+        HttpUpstreamRequestPolicy::new(Some(http::HeaderValue::from_static("api.example.com"))),
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(http::header::HOST, http::HeaderValue::from_static("caller.example.com"));
+
+    super::apply_selected_request_host(&mut headers, &upstream).unwrap();
+
+    assert_eq!(headers.get(http::header::HOST).unwrap(), "api.example.com");
+}
+
 #[tokio::test]
 async fn build_peer_applies_tls_with_explicit_sni() {
     let tls: praxis_tls::ClusterTls = serde_yaml::from_str("sni: backend.example\nverify: true").unwrap();
@@ -3624,7 +3642,6 @@ async fn build_peer_applies_tls_with_explicit_sni() {
         address: std::sync::Arc::from("127.0.0.1:9443"),
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
-        authority: None,
     };
 
     let peer = super::build_peer(&upstream).await.unwrap();
@@ -3639,7 +3656,6 @@ async fn build_peer_derives_sni_from_hostname_address() {
         address: std::sync::Arc::from("localhost:9443"),
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
-        authority: None,
     };
 
     let peer = super::build_peer(&upstream).await.unwrap();
