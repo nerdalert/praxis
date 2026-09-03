@@ -31,7 +31,7 @@ const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
 /// insert thousands of unique keys per request.
 const MAX_METADATA_ENTRIES: usize = 128;
 
-/// Failure returned when a request metadata value cannot be stored.
+/// Failure returned when request metadata values cannot be stored.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MetadataError {
     /// The metadata key is empty or exceeds the key-size limit.
