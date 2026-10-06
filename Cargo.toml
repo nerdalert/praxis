@@ -60,7 +60,7 @@ notify = "8.2.0"
 object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
 opentelemetry = { version = "0.33.0", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
+opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }
 opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
 pingora-core = { version = "0.10.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
