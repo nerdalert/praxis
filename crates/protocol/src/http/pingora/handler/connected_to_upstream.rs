@@ -59,10 +59,12 @@ pub(super) fn record_attempt_failure(error: &pingora_core::Error, ctx: &mut Ping
         return;
     }
 
-    let error_type = bounded_upstream_error_type(error.etype());
-    for span in [&ctx.upstream_exchange_span, &ctx.upstream_client_span] {
-        span.record("otel.status_code", "ERROR");
-        span.record("error.type", &error_type);
+    if *error.esource() != pingora_core::ErrorSource::Downstream {
+        let error_type = bounded_upstream_error_type(error.etype());
+        for span in [&ctx.upstream_exchange_span, &ctx.upstream_client_span] {
+            span.record("otel.status_code", "ERROR");
+            span.record("error.type", &error_type);
+        }
     }
     close_attempt(ctx);
 }
@@ -92,8 +94,10 @@ fn bounded_upstream_error_type(error: &pingora_core::ErrorType) -> String {
 /// Drop the attempt's child spans, with the exchange ending before its client.
 fn close_attempt(ctx: &mut PingoraRequestCtx) {
     let exchange_span = std::mem::replace(&mut ctx.upstream_exchange_span, Span::none());
+    exchange_span.in_scope(|| {});
     drop(exchange_span);
     let client_span = std::mem::replace(&mut ctx.upstream_client_span, Span::none());
+    client_span.in_scope(|| {});
     drop(client_span);
 }
 

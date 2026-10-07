@@ -537,8 +537,10 @@ impl ProxyHttp for PingoraHttpHandler {
         // Drop the exchange span before the request span so child
         // ends before parent in tracing output.
         let _exchange_span = std::mem::replace(&mut ctx.upstream_exchange_span, tracing::Span::none());
+        _exchange_span.in_scope(|| {});
         drop(_exchange_span);
         let _client_span = std::mem::replace(&mut ctx.upstream_client_span, tracing::Span::none());
+        _client_span.in_scope(|| {});
         drop(_client_span);
         let span = std::mem::replace(&mut ctx.request_span, tracing::Span::none());
         let written_status = session.response_written().map_or(0, |resp| resp.status.as_u16());

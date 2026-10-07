@@ -13,6 +13,8 @@ use http::{HeaderMap, header::HeaderName};
 use opentelemetry::{Context, propagation::TextMapPropagator as _, trace::TraceContextExt as _};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 
+use crate::trace_state::parse_tracestate;
+
 /// W3C parent header name.
 const TRACEPARENT: HeaderName = HeaderName::from_static("traceparent");
 /// W3C trace-state header name.
@@ -84,7 +86,7 @@ impl HeaderCarrier {
             .map(|value| value.to_str().ok())
             .collect::<Option<Vec<_>>>()
             .filter(|members| !members.is_empty())
-            .map(|members| members.join(","));
+            .and_then(|members| parse_tracestate(&members.join(",")));
         if let Some(tracestate) = tracestate {
             values.insert("tracestate".to_owned(), tracestate);
         }
@@ -163,6 +165,41 @@ mod tests {
 
         let context = extract_remote_context(&headers).expect("traceparent stays valid");
         assert!(context.span().span_context().is_valid());
+        assert_eq!(context.span().span_context().trace_state().header(), "");
+    }
+
+    #[test]
+    fn folded_trace_state_is_normalized_and_keeps_the_valid_parent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("traceparent", format!("00-{TRACE_ID}-{PARENT_ID}-01").parse().unwrap());
+        headers.insert("tracestate", "a=1, b=2".parse().unwrap());
+
+        let context = extract_remote_context(&headers).expect("valid remote parent");
+        assert_eq!(context.span().span_context().trace_state().header(), "a=1,b=2");
+    }
+
+    #[test]
+    fn oversized_trace_state_is_trimmed_without_dropping_the_valid_parent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("traceparent", format!("00-{TRACE_ID}-{PARENT_ID}-01").parse().unwrap());
+        let first = format!("a={}", "x".repeat(254));
+        let second = format!("b={}", "x".repeat(253));
+        let valid_512 = format!("{first},{second}");
+        let oversized = format!("{valid_512},c=d");
+        headers.insert("tracestate", oversized.parse().unwrap());
+
+        let context = extract_remote_context(&headers).expect("valid traceparent survives");
+        assert_eq!(context.span().span_context().trace_state().header(), valid_512);
+    }
+
+    #[test]
+    fn invalid_trace_state_does_not_discard_valid_parent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("traceparent", format!("00-{TRACE_ID}-{PARENT_ID}-01").parse().unwrap());
+        headers.insert("tracestate", "a=1, a=2".parse().unwrap());
+
+        let context = extract_remote_context(&headers).expect("valid traceparent survives");
+        assert_eq!(context.span().span_context().trace_id().to_string(), TRACE_ID);
         assert_eq!(context.span().span_context().trace_state().header(), "");
     }
 

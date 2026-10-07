@@ -95,7 +95,6 @@ fn record_upstream_exchange_span(ctx: &PingoraRequestCtx, response: Option<&ping
         .or_else(|| response.map(|resp| resp.status.as_u16()))
     {
         ctx.upstream_exchange_span.record("http.response.status_code", status);
-        praxis_core::subrequest::record_http_client_status(&ctx.upstream_client_span, status);
     }
     ctx.upstream_exchange_span
         .record("http.response.body.size", ctx.response_body_bytes);
