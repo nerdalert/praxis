@@ -5,37 +5,42 @@
 
 #![forbid(unsafe_code)]
 #![cfg(feature = "otel")]
-#![allow(
-    clippy::allow_attributes_without_reason,
+#![expect(
     clippy::arithmetic_side_effects,
-    clippy::as_conversions,
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::cognitive_complexity,
-    clippy::default_trait_access,
-    clippy::disallowed_methods,
-    clippy::doc_markdown,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::items_after_statements,
-    clippy::iter_over_hash_type,
-    clippy::len_zero,
-    clippy::manual_let_else,
-    clippy::min_ident_chars,
-    clippy::needless_raw_strings,
-    clippy::panic,
-    clippy::print_stdout,
-    clippy::redundant_closure_for_method_calls,
-    clippy::shadow_unrelated,
-    clippy::too_many_lines,
-    clippy::unwrap_used,
-    clippy::used_underscore_binding,
-    reason = "collector-backed integration test"
+    reason = "collector tests use bounded wall-clock deadlines and duration arithmetic"
 )]
-
+#![expect(
+    clippy::as_conversions,
+    reason = "tests compare protobuf enum discriminants and fixture wire values"
+)]
+#![expect(
+    clippy::cognitive_complexity,
+    reason = "each end-to-end scenario asserts a multi-hop trace contract"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "synchronous raw-socket fixtures coordinate delayed network events"
+)]
+#![expect(
+    clippy::expect_used,
+    reason = "test setup and assertions fail immediately with contextual diagnostics"
+)]
+#![expect(
+    clippy::panic,
+    reason = "trace assertion helpers panic with the captured trace when required spans are missing"
+)]
+#![expect(
+    clippy::print_stdout,
+    reason = "one diagnostic prints span IDs to aid local collector-test failures"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "collector-backed scenarios keep setup, requests, and exported-span assertions together"
+)]
+#![expect(
+    clippy::used_underscore_binding,
+    reason = "underscore-prefixed tracing guards are explicitly dropped to close spans"
+)]
 //! Collector-backed parentage proof across two in-process Praxis proxies.
 //!
 //! This file is its own test binary because `init_tracing` installs a global
@@ -43,8 +48,8 @@
 //! compare exported IDs and parent IDs instead of matching trace IDs alone.
 
 use std::{
-    io::{Read as _, Write as _},
-    net::{SocketAddr, TcpListener, TcpStream},
+    io::Write as _,
+    net::{SocketAddr, TcpStream},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -66,8 +71,8 @@ use praxis_core::{
     subrequest::{StreamLimits, SubRequest, SubRequestClient, SubRequestConnector},
 };
 use praxis_test_utils::{
-    Backend, free_port, http_send, parse_body, parse_status, start_full_proxy, start_header_echo_backend, start_proxy,
-    start_slow_backend, wait_for_tcp,
+    Backend, free_port, http_send, parse_body, parse_status, read_http_request, spawn_raw_http_backend,
+    start_full_proxy, start_header_echo_backend, start_proxy, start_slow_backend, wait_for_tcp,
 };
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -466,8 +471,6 @@ fn exported_parentage_links_edge_provider_and_backend() {
     reason = "this file is an isolated test binary for the process-global tracing subscriber"
 )]
 fn sampled_remote_parent_overrides_zero_root_rate() {
-    // Each sampler configuration needs a separate process because init_tracing
-    // installs the process-global subscriber.
     if std::env::var_os("PRAXIS_OTEL_ZERO_RATE_CHILD").is_none() {
         let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
             .arg("--exact")
@@ -596,8 +599,8 @@ fn response_attempt_client_spans_record_final_status_and_actual_close() {
     });
     wait_for_tcp(&format!("127.0.0.1:{collector_port}"));
 
-    let (interim_port, interim_server) = spawn_raw_backend(|mut stream| {
-        read_request(&mut stream);
+    let (interim_port, interim_server) = spawn_raw_http_backend(|mut stream| {
+        read_http_request(&mut stream);
         stream
             .write_all(
                 b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n\
@@ -607,8 +610,8 @@ fn response_attempt_client_spans_record_final_status_and_actual_close() {
     });
     let (headers_sent, headers_received) = mpsc::sync_channel(1);
     let (release_body, body_released) = mpsc::sync_channel(1);
-    let (disconnect_port, disconnect_server) = spawn_raw_backend(move |mut stream| {
-        read_request(&mut stream);
+    let (disconnect_port, disconnect_server) = spawn_raw_http_backend(move |mut stream| {
+        read_http_request(&mut stream);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n")
             .expect("write successful upstream response headers");
@@ -617,8 +620,8 @@ fn response_attempt_client_spans_record_final_status_and_actual_close() {
         body_released.recv().expect("wait for downstream disconnect");
         let _write = stream.write_all(&vec![b'x'; 1_048_576]);
     });
-    let (timeout_port, timeout_server) = spawn_raw_backend(|mut stream| {
-        read_request(&mut stream);
+    let (timeout_port, timeout_server) = spawn_raw_http_backend(|mut stream| {
+        read_http_request(&mut stream);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
             .expect("write response headers before delayed body failure");
@@ -626,10 +629,10 @@ fn response_attempt_client_spans_record_final_status_and_actual_close() {
         thread::sleep(Duration::from_secs(1));
         let _write = stream.write_all(b"late");
     });
-    let (step_deadline_port, step_deadline_server) = spawn_raw_backend(|mut stream| {
-        read_request(&mut stream);
+    let (step_deadline_port, step_deadline_server) = spawn_raw_http_backend(|mut stream| {
+        read_http_request(&mut stream);
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nfirst")
             .expect("write streaming subrequest headers");
         stream.flush().expect("flush streaming subrequest headers");
         thread::sleep(Duration::from_millis(700));
@@ -721,7 +724,7 @@ fn response_attempt_client_spans_record_final_status_and_actual_close() {
                 &subrequest,
                 Duration::from_secs(3),
                 StreamLimits {
-                    idle_timeout: Duration::from_secs(2),
+                    idle_timeout: Duration::from_secs(5),
                     max_stream_duration: None,
                     max_total_bytes: None,
                 },
@@ -729,6 +732,12 @@ fn response_attempt_client_spans_record_final_status_and_actual_close() {
             ))
             .await
             .expect("streaming subrequest headers arrive before the filter deadline");
+            let first_chunk = response_body
+                .next_chunk()
+                .await
+                .expect("first streaming body chunk arrives")
+                .expect("backend sends an initial body chunk");
+            assert!(!first_chunk.is_empty(), "initial body chunk is non-empty");
             let deadline = tokio::time::Instant::now() + Duration::from_millis(350);
             let wall_deadline = SystemTime::now() + Duration::from_millis(350);
             let deadline_unix_nanos = u64::try_from(
@@ -813,44 +822,6 @@ fn response_attempt_client_spans_record_final_status_and_actual_close() {
         step_deadline_client.start_time_unix_nano,
         step_deadline_client.end_time_unix_nano
     );
-}
-
-fn spawn_raw_backend(handler: impl FnOnce(TcpStream) + Send + 'static) -> (u16, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind raw HTTP backend");
-    let port = listener.local_addr().expect("backend address").port();
-    let handle = thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept backend request");
-        handler(stream);
-    });
-    (port, handle)
-}
-
-fn read_request(stream: &mut TcpStream) {
-    let mut request = Vec::new();
-    let mut buffer = [0_u8; 4096];
-    let header_end = loop {
-        if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-            break position + 4;
-        }
-        let count = stream.read(&mut buffer).expect("read HTTP request headers");
-        assert_ne!(count, 0, "HTTP request ended before its headers");
-        request.extend_from_slice(&buffer[..count]);
-    };
-    let headers = String::from_utf8_lossy(&request[..header_end]);
-    let body_length = headers
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
-                .flatten()
-        })
-        .unwrap_or(0);
-    while request.len() < header_end + body_length {
-        let count = stream.read(&mut buffer).expect("read HTTP request body");
-        assert_ne!(count, 0, "HTTP request body ended before Content-Length");
-        request.extend_from_slice(&buffer[..count]);
-    }
 }
 
 fn response_attempt_config(
@@ -951,8 +922,8 @@ fn cloud_events_delivery_keeps_the_request_span_as_parent() {
     let (event_received, event_waiter) = mpsc::sync_channel(0);
     let (release_event, event_release) = mpsc::sync_channel(0);
     let (event_finished, event_finish_waiter) = mpsc::sync_channel(0);
-    let (event_port, event_receiver) = spawn_raw_backend(move |mut stream| {
-        read_request(&mut stream);
+    let (event_port, event_receiver) = spawn_raw_http_backend(move |mut stream| {
+        read_http_request(&mut stream);
         event_received
             .send(SystemTime::now())
             .expect("signal CloudEvents delivery started");
@@ -965,7 +936,7 @@ fn cloud_events_delivery_keeps_the_request_span_as_parent() {
             .expect("signal CloudEvents delivery finished");
     });
     let endpoint = format!("http://127.0.0.1:{collector_port}");
-    let config = cloud_events_proxy_config(free_port(), backend.port(), event_port, &endpoint);
+    let config = cloud_events_proxy_config(free_port(), backend.port(), event_port, &endpoint, false);
     let tracing_guard = praxis_core::logging::init_tracing(&config).expect("OTLP tracing setup");
     let proxy = start_full_proxy(&config);
     wait_for_tcp(proxy.addr());
@@ -1050,7 +1021,132 @@ fn cloud_events_delivery_keeps_the_request_span_as_parent() {
 }
 
 #[cfg(feature = "cloud-events-filter")]
-fn cloud_events_proxy_config(listener_port: u16, backend_port: u16, event_port: u16, endpoint: &str) -> Config {
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "this file is an isolated test binary for the process-global tracing subscriber"
+)]
+fn cloud_events_fallback_dispatch_keeps_the_request_span_as_parent() {
+    const CHILD: &str = "PRAXIS_OTEL_CLOUD_EVENTS_FALLBACK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("cloud_events_fallback_dispatch_keeps_the_request_span_as_parent")
+            .env(CHILD, "1")
+            .output()
+            .expect("run fallback CloudEvents tracing test in an isolated process");
+        assert!(
+            output.status.success(),
+            "fallback CloudEvents child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("test cloud_events_fallback_dispatch_keeps_the_request_span_as_parent ... ok"),
+            "fallback CloudEvents child did not execute:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+
+    let collector = CapturedSpans::default();
+    let collector_port = free_port();
+    let collector_addr: SocketAddr = ([127, 0, 0, 1], collector_port).into();
+    let collector_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("collector runtime");
+    let collector_service = collector.clone();
+    collector_runtime.spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(TraceServiceServer::new(collector_service))
+            .serve(collector_addr)
+            .await
+            .expect("collector server");
+    });
+    wait_for_tcp(&format!("127.0.0.1:{collector_port}"));
+
+    let (event_sent, event_waiter) = mpsc::sync_channel(0);
+    let (event_port, event_receiver) = spawn_raw_http_backend(move |mut stream| {
+        read_http_request(&mut stream);
+        event_sent.send(()).expect("signal fallback event delivery");
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .expect("complete fallback CloudEvents delivery");
+    });
+    let (truncated_port, truncated_receiver) = spawn_raw_http_backend(|mut stream| {
+        read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\npartial")
+            .expect("write incomplete upstream response body");
+    });
+    let endpoint = format!("http://127.0.0.1:{collector_port}");
+    let config = cloud_events_proxy_config(free_port(), truncated_port, event_port, &endpoint, true);
+    let tracing_guard = praxis_core::logging::init_tracing(&config).expect("OTLP tracing setup");
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+
+    let trace_id = "61616161616161616161616161616161";
+    let parent_id = "7171717171717171";
+    let response = http_send(
+        proxy.addr(),
+        &format!(
+            "GET /cloud-events-fallback HTTP/1.1\r\nHost: localhost\r\ntraceparent: 00-{trace_id}-{parent_id}-01\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert_eq!(parse_status(&response), 200, "upstream headers reached the client");
+    truncated_receiver.join().expect("truncated backend exits");
+    event_waiter
+        .recv_timeout(Duration::from_secs(3))
+        .expect("access-log fallback dispatches the deferred CloudEvent");
+    event_receiver.join().expect("CloudEvents receiver exits");
+
+    drop(proxy);
+    drop(tracing_guard);
+    let spans = wait_for_spans(&collector, 4);
+    let trace_spans = spans
+        .iter()
+        .filter(|span| hex(&span.trace_id) == trace_id)
+        .collect::<Vec<_>>();
+    let server = trace_spans
+        .iter()
+        .copied()
+        .find(|span| span.kind == SpanKind::Server as i32 && hex(&span.parent_span_id) == parent_id)
+        .expect("request SERVER span with the supplied remote parent");
+    let delivery = trace_spans
+        .iter()
+        .copied()
+        .find(|span| span.name == "cloud_events.delivery")
+        .expect("fallback delivery has its own span");
+    assert_eq!(
+        delivery.parent_span_id, server.span_id,
+        "fallback cloud_events.delivery span is a child of the request SERVER span"
+    );
+    let delivery_client = trace_spans
+        .iter()
+        .copied()
+        .find(|span| span.kind == SpanKind::Client as i32 && u16_attribute(span, "server.port") == Some(event_port))
+        .expect("fallback CloudEvents delivery CLIENT span");
+    assert_eq!(
+        delivery_client.parent_span_id, delivery.span_id,
+        "fallback delivery CLIENT span is a child of cloud_events.delivery"
+    );
+}
+
+#[cfg(feature = "cloud-events-filter")]
+fn cloud_events_proxy_config(
+    listener_port: u16,
+    backend_port: u16,
+    event_port: u16,
+    endpoint: &str,
+    include_access_log: bool,
+) -> Config {
+    let access_log_filter = if include_access_log {
+        "      - filter: access_log\n"
+    } else {
+        ""
+    };
     let yaml = format!(
         r#"
 listeners:
@@ -1066,7 +1162,7 @@ filter_chains:
         destination: "http://127.0.0.1:{event_port}/events"
         source: urn:praxis:test
         type: test.response.completed
-      - filter: router
+{access_log_filter}      - filter: router
         routes:
           - path_prefix: "/"
             cluster: backend
