@@ -775,7 +775,7 @@ mod tests {
 
         let registry = crate::FilterRegistry::with_builtins();
         let pipeline = Arc::new(crate::FilterPipeline::build(&mut [], &registry).unwrap());
-        let step_deadline = Instant::now() + Duration::from_millis(150);
+        let step_deadline = Instant::now() + Duration::from_secs(5);
         let continuation = super::super::continuation::FilteredSubrequestContinuation {
             pipeline,
             request_snapshot: crate::Request {
@@ -811,6 +811,7 @@ mod tests {
             Some(Bytes::from_static(b"hello")),
             "the first chunk arrives before the step deadline"
         );
+        filtered.continuation.step_deadline = Instant::now() + Duration::from_millis(150);
         assert_eq!(
             crate::actions::StreamingResponseBody::next_chunk(&mut filtered)
                 .await
