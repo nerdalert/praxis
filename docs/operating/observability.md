@@ -26,8 +26,10 @@ roots. Praxis never disables peer or hostname verification as a fallback. The
 HTTP/protobuf exporter remains governed by its URL scheme and is not changed by
 the gRPC trust configuration.
 
-See the [OTLP tracing configuration example](../../examples/configs/observability/tracing-otlp.yaml)
-for endpoint, sampling, batching, and header settings.
+See the [OTLP tracing configuration example][otlp-tracing-config] for endpoint,
+sampling, batching, and header settings.
+
+[otlp-tracing-config]: ../../examples/configs/observability/tracing-otlp.yaml
 
 ## Admin and Metrics Endpoints
 

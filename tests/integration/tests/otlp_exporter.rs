@@ -353,6 +353,7 @@ fn otlp_exporter_tls_and_plaintext_contract() {
     );
     assert!(!http_output.contains(TEST_AUTHORIZATION));
 
+    let spans_before_schemeless = http_state.span_count.load(Ordering::Relaxed);
     let schemeless_http = run_child(&ChildScenario {
         mode: "schemeless-insecure",
         endpoint: Some(&format!("127.0.0.1:{http_port}")),
@@ -362,7 +363,7 @@ fn otlp_exporter_tls_and_plaintext_contract() {
         expected_tls_error: None,
     });
     assert!(
-        http_state.span_count.load(Ordering::Relaxed) > 0,
+        http_state.span_count.load(Ordering::Relaxed) > spans_before_schemeless,
         "scheme-less endpoint with INSECURE=true did not use the existing HTTP path"
     );
     assert!(!schemeless_http.contains(TEST_AUTHORIZATION));
